@@ -9,9 +9,12 @@ Computes SHA-256 hashes on the fly, fetches paired PDS labels when provided, and
 import hashlib
 import json
 import os
+import tempfile
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
+import httpx
 from app.ingestion.http_client import create_async_http_client
 from app.ingestion.pds_label import extract_pds3_metadata
 from app.schemas.dataset import (
@@ -237,6 +240,114 @@ class AcquisitionService:
             f"Downloaded {total_downloaded} bytes at {manifest.download_timestamp_utc.isoformat()} (SHA-256: {calculated_sha[:12]}...)"
         )
         return manifest
+
+    async def download_imagery_file(
+        self, *, product_id: str, source_url: str, filename: str,
+        expected_md5: Optional[str] = None, max_bytes: int = 2_000_000_000,
+        timeout_seconds: float = 180.0,
+    ) -> Dict[str, Any]:
+        """Serialize same-path acquisition across workers and delegate the stream."""
+        target = self.raw_data_dir / "imagery" / Path(filename).name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = target.with_suffix(target.suffix + ".acquiring")
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as exc:
+            raise RuntimeError(f"An acquisition is already in progress for {target.name}") from exc
+        os.close(fd)
+        try:
+            for attempt in range(3):
+                try:
+                    return await self._download_imagery_file_locked(
+                        product_id=product_id, source_url=source_url, filename=filename,
+                        expected_md5=expected_md5, max_bytes=max_bytes, timeout_seconds=timeout_seconds,
+                    )
+                except Exception as exc:
+                    transient_status = isinstance(exc, RuntimeError) and any(
+                        token in str(exc) for token in ("HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504")
+                    )
+                    if attempt == 2 or not (transient_status or isinstance(exc, (httpx.TimeoutException, httpx.TransportError))):
+                        raise
+                    await asyncio.sleep(0.25 * (2 ** attempt))
+        finally:
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+
+    async def _download_imagery_file_locked(
+        self, *, product_id: str, source_url: str, filename: str,
+        expected_md5: Optional[str], max_bytes: int, timeout_seconds: float,
+    ) -> Dict[str, Any]:
+        """Stream an explicitly requested immutable image product and verify it."""
+        from urllib.parse import urlparse
+        allowed_hosts = {"pds-imaging.jpl.nasa.gov", "planetarydata.jpl.nasa.gov", "hirise.lpl.arizona.edu"}
+        if urlparse(source_url).hostname not in allowed_hosts or urlparse(source_url).scheme != "https":
+            raise ValueError("Imagery downloads are restricted to the verified PDS Imaging HTTPS host")
+        clean_name = Path(filename).name
+        if clean_name in {"", ".", ".."}:
+            raise ValueError("Archive did not provide a safe original filename")
+        target = self.raw_data_dir / "imagery" / clean_name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            existing_hash = self._compute_file_sha256(target)
+            sidecar = target.parent / f".{target.name}.retrieval.json"
+            if sidecar.exists():
+                meta = json.loads(sidecar.read_text(encoding="utf-8"))
+                if meta.get("source_url") == source_url and meta.get("sha256_checksum") == existing_hash:
+                    return {**meta, "local_file_path": str(target), "reused_verified_file": True}
+            raise FileExistsError(f"Refusing to overwrite an existing imagery product: {target}")
+        tmp_fd, tmp_name = tempfile.mkstemp(prefix=f".{clean_name}.", suffix=".partial", dir=target.parent)
+        os.close(tmp_fd)
+        temp_path = Path(tmp_name)
+        sha = hashlib.sha256(); md5 = hashlib.md5(); total = 0; response_code = 0; content_type = None
+        declared_size = None
+        try:
+            async with create_async_http_client(timeout_seconds=timeout_seconds) as client:
+                async with client.stream("GET", source_url) as response:
+                    if urlparse(str(response.url)).hostname not in allowed_hosts:
+                        raise ValueError("PDS IMG redirected outside the verified NASA data hosts")
+                    response_code = response.status_code; content_type = response.headers.get("content-type")
+                    if response.status_code != 200:
+                        raise RuntimeError(f"PDS imagery download returned HTTP {response.status_code}")
+                    declared = response.headers.get("content-length")
+                    if declared and int(declared) > max_bytes:
+                        raise ValueError(f"Image product exceeds the {max_bytes} byte acquisition limit")
+                    declared_size = int(declared) if declared else None
+                    with temp_path.open("wb") as stream:
+                        async for chunk in response.aiter_bytes(chunk_size=65536):
+                            total += len(chunk)
+                            if total > max_bytes:
+                                raise ValueError(f"Image product exceeds the {max_bytes} byte acquisition limit")
+                            sha.update(chunk); md5.update(chunk); stream.write(chunk)
+            if total == 0:
+                raise ValueError("Archive returned an empty image product")
+            if declared_size is not None and declared_size != total:
+                raise ValueError(f"Truncated or inconsistent product: received {total} bytes, archive declared {declared_size}")
+            with temp_path.open("rb") as stream:
+                prefix = stream.read(512).lstrip().lower()
+            if (content_type or "").lower().startswith("text/html") or prefix.startswith((b"<html", b"<!doctype html")):
+                raise ValueError("Archive returned an HTML error page instead of an image")
+            if Path(clean_name).suffix.lower() in {".jp2", ".j2k"}:
+                with temp_path.open("rb") as stream:
+                    signature = stream.read(12)
+                if not (signature.startswith(b"\x00\x00\x00\x0cjP  \r\n\x87\n") or signature.startswith(b"\xff\x4f\xff\x51")):
+                    raise ValueError("Downloaded JPEG 2000 product lacks a valid JP2 or codestream signature")
+            actual_md5 = md5.hexdigest()
+            if expected_md5 and actual_md5.lower() != expected_md5.lower():
+                raise ValueError(f"Archive MD5 mismatch: calculated {actual_md5}, expected {expected_md5}")
+            os.replace(temp_path, target)
+            metadata = {"file_name": clean_name, "source_url": source_url, "http_status": response_code,
+                        "content_type": content_type, "retrieval_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                        "sha256_checksum": sha.hexdigest(), "md5_checksum": actual_md5, "byte_size": total,
+                        "archive_md5_verified": bool(expected_md5), "product_id": product_id,
+                        "local_file_path": str(target), "reused_verified_file": False}
+            sidecar = target.parent / f".{target.name}.retrieval.json"
+            tmp_sidecar = sidecar.with_suffix(".tmp"); tmp_sidecar.write_text(json.dumps(metadata, indent=2), encoding="utf-8"); os.replace(tmp_sidecar, sidecar)
+            return metadata
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
 
     @staticmethod
     def _apply_pds3_label_verification(dataset: Dataset, label_path: Path) -> None:

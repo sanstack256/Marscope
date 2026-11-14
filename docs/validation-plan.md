@@ -103,5 +103,15 @@ MARSCOPE implements a multi-tier testing and validation framework ensuring scien
 - `python3 -m compileall -q app` in `backend`: passed.
 - `git diff --check`: passed at the time of the initial check; rerun after documentation edits before committing.
 - No browser-based gesture testing or before/after FPS, frame-time, CPU, memory, rerender, switch-time, panorama-load, or terrain-load measurement was performed.
-- No real Navcam product integration test or NASA product acquisition was performed. No live archive search result is counted as a discovered or acquired MARSCOPE panorama.
+- No real Navcam product integration or acquisition was performed; the acquired MRO HiRISE RDR original is recorded below. No live archive search result is counted as a discovered or acquired MARSCOPE panorama.
 - Acceptance items requiring four synchronized modes, dynamic panorama discovery/viewing, DEM-derived terrain geometry, route-sketch synchronization, or actual NASA image verification remain unimplemented.
+
+## Imagery validation
+
+Offline test command: `cd backend && pytest -q`. These tests use small synthetic fixtures explicitly identified as fixtures, and exercise Atlas response normalization, original product identity, dimensions, checksums, metadata gaps, and catalogue persistence. They require no NASA data or network access.
+
+NASA integration test command: `cd backend && NASA_INTEGRATION=1 pytest -m nasa_integration -q -s`. It queries ODE for all three prioritized MSL Navcam datasets and exact PDS Atlas MSL/Navcam, printing found/downloaded/checksum/parsed state. The currently observed live response reports invalid IIPT and is reported as unavailable, not as an empty successful result. No original product has been downloaded by this test.
+
+Panorama validation remains pending until an individual archive product is acquired and its label/image content supports dimensions, projection, angular coverage, orientation, and station association. No synthetic or inferred panorama is accepted.
+
+The live NASA integration run on 2026-11-14 queried ODE for `MSL-M-NAVCAM-5-RDR-V1.0`, `MSL-M-NAVCAM-5-RDR-MOSAIC-V1.0`, and `MSL-M-NAVCAM-2-EDR-V1.0`. All three are reported individually by the test; the current ODE response for the `MSL/NAVCAM/RDR` combination is `Invalid IIPT`, so archive discovery is unavailable there rather than an empty successful result. Atlas independently returned 0 for its exact MSL/Navcam instrument filter. Three broader MSL/MSAM IMG records were returned and persisted; all three image and label URLs returned HTTP 404. ODE also returned one MRO HiRISE RDR and one MRO CTX EDR product with center coordinates and footprints. One HiRISE PDS3 label was retrieved and parsed, and one original 307,736,024-byte JP2 was acquired and verified for HTTP content length and JP2 signature. Its SHA-256 was computed; no archive checksum was supplied, so archive checksum comparisons verified remain 0. Across five persisted records, panorama eligibility is 0 and ODE-sourced geographic associations are 2.

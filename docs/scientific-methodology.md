@@ -80,3 +80,9 @@ Candidate locations are ranked strictly by transparent physical and spatial metr
 # Resolution suitability policy (v1.0.0)
 
 `backend/app/mobility/policies/resolution_v1.json` records threshold values, units, version, provenance, rationale, and valid domain. Values are classified as engineering recommendations or unvalidated heuristics. A `supported` result means only that effective pixel spacing passes the named MARSCOPE screen. It does not guarantee feature detection, slope accuracy, source accuracy, or safe traversal. Source accuracy, terrain-feature scale, observation geometry, and product-specific processing are not incorporated by the current policy and remain unavailable. The special 100 m/px regional TRI branch and the 500 m/px local-slope regional-approximation boundary are explicitly policy parameters, not hidden constants.
+
+## Imagery geometry and panorama claims
+
+The imagery catalogue preserves coordinate convention and CRS separately from coordinates. ODE states its search bounding boxes use planetocentric latitude and positive-east longitude 0–360; this convention is not applied to other sources without evidence. Earth WGS84 is not used for Mars image associations.
+
+Panorama eligibility defaults to `panorama_eligibility_unverified`. A product is not considered cylindrical/360-degree eligible unless image content, dimensions, projection, horizontal and vertical angular coverage, orientation when available, camera/instrument metadata, and observation/geographic association are established from the product and label. Dataset or product names alone are insufficient. No indexed record has yet been classified as panorama eligible.

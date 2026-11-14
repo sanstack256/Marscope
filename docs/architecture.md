@@ -102,3 +102,9 @@ graph TD
 # Prompt 9 explorer audit status (2026-11-14)
 
 The current frontend remains a Cesium globe with a 3D ellipsoid, 2D and Columbus view morphs, the existing dynamic local/WMTS layer catalog, destination inspection, and composition markers. Request-render mode is enabled; camera telemetry is throttled and computed from Cesium state; marker entities are held in a stable `CustomDataSource` and reconciled by ID. The camera starts globally and Gale is no longer a universal start/focus value. There is not yet a shared four-mode explorer, DEM-derived terrain provider/mesh pipeline, route sketch UI, Navcam image catalog, or panorama viewer. Do not infer these from the existing mobility APIs.
+
+## Imagery catalogue architecture
+
+Product-level image records live alongside (not as a competing registry to) `DatasetCatalogService`. `ImageryArchiveService` queries the PDS Imaging Atlas using bounded structured Elasticsearch requests, normalizes actual archive responses into typed `ImageryProduct` records, and persists a product catalogue under `datasets/catalog/imagery_products/catalog.json`, nested so the dataset-only registry does not misread product records. `AcquisitionService.download_imagery_file` extends the established downloader with streaming, a size cap, atomic writes, MD5 comparison, SHA-256, and refusal to overwrite. Existing `parse_pds3_label` is reused; XML labels are retained and parsed through ElementTree.
+
+Routes are under `/api/imagery`: status, observed dataset IDs, search, ODE search, product metadata, label retrieval, queued acquisition/status, eligibility, panoramas, and coverage. Frontend page `/imagery` displays live archive results and request errors distinctly from successful empty searches. ODE coverage/footprints are not fabricated from Atlas records. Product content assessment, geographic station matching, and camera pose remain future work.

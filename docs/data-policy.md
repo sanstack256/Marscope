@@ -61,3 +61,11 @@ To preserve absolute scientific authenticity:
 # Prompt 9 imagery and terrain availability
 
 No MSL Navcam panorama products have been acquired, checksummed, or parsed in this workspace. Do not draw panorama stations, imply 360-degree coverage, or infer orientation from product names. The existing Cesium ellipsoid terrain is a reference surface, not DEM geometry. Local DEM analysis and raster display do not mean a ground-level 3D mesh is available. Dataset-level PDS records establish archive existence only; product counts, image coverage, projection, and camera pose remain unknown until verified against actual products and labels.
+
+## Imagery product records
+
+Individual image records extend the dataset-level registry; they do not replace it. Archive results are provenance-bearing product records in `datasets/catalog/imagery_products/catalog.json`. Raw labels and image products remain in `datasets/raw/`; processed derivatives belong in `datasets/processed/`.
+
+Acquisition is restricted to HTTPS on the PDS Imaging host, capped at 2 GB, streamed to a temporary file, and atomically committed after nonempty and file-type checks. SHA-256 is always calculated; Atlas MD5 is compared when present. Existing products are reused only when their retrieval sidecar matches source URL and SHA-256; otherwise overwrite is refused. An HTTP 200 alone never means verified. Public archive access does not establish reuse rights; rights remain `unverified` pending product-specific terms.
+
+Original label files are retained. PDS3 ODL labels use the existing parser; PDS4 XML is retained and parsed without discarding source XML. Missing product, projection, coordinate, footprint, and rights metadata stays null or explicitly unverified. No panorama or geographic station is inferred from a dataset name.

@@ -122,9 +122,15 @@ export function MarsGlobeViewer() {
         let telemetryTimer: ReturnType<typeof setTimeout> | null = null;
         const updateTelemetry = () => {
           if (!viewer || viewer.isDestroyed()) return;
+          const headingRadians = viewer.camera.heading;
+          // Cesium can briefly expose an undefined heading while the camera is
+          // initializing or changing scene modes. Skip this telemetry sample;
+          // the next camera event will retry once the orientation is available.
+          if (!Number.isFinite(headingRadians)) return;
+
           const carto = marsEllipsoid.cartesianToCartographic(viewer.camera.position);
           const altKm = carto ? Math.max(0.05, carto.height / 1000.0) : 0;
-          const headingDeg = ((Cesium.Math.toDegrees(viewer.camera.heading) % 360) + 360) % 360;
+          const headingDeg = ((Cesium.Math.toDegrees(headingRadians) % 360) + 360) % 360;
           const centerRay = viewer.camera.getPickRay(new Cesium.Cartesian2(
             viewer.scene.canvas.clientWidth / 2,
             viewer.scene.canvas.clientHeight / 2,

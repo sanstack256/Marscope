@@ -13,6 +13,7 @@ import {
   GitCompare,
   PlayCircle,
   Database,
+  Images,
   Settings,
   ChevronRight,
 } from "lucide-react";
@@ -28,6 +29,7 @@ const ICON_MAP: Record<string, React.ElementType> = {
   "/routes": GitCompare,
   "/simulation": PlayCircle,
   "/evidence": Database,
+  "/imagery": Images,
   "/settings": Settings,
 };
 
@@ -40,6 +42,7 @@ const NAV_LINKS = [
   { name: "Route Comparison", href: "/routes" },
   { name: "Mission Simulation", href: "/simulation" },
   { name: "Evidence & Provenance", href: "/evidence" },
+  { name: "NASA Imagery Catalogue", href: "/imagery" },
   { name: "Mission Assumptions", href: "/settings" },
 ];
 
