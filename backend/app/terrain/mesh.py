@@ -117,6 +117,8 @@ class TerrainMeshManifestResponse(BaseModel):
     tiles: List[MeshTileDescriptor]
     available_dems: List[MeshDemSummary]
     resolution_suitability: Dict[str, Any] = Field(default_factory=dict)
+    elevation_range_m: Optional[Dict[str, float]] = None
+    roughness_range_m: Optional[Dict[str, float]] = None
 
 
 class TerrainMeshTileResponse(BaseModel):
@@ -134,6 +136,7 @@ class TerrainMeshTileResponse(BaseModel):
     native_resolution_m: Optional[float] = None
     elevations_m: List[Optional[float]]
     valid_mask: List[int]
+    normals: Optional[List[float]] = None
     slope_deg: Optional[List[Optional[float]]] = None
     roughness_tri_m: Optional[List[Optional[float]]] = None
     valid_vertex_count: int
@@ -394,6 +397,14 @@ class TerrainMeshService:
         )
         suit_dump = {k: v.model_dump() for k, v in suit.items()}
 
+        region_stats = self._get_region_render_stats(
+            ds.id,
+            req_bounds["min_lat"],
+            req_bounds["max_lat"],
+            req_bounds["min_lon"],
+            req_bounds["max_lon"],
+        )
+
         return TerrainMeshManifestResponse(
             dataset_id=ds.id,
             product_id=ds.product_id,
@@ -410,7 +421,60 @@ class TerrainMeshService:
             tiles=tiles,
             available_dems=self.list_available_dem_summaries(),
             resolution_suitability=suit_dump,
+            elevation_range_m=region_stats.get("elevation_range_m"),
+            roughness_range_m=region_stats.get("roughness_range_m"),
         )
+
+    def _get_region_render_stats(
+        self,
+        dataset_id: str,
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+    ) -> Dict[str, Any]:
+        """
+        Compute dataset/region-wide min/max elevation and 98th-percentile TRI so all
+        adjacent LOD tiles render with identical color normalization across seams.
+        """
+        cache_key = f"stats:{dataset_id}:{min_lat:.6f}:{max_lat:.6f}:{min_lon:.6f}:{max_lon:.6f}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        grid_n = 65
+        tile = self.get_mesh_tile(
+            tile_id="custom",
+            dataset_id=dataset_id,
+            min_lat=min_lat,
+            max_lat=max_lat,
+            min_lon=min_lon,
+            max_lon=max_lon,
+            grid_size=grid_n,
+            include_derivatives=True,
+        )
+        elev_fin = [float(v) for v in tile.elevations_m if v is not None]
+        tri_fin = [float(v) for v in (tile.roughness_tri_m or []) if v is not None]
+
+        elev_range = None
+        if elev_fin:
+            e_min = float(min(elev_fin))
+            e_max = max(e_min + 1.0, float(max(elev_fin)))
+            elev_range = {"min_m": round(e_min, 3), "max_m": round(e_max, 3)}
+
+        tri_range = None
+        if tri_fin:
+            t_min = float(min(tri_fin))
+            t_p98 = max(t_min + 0.5, float(np.percentile(np.array(tri_fin, dtype=np.float64), 98)))
+            tri_range = {"min_m": round(t_min, 3), "max_m": round(t_p98, 3)}
+
+        stats = {
+            "elevation_range_m": elev_range,
+            "roughness_range_m": tri_range,
+        }
+        self._cache_put(cache_key, stats)
+        self._cache_put(f"stats_default:{dataset_id}", stats)
+        return stats
 
     @staticmethod
     def _sample_dem_grid(
@@ -436,16 +500,26 @@ class TerrainMeshService:
 
         p_rows = grid_rows + 2
         p_cols = grid_cols + 2
-        lons = np.array([min_lon + (c - 1) * d_lon for c in range(p_cols)], dtype=np.float64)
-        lats = np.array([max_lat - (r - 1) * d_lat for r in range(p_rows)], dtype=np.float64)
+        lons = np.empty(p_cols, dtype=np.float64)
+        lats = np.empty(p_rows, dtype=np.float64)
+        lons[1:-1] = np.linspace(min_lon, max_lon, grid_cols, dtype=np.float64)
+        lons[0] = min_lon - d_lon
+        lons[-1] = max_lon + d_lon
+        lats[1:-1] = np.linspace(max_lat, min_lat, grid_rows, dtype=np.float64)
+        lats[0] = max_lat + d_lat
+        lats[-1] = min_lat - d_lat
 
         rb = reader.bounds
         q_lons = np.where((rb.right > 180.0) & (lons < 0.0), lons + 360.0, lons)
 
         # Compute bounding pixel window covering padded grid + 2px interpolation margin
         inv_t = ~reader.transform
-        c_min_f, r_max_f = inv_t @ (float(np.min(q_lons)), float(np.min(lats)))
-        c_max_f, r_min_f = inv_t @ (float(np.max(q_lons)), float(np.max(lats)))
+        x_min, x_max = float(np.min(q_lons)), float(np.max(q_lons))
+        y_min, y_max = float(np.min(lats)), float(np.max(lats))
+        c_min_f = inv_t.a * x_min + inv_t.b * y_min + inv_t.c
+        r_max_f = inv_t.d * x_min + inv_t.e * y_min + inv_t.f
+        c_max_f = inv_t.a * x_max + inv_t.b * y_max + inv_t.c
+        r_min_f = inv_t.d * x_max + inv_t.e * y_max + inv_t.f
 
         c0_raw = int(math.floor(min(c_min_f, c_max_f))) - 2
         c1_raw = int(math.ceil(max(c_min_f, c_max_f))) + 3
@@ -504,49 +578,55 @@ class TerrainMeshService:
         ph, pw = patch_clean.shape
 
         # Vectorized fractional pixel coordinates (pixel centers are at +0.5)
-        col_coords, _ = patch_inv @ (q_lons, np.full_like(q_lons, center_lat))
-        _, row_coords = patch_inv @ (np.full_like(lats, q_lons[0]), lats)
+        col_coords = patch_inv.a * q_lons + patch_inv.b * center_lat + patch_inv.c
+        row_coords = patch_inv.d * float(q_lons[0]) + patch_inv.e * lats + patch_inv.f
 
-        # In-bounds mask
+        # In-bounds mask across the valid [-0.5, ph-0.5] x [-0.5, pw-0.5] raster footprint.
+        # Clamped bilinear on the outer 0.5px boundary rim ensures continuous border sampling
+        # across adjacent tiles instead of nearest-pixel 0.5 rounding discontinuities.
         c_grid = np.broadcast_to(col_coords[None, :], (p_rows, p_cols)) - 0.5
         r_grid = np.broadcast_to(row_coords[:, None], (p_rows, p_cols)) - 0.5
 
-        c_i0 = np.floor(c_grid).astype(np.int64)
-        r_i0 = np.floor(r_grid).astype(np.int64)
-        dc = c_grid - c_i0
-        dr = r_grid - r_i0
-
-        in_bilinear = (r_i0 >= 0) & (r_i0 + 1 < ph) & (c_i0 >= 0) & (c_i0 + 1 < pw)
-        if np.any(in_bilinear):
-            rr = r_i0[in_bilinear]
-            cc = c_i0[in_bilinear]
-            drc = dr[in_bilinear]
-            dcc = dc[in_bilinear]
-            z00 = patch_clean[rr, cc]
-            z01 = patch_clean[rr, cc + 1]
-            z10 = patch_clean[rr + 1, cc]
-            z11 = patch_clean[rr + 1, cc + 1]
+        eps = 1e-6
+        in_extent = (
+            (r_grid >= -0.5 - eps)
+            & (r_grid <= (ph - 0.5) + eps)
+            & (c_grid >= -0.5 - eps)
+            & (c_grid <= (pw - 0.5) + eps)
+        )
+        if np.any(in_extent):
+            rc = np.clip(r_grid[in_extent], 0.0, max(0.0, float(ph - 1)))
+            cc = np.clip(c_grid[in_extent], 0.0, max(0.0, float(pw - 1)))
+            r0_idx = (
+                np.minimum(np.floor(rc).astype(np.int64), ph - 2)
+                if ph > 1
+                else np.zeros(rc.shape, dtype=np.int64)
+            )
+            c0_idx = (
+                np.minimum(np.floor(cc).astype(np.int64), pw - 2)
+                if pw > 1
+                else np.zeros(cc.shape, dtype=np.int64)
+            )
+            r1_idx = np.minimum(ph - 1, r0_idx + 1)
+            c1_idx = np.minimum(pw - 1, c0_idx + 1)
+            drc = rc - r0_idx
+            dcc = cc - c0_idx
+            z00 = patch_clean[r0_idx, c0_idx]
+            z01 = patch_clean[r0_idx, c1_idx]
+            z10 = patch_clean[r1_idx, c0_idx]
+            z11 = patch_clean[r1_idx, c1_idx]
             all4 = np.isfinite(z00) & np.isfinite(z01) & np.isfinite(z10) & np.isfinite(z11)
-            vals = np.where(
-                all4,
-                z00 * (1.0 - drc) * (1.0 - dcc)
-                + z01 * (1.0 - drc) * dcc
-                + z10 * drc * (1.0 - dcc)
-                + z11 * drc * dcc,
-                np.nan,
+            vals = (
+                np.where(all4, z00, 0.0) * (1.0 - drc) * (1.0 - dcc)
+                + np.where(all4, z01, 0.0) * (1.0 - drc) * dcc
+                + np.where(all4, z10, 0.0) * drc * (1.0 - dcc)
+                + np.where(all4, z11, 0.0) * drc * dcc
             )
             # If on swath border where nearest pixel itself is valid, fall back to nearest
-            nearest_r = np.rint(r_grid[in_bilinear]).astype(np.int64)
-            nearest_c = np.rint(c_grid[in_bilinear]).astype(np.int64)
-            z_near = patch_clean[nearest_r, nearest_c]
-            out[in_bilinear] = np.where(all4, vals, z_near)
-
-        # Outer edge pixels strictly touching raster edge
-        c_near = np.rint(c_grid).astype(np.int64)
-        r_near = np.rint(r_grid).astype(np.int64)
-        edge_only = (~in_bilinear) & (r_near >= 0) & (r_near < ph) & (c_near >= 0) & (c_near < pw)
-        if np.any(edge_only):
-            out[edge_only] = patch_clean[r_near[edge_only], c_near[edge_only]]
+            near_r = np.clip(np.rint(rc).astype(np.int64), 0, ph - 1)
+            near_c = np.clip(np.rint(cc).astype(np.int64), 0, pw - 1)
+            z_near = patch_clean[near_r, near_c]
+            out[in_extent] = np.where(all4, vals, z_near)
 
         return out, dx_m, dy_m
 
@@ -702,6 +782,55 @@ class TerrainMeshService:
         z_min = round(float(np.min(z_valid)), 3) if z_valid.size > 0 else None
         z_max = round(float(np.max(z_valid)), 3) if z_valid.size > 0 else None
 
+        # Cross-tile continuous vertex normals computed from padded_z in Three.js (+X East, +Y Up, +Z South)
+        step_dx_m = max(1e-3, (tile_bounds["max_lon"] - tile_bounds["min_lon"]) / float(max(1, grid_size - 1)) * m_per_deg_lon)
+        step_dy_m = max(1e-3, (tile_bounds["max_lat"] - tile_bounds["min_lat"]) / float(max(1, grid_size - 1)) * m_per_deg_lat)
+        z_c = center_z
+        z_w = padded_z[1:-1, :-2]
+        z_e = padded_z[1:-1, 2:]
+        z_n = padded_z[:-2, 1:-1]
+        z_s = padded_z[2:, 1:-1]
+
+        fin_c = np.isfinite(z_c)
+        fin_w = np.isfinite(z_w)
+        fin_e = np.isfinite(z_e)
+        fin_n = np.isfinite(z_n)
+        fin_s = np.isfinite(z_s)
+
+        dz_dx = np.where(
+            fin_e & fin_w,
+            (np.where(fin_e, z_e, 0.0) - np.where(fin_w, z_w, 0.0)) / (2.0 * step_dx_m),
+            np.where(
+                fin_e & fin_c,
+                (np.where(fin_e, z_e, 0.0) - np.where(fin_c, z_c, 0.0)) / step_dx_m,
+                np.where(
+                    fin_c & fin_w,
+                    (np.where(fin_c, z_c, 0.0) - np.where(fin_w, z_w, 0.0)) / step_dx_m,
+                    0.0,
+                ),
+            ),
+        )
+        dz_dsouth = np.where(
+            fin_s & fin_n,
+            (np.where(fin_s, z_s, 0.0) - np.where(fin_n, z_n, 0.0)) / (2.0 * step_dy_m),
+            np.where(
+                fin_s & fin_c,
+                (np.where(fin_s, z_s, 0.0) - np.where(fin_c, z_c, 0.0)) / step_dy_m,
+                np.where(
+                    fin_c & fin_n,
+                    (np.where(fin_c, z_c, 0.0) - np.where(fin_n, z_n, 0.0)) / step_dy_m,
+                    0.0,
+                ),
+            ),
+        )
+        nx = -dz_dx
+        ny = np.ones_like(nx, dtype=np.float64)
+        nz = -dz_dsouth
+        n_len = np.sqrt(nx * nx + ny * ny + nz * nz)
+        n_len = np.where(n_len > 1e-12, n_len, 1.0)
+        normals_arr = np.stack((nx / n_len, ny / n_len, nz / n_len), axis=-1).reshape(-1)
+        normals_list = [round(float(v), 5) for v in normals_arr]
+
         resp = TerrainMeshTileResponse(
             tile_id=tile_id.upper() if tile_id.lower() != "custom" else "CUSTOM",
             dataset_id=ds.id,
@@ -715,6 +844,7 @@ class TerrainMeshService:
             native_resolution_m=ds.horizontal_resolution_meters,
             elevations_m=elev_list,
             valid_mask=mask_list,
+            normals=normals_list,
             slope_deg=slope_list,
             roughness_tri_m=tri_list,
             valid_vertex_count=valid_count,
@@ -791,6 +921,8 @@ class TerrainMeshService:
         min_lon: float,
         max_lon: float,
         size: int = 512,
+        vmin: Optional[float] = None,
+        vmax: Optional[float] = None,
     ) -> bytes:
         """
         Render a georeferenced RGBA PNG texture clipped strictly to (min_lat, max_lat, min_lon, max_lon)
@@ -801,7 +933,9 @@ class TerrainMeshService:
         if overlay_l not in {"ortho", "elevation", "slope", "roughness"}:
             raise ValueError(f"Unsupported texture overlay '{overlay}'.")
 
-        cache_key = f"tex:{dataset_id}:{overlay_l}:{min_lat:.7f}:{max_lat:.7f}:{min_lon:.7f}:{max_lon:.7f}:{size}"
+        vmin_tag = f"{vmin:.4f}" if vmin is not None else "auto"
+        vmax_tag = f"{vmax:.4f}" if vmax is not None else "auto"
+        cache_key = f"tex:{dataset_id}:{overlay_l}:{min_lat:.7f}:{max_lat:.7f}:{min_lon:.7f}:{max_lon:.7f}:{size}:{vmin_tag}:{vmax_tag}"
         cached = self._cache_get(cache_key)
         if cached is not None:
             return cached
@@ -825,30 +959,65 @@ class TerrainMeshService:
                     rb = reader.bounds
                     q_min_lon = min_lon + 360.0 if (rb.right > 180.0 and min_lon < 0.0) else min_lon
                     q_max_lon = max_lon + 360.0 if (rb.right > 180.0 and max_lon < 0.0) else max_lon
-                    i_left = max(rb.left, q_min_lon)
-                    i_right = min(rb.right, q_max_lon)
-                    i_bottom = max(rb.bottom, min_lat)
-                    i_top = min(rb.top, max_lat)
                     rgba = np.zeros((size, size, 4), dtype=np.uint8)
-                    if i_left >= i_right or i_bottom >= i_top:
+                    if q_max_lon <= rb.left or q_min_lon >= rb.right or max_lat <= rb.bottom or min_lat >= rb.top:
                         return rgba
-                    win = rasterio.windows.from_bounds(i_left, i_bottom, i_right, i_top, reader.transform)
-                    c0 = int(round(((i_left - q_min_lon) / max(1e-9, q_max_lon - q_min_lon)) * size))
-                    c1 = int(round(((i_right - q_min_lon) / max(1e-9, q_max_lon - q_min_lon)) * size))
-                    r0 = int(round(((max_lat - i_top) / max(1e-9, max_lat - min_lat)) * size))
-                    r1 = int(round(((max_lat - i_bottom) / max(1e-9, max_lat - min_lat)) * size))
-                    c0, c1 = max(0, min(size, c0)), max(0, min(size, c1))
-                    r0, r1 = max(0, min(size, r0)), max(0, min(size, r1))
-                    tw, th = max(1, c1 - c0), max(1, r1 - r0)
-                    band = reader.read(1, window=win, out_shape=(th, tw), resampling=Resampling.bilinear)
-                    # Mask out completely black swath corners (DN == 0)
-                    alpha = np.where(band > 0, 255, 0).astype(np.uint8)
-                    # Subtle contrast & warm Martian mineral tint preservation (monochrome -> neutral warm)
-                    val = np.clip(band, 0, 255).astype(np.uint8)
-                    rgba[r0 : r0 + th, c0 : c0 + tw, 0] = val
-                    rgba[r0 : r0 + th, c0 : c0 + tw, 1] = np.clip(val * 0.92, 0, 255).astype(np.uint8)
-                    rgba[r0 : r0 + th, c0 : c0 + tw, 2] = np.clip(val * 0.84, 0, 255).astype(np.uint8)
-                    rgba[r0 : r0 + th, c0 : c0 + tw, 3] = alpha
+
+                    # Continuous exact subpixel bilinear sampling matching tile UV grid [0..size-1]
+                    lons = np.linspace(q_min_lon, q_max_lon, size, dtype=np.float64)
+                    lats = np.linspace(max_lat, min_lat, size, dtype=np.float64)
+                    inv_t = ~reader.transform
+                    c_min_f = inv_t.a * float(lons[0]) + inv_t.b * float(lats[-1]) + inv_t.c
+                    r_max_f = inv_t.d * float(lons[0]) + inv_t.e * float(lats[-1]) + inv_t.f
+                    c_max_f = inv_t.a * float(lons[-1]) + inv_t.b * float(lats[0]) + inv_t.c
+                    r_min_f = inv_t.d * float(lons[-1]) + inv_t.e * float(lats[0]) + inv_t.f
+
+                    c0 = max(0, int(math.floor(min(c_min_f, c_max_f))) - 2)
+                    c1 = min(reader.width, int(math.ceil(max(c_min_f, c_max_f))) + 3)
+                    r0 = max(0, int(math.floor(min(r_min_f, r_max_f))) - 2)
+                    r1 = min(reader.height, int(math.ceil(max(r_min_f, r_max_f))) + 3)
+                    if c0 >= c1 or r0 >= r1:
+                        return rgba
+
+                    win = rasterio.windows.Window(c0, r0, c1 - c0, r1 - r0)
+                    patch = reader.read(1, window=win).astype(np.float64)
+                    if reader.nodata is not None:
+                        patch = np.where(patch == float(reader.nodata), np.nan, patch)
+                    patch = np.where(patch <= 0.0, np.nan, patch)
+
+                    patch_inv = ~(reader.window_transform(win))
+                    center_lat = 0.5 * (min_lat + max_lat)
+                    col_coords = patch_inv.a * lons + patch_inv.b * center_lat + patch_inv.c - 0.5
+                    row_coords = patch_inv.d * float(lons[0]) + patch_inv.e * lats + patch_inv.f - 0.5
+
+                    in_x = (col_coords >= 0.0) & (col_coords <= float(patch.shape[1] - 1))
+                    in_y = (row_coords >= 0.0) & (row_coords <= float(patch.shape[0] - 1))
+                    c_clamped = np.clip(col_coords, 0.0, max(0.0, float(patch.shape[1] - 1)))
+                    r_clamped = np.clip(row_coords, 0.0, max(0.0, float(patch.shape[0] - 1)))
+
+                    ci0 = np.floor(c_clamped).astype(np.int64)
+                    ci1 = np.minimum(ci0 + 1, patch.shape[1] - 1)
+                    ri0 = np.floor(r_clamped).astype(np.int64)
+                    ri1 = np.minimum(ri0 + 1, patch.shape[0] - 1)
+                    dc = (c_clamped - ci0)[None, :]
+                    dr = (r_clamped - ri0)[:, None]
+
+                    v00 = patch[np.ix_(ri0, ci0)]
+                    v01 = patch[np.ix_(ri0, ci1)]
+                    v10 = patch[np.ix_(ri1, ci0)]
+                    v11 = patch[np.ix_(ri1, ci1)]
+                    valid_4 = (np.isfinite(v00) & np.isfinite(v01) & np.isfinite(v10) & np.isfinite(v11)) & (in_y[:, None] & in_x[None, :])
+                    interp = (
+                        np.where(valid_4, v00, 0.0) * (1.0 - dr) * (1.0 - dc)
+                        + np.where(valid_4, v01, 0.0) * (1.0 - dr) * dc
+                        + np.where(valid_4, v10, 0.0) * dr * (1.0 - dc)
+                        + np.where(valid_4, v11, 0.0) * dr * dc
+                    )
+                    val = np.clip(interp, 0.0, 255.0).astype(np.uint8)
+                    rgba[..., 0] = val
+                    rgba[..., 1] = np.clip(val * 0.92, 0, 255).astype(np.uint8)
+                    rgba[..., 2] = np.clip(val * 0.84, 0, 255).astype(np.uint8)
+                    rgba[..., 3] = np.where(valid_4, 255, 0).astype(np.uint8)
                     return rgba
 
                 if src.crs and src.crs.is_projected:
@@ -880,6 +1049,7 @@ class TerrainMeshService:
             rgba_small = np.zeros((tex_grid, tex_grid, 4), dtype=np.uint8)
             fin = np.isfinite(arr)
             if np.any(fin):
+                default_stats = self._cache_get(f"stats_default:{ds.id}") or {}
                 if overlay_l == "slope":
                     # 0 deg = emerald (#22c55e) -> 15 deg = amber (#f59e0b) -> 25+ deg = red (#ef4444)
                     v = np.clip(np.where(fin, arr, 0.0), 0.0, 35.0)
@@ -889,17 +1059,21 @@ class TerrainMeshService:
                     g_ch = np.where(v <= 15.0, 197 + t1 * (158 - 197), 158 + t2 * (68 - 158))
                     b_ch = np.where(v <= 15.0, 94 + t1 * (11 - 94), 11 + t2 * (68 - 11))
                 elif overlay_l == "roughness":
-                    vmin = float(np.nanmin(arr))
-                    vmax = max(vmin + 0.5, float(np.nanpercentile(arr[fin], 98)))
-                    t = np.clip((np.where(fin, arr, vmin) - vmin) / (vmax - vmin), 0.0, 1.0)
+                    tri_r = default_stats.get("roughness_range_m") or {}
+                    e_vmin = float(vmin) if vmin is not None else float(tri_r.get("min_m", np.nanmin(arr)))
+                    e_vmax = float(vmax) if vmax is not None else max(e_vmin + 0.5, float(tri_r.get("max_m", np.nanpercentile(arr[fin], 98))))
+                    e_vmax = max(e_vmin + 0.1, e_vmax)
+                    t = np.clip((np.where(fin, arr, e_vmin) - e_vmin) / (e_vmax - e_vmin), 0.0, 1.0)
                     r_ch = 20 + t * 215
                     g_ch = 180 - t * 90
                     b_ch = 210 - t * 40
                 else:
-                    # Elevation hypsometric tint: deep slate/blue -> ochre -> pale crest
-                    vmin = float(np.nanmin(arr))
-                    vmax = max(vmin + 1.0, float(np.nanmax(arr)))
-                    t = np.clip((np.where(fin, arr, vmin) - vmin) / (vmax - vmin), 0.0, 1.0)
+                    # Elevation hypsometric tint: global region normalization across tiles
+                    el_r = default_stats.get("elevation_range_m") or {}
+                    e_vmin = float(vmin) if vmin is not None else float(el_r.get("min_m", np.nanmin(arr)))
+                    e_vmax = float(vmax) if vmax is not None else max(e_vmin + 1.0, float(el_r.get("max_m", np.nanmax(arr))))
+                    e_vmax = max(e_vmin + 1.0, e_vmax)
+                    t = np.clip((np.where(fin, arr, e_vmin) - e_vmin) / (e_vmax - e_vmin), 0.0, 1.0)
                     r_ch = 45 + t * 195
                     g_ch = 70 + np.sin(t * math.pi) * 90 + t * 70
                     b_ch = 140 - t * 65

@@ -1,9 +1,10 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import { ExternalLink, Search, Download, AlertTriangle } from "lucide-react";
+import { ExternalLink, Search, Download, AlertTriangle, Camera } from "lucide-react";
 import { PageHeader } from "../../components/PageHeader";
 import { API_BASE_URL } from "../../lib/constants";
+import type { PerseveranceGalleryResponse } from "../../types";
 
 type Product = {
   product_id: string; source_archive: string; source_record_uri?: string | null; mission?: string | null; instrument?: string | null;
@@ -25,6 +26,51 @@ export default function ImageryCataloguePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<Record<string, string>>({});
+
+  // Isolated Perseverance (Jezero Crater) Raw Images Gallery state
+  const [perseveranceSol, setPerseveranceSol] = useState("");
+  const [perseveranceCam, setPerseveranceCam] = useState("");
+  const [perseveranceLoading, setPerseveranceLoading] = useState(false);
+  const [perseveranceGallery, setPerseveranceGallery] = useState<PerseveranceGalleryResponse | null>(null);
+
+  async function fetchPerseveranceGallery() {
+    setPerseveranceLoading(true);
+    try {
+      const p = new URLSearchParams({ limit: "6" });
+      if (perseveranceSol.trim()) p.set("sol", perseveranceSol.trim());
+      if (perseveranceCam.trim()) p.set("camera", perseveranceCam.trim());
+      const res = await fetch(`${API_BASE_URL}/imagery/perseverance?${p.toString()}`, { cache: "no-store" });
+      if (res.ok) {
+        setPerseveranceGallery(await res.json());
+      } else {
+        setPerseveranceGallery({
+          status: "remote_error",
+          mission: "Mars 2020 Perseverance",
+          site: "Jezero Crater",
+          isolated_from_gale_planning: true,
+          isolation_note: "Jezero Crater mission feed only; isolated from Gale planning.",
+          source_url: "https://mars.nasa.gov/rss/api/",
+          total_results: 0,
+          images: [],
+          error: `Backend returned HTTP ${res.status}`,
+        });
+      }
+    } catch (e) {
+      setPerseveranceGallery({
+        status: "remote_unavailable",
+        mission: "Mars 2020 Perseverance",
+        site: "Jezero Crater",
+        isolated_from_gale_planning: true,
+        isolation_note: "Jezero Crater mission feed only; isolated from Gale planning.",
+        source_url: "https://mars.nasa.gov/rss/api/",
+        total_results: 0,
+        images: [],
+        error: e instanceof Error ? e.message : "Unable to reach Perseverance feed",
+      });
+    } finally {
+      setPerseveranceLoading(false);
+    }
+  }
 
   async function search(event?: FormEvent) {
     event?.preventDefault(); setLoading(true); setError(null); setTotal(null); setTotalRelation(null);
@@ -103,5 +149,99 @@ export default function ImageryCataloguePage() {
       {p.footprint != null && <details className="text-[10px] text-slate-500"><summary className="cursor-pointer">Archive footprint and coordinate reference</summary><div className="mt-1">{p.coordinate_reference_system || "CRS unavailable"}</div><pre className="mt-1 whitespace-pre-wrap break-all">{String(p.footprint)}</pre></details>}
       <div className="flex flex-wrap gap-3 text-[11px]">{p.source_record_uri?.startsWith("https://") && <a className="inline-flex items-center gap-1 text-sky-300 hover:text-sky-200" href={p.source_record_uri} target="_blank" rel="noreferrer">Archive record <ExternalLink className="h-3 w-3" /></a>}{p.source_record_uri?.startsWith("atlas:") && <span className="text-slate-500">Atlas URI: {p.source_record_uri}</span>}{p.browse_image_url && <a className="inline-flex items-center gap-1 text-sky-300 hover:text-sky-200" href={p.browse_image_url} target="_blank" rel="noreferrer">Archive browse URL <ExternalLink className="h-3 w-3" /></a>}{p.label_url && <a className="inline-flex items-center gap-1 text-sky-300 hover:text-sky-200" href={p.label_url} target="_blank" rel="noreferrer">PDS label URL <ExternalLink className="h-3 w-3" /></a>}{p.original_product_url && !p.stages.includes("download_available") && <button onClick={() => verify(p.product_id)} className="text-amber-300">Verify product URL</button>}{p.original_product_url && p.stages.includes("download_available") && <button onClick={() => acquire(p.product_id)} className="inline-flex items-center gap-1 text-emerald-300 hover:text-emerald-200"><Download className="h-3 w-3" />Acquire original</button>}{status[p.product_id] && <button onClick={() => refreshAcquisition(p.product_id)} className="text-slate-300">Acquisition: {status[p.product_id]} · refresh</button>}</div>
     </article>)}</div>
+
+    {/* Isolated Jezero Crater Perseverance Raw Images Gallery */}
+    <section className="rounded-xl border border-amber-500/30 bg-[#121622] p-4 space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#1e2638] pb-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <Camera className="w-4 h-4 text-amber-400" />
+            <h2 className="text-sm font-bold text-slate-100">
+              NASA Mars 2020 Perseverance Raw Images Gallery
+            </h2>
+            <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300">
+              Jezero Crater · Isolated from Gale Planning
+            </span>
+          </div>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Direct Mars 2020 RSS image browser. Strictly separated from Gale Crater / Curiosity terrain models, targets, and route synthesis.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="number"
+            min={0}
+            placeholder="Sol (optional)"
+            value={perseveranceSol}
+            onChange={(e) => setPerseveranceSol(e.target.value)}
+            className="w-28 rounded-lg bg-[#0b0d13] border border-[#293248] px-2.5 py-1.5 text-xs text-slate-100"
+          />
+          <input
+            type="text"
+            placeholder="Camera (e.g. SUPERCAM_RMI)"
+            value={perseveranceCam}
+            onChange={(e) => setPerseveranceCam(e.target.value)}
+            className="w-44 rounded-lg bg-[#0b0d13] border border-[#293248] px-2.5 py-1.5 text-xs text-slate-100"
+          />
+          <button
+            type="button"
+            onClick={() => void fetchPerseveranceGallery()}
+            disabled={perseveranceLoading}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-[#1c263b] hover:bg-[#25324d] border border-[#2f3d5d] px-3 py-1.5 text-xs font-semibold text-amber-200 disabled:opacity-50"
+          >
+            {perseveranceLoading ? "Querying Jezero RSS…" : "Fetch Perseverance Raw Images"}
+          </button>
+        </div>
+      </div>
+
+      {perseveranceGallery && (
+        <div className="space-y-3">
+          {perseveranceGallery.error ? (
+            <div className="rounded-lg border border-amber-500/35 bg-amber-950/30 p-3 text-xs text-amber-200">
+              {perseveranceGallery.error} · {perseveranceGallery.isolation_note}
+            </div>
+          ) : perseveranceGallery.images.length === 0 ? (
+            <div className="text-xs text-slate-400">
+              No Perseverance raw frames matched that filter ({perseveranceGallery.isolation_note}).
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+              {perseveranceGallery.images.map((img) => {
+                const previewUrl = img.image_url_medium || img.image_url_large || img.image_url_full_res;
+                return (
+                  <div
+                    key={img.imageid}
+                    className="rounded-lg bg-[#0d111a] border border-[#1e2638] p-3 space-y-2 text-xs"
+                  >
+                    {previewUrl && (
+                      <a href={img.image_url_full_res || previewUrl} target="_blank" rel="noreferrer">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={previewUrl}
+                          alt={img.title || img.imageid}
+                          className="w-full h-40 object-cover rounded border border-[#1e2638]"
+                        />
+                      </a>
+                    )}
+                    <div className="flex items-center justify-between gap-2 font-mono text-[10px]">
+                      <span className="text-amber-300 font-semibold">
+                        Sol {img.sol} · {img.camera_instrument || "Camera N/A"}
+                      </span>
+                      <span className="text-slate-500">Jezero</span>
+                    </div>
+                    <div className="text-[11px] text-slate-200 line-clamp-2">
+                      {img.title || img.imageid}
+                    </div>
+                    <div className="text-[10px] text-slate-500 font-mono truncate">
+                      {img.date_taken_utc || "UTC unavailable"}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
   </div>;
 }

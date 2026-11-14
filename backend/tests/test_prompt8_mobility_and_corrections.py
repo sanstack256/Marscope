@@ -75,7 +75,7 @@ client = TestClient(app)
 # ============================================================================
 
 
-def test_zero_measurement_semantics_across_apxs_chemcam_and_chemin():
+def test_zero_measurement_semantics_across_apxs_chemcam_and_chemin(tmp_path: Path):
     """
     Verify that numerical zero values (0.0) without explicit source-defined BDL
     metadata are preserved as reported_numerical_zero_unresolved_semantics (MEASURED)
@@ -100,10 +100,38 @@ def test_zero_measurement_semantics_across_apxs_chemcam_and_chemin():
     )
     assert sem_missing == ValueSemantics.SOURCE_DEFINED_MISSING
 
-    # 2. Real NASA APXS CSV: verify reported 0.0 values (e.g. Ni = 0.0 ± 0.0) are accepted
+    # 2. Synthetic PDS4 APXS CSV: verify reported 0.0 values (e.g. Ni = 0.0 ± 0.0) are accepted
     #    with value_semantics == reported_numerical_zero_unresolved_semantics, NOT rejected as BDL
-    apxs_csv = RAW_DIR / "ds01_2021je007171r.csv"
-    apxs_xml = RAW_DIR / "ds01_2021je007171r.xml"
+    apxs_xml = tmp_path / "ds01_zero.xml"
+    apxs_xml.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<Product_Observational xmlns="http://pds.nasa.gov/pds4/pds/v1">
+  <File_Area_Observational>
+    <Table_Delimited>
+      <Record_Delimited>
+        <Field_Delimited><name>FeO</name><field_number>1</field_number><data_type>ASCII_Real</data_type><unit>wt%</unit></Field_Delimited>
+        <Field_Delimited><name>FeO_err</name><field_number>2</field_number><data_type>ASCII_Real</data_type><unit>wt%</unit></Field_Delimited>
+        <Field_Delimited><name>Ni</name><field_number>3</field_number><data_type>ASCII_Real</data_type><unit>wt%</unit></Field_Delimited>
+        <Field_Delimited><name>Ni_err</name><field_number>4</field_number><data_type>ASCII_Real</data_type><unit>wt%</unit></Field_Delimited>
+        <Field_Delimited><name>Easting_m</name><field_number>5</field_number><data_type>ASCII_Real</data_type><unit>m</unit></Field_Delimited>
+        <Field_Delimited><name>Northing_m</name><field_number>6</field_number><data_type>ASCII_Real</data_type><unit>m</unit></Field_Delimited>
+        <Field_Delimited><name>Elevation_m</name><field_number>7</field_number><data_type>ASCII_Real</data_type><unit>m</unit></Field_Delimited>
+        <Field_Delimited><name>Quality</name><field_number>8</field_number><data_type>ASCII_String</data_type></Field_Delimited>
+        <Field_Delimited><name>Target</name><field_number>9</field_number><data_type>ASCII_String</data_type></Field_Delimited>
+        <Field_Delimited><name>Sol</name><field_number>10</field_number><data_type>ASCII_Integer</data_type></Field_Delimited>
+      </Record_Delimited>
+    </Table_Delimited>
+  </File_Area_Observational>
+</Product_Observational>
+""",
+        encoding="utf-8",
+    )
+    apxs_csv = tmp_path / "ds01_zero.csv"
+    apxs_csv.write_text(
+        "FeO_pct,FeO_err,Ni,Ni_err,Easting_m,Northing_m,Elevation_m,Quality,Target,Sol\n"
+        "21.4,0.6,0.0,0.0,8145966.2,-272038.5,-4520.0,,Rocknest_Test,82\n",
+        encoding="utf-8",
+    )
     accepted_apxs, rejected_apxs = ApxsEvidenceAdapter.adapt_csv(
         apxs_csv,
         source_dataset_id="msl_apxs_supplement_sols_0_3076",
@@ -119,29 +147,120 @@ def test_zero_measurement_semantics_across_apxs_chemcam_and_chemin():
         assert z_ev.source_interpretation_note is not None
     assert not any(r.rejection_code == "BELOW_DETECTION_LIMIT" for r in rejected_apxs)
 
-    # 3. Real NASA CheMin RDR5 CSV: verify 0.0 mineral abundances are preserved as reported numerical zeros
-    cm_csv = RAW_DIR / "cma_404470826min00790050104ch11503p1.csv"
-    cm_lbl = RAW_DIR / "cma_404470826min00790050104ch11503p1.lbl"
+    # 3. Synthetic PDS3 CheMin RDR5 CSV: verify 0.0 mineral abundances are preserved as reported numerical zeros
+    fmt_path = tmp_path / "CHEMIN_MIN.FMT"
+    fmt_path.write_text(
+        'OBJECT = COLUMN\n  NAME = MINERAL\nEND_OBJECT = COLUMN\n'
+        'OBJECT = COLUMN\n  NAME = PERCENT\n  UNIT = "WEIGHT_PERCENT"\nEND_OBJECT = COLUMN\n'
+        'OBJECT = COLUMN\n  NAME = ERROR\n  UNIT = "ESTIMATED_ERROR"\n  DESCRIPTION = "2-sigma TOPAS Rietveld"\nEND_OBJECT = COLUMN\n',
+        encoding="utf-8",
+    )
+    cm_lbl = tmp_path / "cma_zero.lbl"
+    cm_lbl.write_text(
+        'PDS_VERSION_ID = PDS3\nOBJECT = SPREADSHEET\n  ^STRUCTURE = "CHEMIN_MIN.FMT"\nEND_OBJECT = SPREADSHEET\n',
+        encoding="utf-8",
+    )
+    cm_csv = tmp_path / "cma_zero.csv"
+    cm_csv.write_text("MINERAL,PERCENT,ERROR\nGypsum,3.4,1.1\nOlivine,0.0,0.0\n", encoding="utf-8")
     accepted_cm, rejected_cm = CheMinEvidenceAdapter.adapt_rdr5_csv(
         cm_csv,
         label_path=cm_lbl,
         source_dataset_id="msl_chemin_test",
-        extra_structure_dirs=[RAW_DIR],
+        extra_structure_dirs=[tmp_path],
     )
     zero_cm = [e for e in accepted_cm if e.raw_value == 0.0]
+    assert len(zero_cm) == 1
     for z_ev in zero_cm:
         assert z_ev.value_semantics == ValueSemantics.REPORTED_NUMERICAL_ZERO_UNRESOLVED.value
     assert not any(r.rejection_code == "BELOW_DETECTION_LIMIT" for r in rejected_cm)
 
-    # 4. Real NASA ChemCam MOC CSV: verify zero values are preserved as reported numerical zeros
-    moc_csv = RAW_DIR / "moc_0000_0089.csv"
-    moc_lbl = RAW_DIR / "moc_0000_0089.lbl"
+    # 4. Synthetic PDS3 ChemCam MOC CSV: verify zero values are preserved as reported numerical zeros
+    moc_lbl = tmp_path / "moc_zero.lbl"
+    moc_lbl.write_text(
+        """PDS_VERSION_ID = PDS3
+PRODUCT_ID = "MOC_ZERO"
+OBJECT = SPREADSHEET
+  ROWS = 2
+  FIELD_DELIMITER = "COMMA"
+  FIELDS = 11
+  OBJECT = FIELD
+    NAME = "SOL"
+    FIELD_NUMBER = 1
+    DATA_TYPE = INTEGER
+  END_OBJECT = FIELD
+  OBJECT = FIELD
+    NAME = "FEOT_RMSEP"
+    FIELD_NUMBER = 2
+    DATA_TYPE = ASCII_REAL
+    UNIT = "WT%"
+  END_OBJECT = FIELD
+  OBJECT = FIELD
+    NAME = "DISTANCE_TO_TARGET"
+    FIELD_NUMBER = 3
+    DATA_TYPE = ASCII_REAL
+    UNIT = "M"
+  END_OBJECT = FIELD
+  OBJECT = FIELD
+    NAME = "SUM_OF_OXIDES"
+    FIELD_NUMBER = 4
+    DATA_TYPE = ASCII_REAL
+    UNIT = "WT%"
+  END_OBJECT = FIELD
+  OBJECT = FIELD
+    NAME = "FEOT"
+    FIELD_NUMBER = 5
+    DATA_TYPE = ASCII_REAL
+    UNIT = "WT%"
+  END_OBJECT = FIELD
+  OBJECT = FIELD
+    NAME = "FEOT_SHOTS_STDEV"
+    FIELD_NUMBER = 6
+    DATA_TYPE = ASCII_REAL
+    UNIT = "WT%"
+  END_OBJECT = FIELD
+  OBJECT = FIELD
+    NAME = "SITE_ID"
+    FIELD_NUMBER = 7
+    DATA_TYPE = INTEGER
+  END_OBJECT = FIELD
+  OBJECT = FIELD
+    NAME = "DRIVE_ID"
+    FIELD_NUMBER = 8
+    DATA_TYPE = INTEGER
+  END_OBJECT = FIELD
+  OBJECT = FIELD
+    NAME = "TARGET_NAME"
+    FIELD_NUMBER = 9
+    DATA_TYPE = CHARACTER
+  END_OBJECT = FIELD
+  OBJECT = FIELD
+    NAME = "SCLK"
+    FIELD_NUMBER = 10
+    DATA_TYPE = INTEGER
+  END_OBJECT = FIELD
+  OBJECT = FIELD
+    NAME = "PRODUCT_NAME"
+    FIELD_NUMBER = 11
+    DATA_TYPE = CHARACTER
+  END_OBJECT = FIELD
+END_OBJECT = SPREADSHEET
+END
+""",
+        encoding="utf-8",
+    )
+    moc_csv = tmp_path / "moc_zero.csv"
+    moc_csv.write_text(
+        "SOL,FEOT_RMSEP,DISTANCE_TO_TARGET,SUM_OF_OXIDES,FEOT,FEOT_SHOTS_STDEV,SITE_ID,DRIVE_ID,TARGET_NAME,SCLK,PRODUCT_NAME\n"
+        "54,2.1,3.4,98.5,0.0,0.0,99,99,Zero_FeOT_Target,401234567,CL5_401234567CCS_F0990099CCAM04010P3\n",
+        encoding="utf-8",
+    )
     accepted_moc, rejected_moc = ChemCamEvidenceAdapter.adapt_moc_csv(
         moc_csv,
         label_path=moc_lbl,
         source_dataset_id="msl_chemcam_moc_0000_0089",
     )
     zero_moc = [e for e in accepted_moc if e.raw_value == 0.0]
+    assert len(zero_moc) == 1
     for z_ev in zero_moc:
         assert z_ev.value_semantics == ValueSemantics.REPORTED_NUMERICAL_ZERO_UNRESOLVED.value
     assert not any(r.rejection_code == "BELOW_DETECTION_LIMIT" for r in rejected_moc)
@@ -213,9 +332,34 @@ def test_dem_processor_never_silently_expands_small_footprint(tmp_path: Path):
     InsufficientDEMCoverageError with `requested_bounds_modified=False` and
     does NOT silently expand the bounding box.
     """
+    from app.geospatial.crs import MARS_CRS_DEFINITIONS
+
+    raw_dir = tmp_path / "raw"
+    proc_dir = tmp_path / "processed"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    proc_dir.mkdir(parents=True, exist_ok=True)
+    dem_path = raw_dir / "synthetic_mola_4ppd.tif"
+
+    # 4 ppd grid = 0.25 deg/px across Gale crater [-7..-3] x [135..140] -> 20 cols x 16 rows
+    cols, rows = 20, 16
+    elev = np.linspace(-4600.0, -3900.0, rows * cols, dtype=np.float32).reshape(rows, cols)
+    with rasterio.open(
+        dem_path,
+        "w",
+        driver="GTiff",
+        height=rows,
+        width=cols,
+        count=1,
+        dtype=rasterio.float32,
+        crs=MARS_CRS_DEFINITIONS["IAU2000:49900"],
+        transform=from_bounds(135.0, -7.0, 140.0, -3.0, cols, rows),
+        nodata=-32768.0,
+    ) as dst:
+        dst.write(elev, 1)
+
     ds = Dataset(
         id="mola_megt90n000cb",
-        product_title="MGS MOLA MEGDR 4 ppd",
+        product_title="Synthetic MGS MOLA MEGDR 4 ppd",
         mission="Mars Global Surveyor",
         instrument="MOLA",
         product_id="MEGT90N000CB.IMG",
@@ -227,13 +371,13 @@ def test_dem_processor_never_silently_expands_small_footprint(tmp_path: Path):
         units="meters",
         horizontal_resolution_meters=14800.0,
         coverage=GeographicCoverage(
-            min_latitude=-90.0,
-            max_latitude=90.0,
-            min_longitude=0.0,
-            max_longitude=360.0,
+            min_latitude=-7.0,
+            max_latitude=-3.0,
+            min_longitude=135.0,
+            max_longitude=140.0,
         ),
         status=DatasetLifecycleStatus.DOWNLOADED,
-        local_file_path=str(RAW_DIR / "megt90n000cb.img"),
+        local_file_path="raw/synthetic_mola_4ppd.tif",
     )
 
     tiny_bounds = {
@@ -245,8 +389,8 @@ def test_dem_processor_never_silently_expands_small_footprint(tmp_path: Path):
     with pytest.raises(InsufficientDEMCoverageError) as exc_info:
         DEMProcessingService.process_dem_dataset(
             dataset=ds,
-            raw_dir=RAW_DIR,
-            processed_dir=tmp_path,
+            raw_dir=raw_dir,
+            processed_dir=proc_dir,
             study_bounds=tiny_bounds,
         )
 
@@ -268,8 +412,8 @@ def test_dem_processor_never_silently_expands_small_footprint(tmp_path: Path):
     }
     manifest = DEMProcessingService.process_dem_dataset(
         dataset=ds,
-        raw_dir=RAW_DIR,
-        processed_dir=tmp_path,
+        raw_dir=raw_dir,
+        processed_dir=proc_dir,
         study_bounds=broader_bounds,
     )
     assert manifest["requested_bounds_modified"] is False
@@ -710,10 +854,77 @@ def test_mobility_scenario_and_traversal_model_no_defaults_and_no_extrapolation(
     assert seg_nodata.baseline_time_seconds is None
 
 
-def test_mobility_api_endpoints_live_contracts():
+def test_mobility_api_endpoints_live_contracts(tmp_path: Path, monkeypatch):
     """
-    Exercise all 9 `/api/mobility/*` endpoints against the real NASA MOLA dataset (`mola_megt90n000cb`).
+    Exercise all `/api/mobility/*` endpoints against an isolated synthetic MOLA-scale
+    DEM raster (7.4 km/px, IAU2000:49900) so tests pass offline on a clean checkout
+    without requiring pre-downloaded multi-gigabyte PDS binaries.
     """
+    from app.api import mobility as api_mobility
+    from app.geospatial.crs import MARS_CRS_DEFINITIONS
+    from app.ingestion.catalog import DatasetCatalogService
+    from app.mobility.service import HumanMobilityService
+    from app.schemas.dataset import LicenseStatus
+
+    cat_dir = tmp_path / "catalog"
+    raw_dir = tmp_path / "raw"
+    proc_dir = tmp_path / "processed"
+    cat_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    proc_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create synthetic regional DEM at ~0.125 deg/px (~7.4 km/px) over Gale [135..140] x [-7..-3]
+    cols, rows = 40, 32
+    dem_path = raw_dir / "megt90n000cb.tif"
+    yy, xx = np.mgrid[0:rows, 0:cols]
+    elev = (-4500.0 + yy * 18.5 + xx * 12.0).astype(np.float32)
+    with rasterio.open(
+        dem_path,
+        "w",
+        driver="GTiff",
+        height=rows,
+        width=cols,
+        count=1,
+        dtype=rasterio.float32,
+        crs=MARS_CRS_DEFINITIONS["IAU2000:49900"],
+        transform=from_bounds(135.0, -7.0, 140.0, -3.0, cols, rows),
+        nodata=-32768.0,
+    ) as dst:
+        dst.write(elev, 1)
+
+    iso_cat = DatasetCatalogService(catalog_storage_dir=cat_dir, raw_data_dir=raw_dir)
+    iso_cat.register_dataset(
+        Dataset(
+            id="mola_megt90n000cb",
+            product_title="Synthetic Regional MOLA MEGDR (8 ppd)",
+            mission="Mars Global Surveyor",
+            instrument="MOLA",
+            product_id="MEGT90N000CB.IMG",
+            product_type="DEM",
+            source_archive="NASA PDS Geosciences",
+            original_product_url="https://pds-geosciences.wustl.edu/",
+            license=LicenseStatus.VERIFIED_OPEN_PUBLIC_DOMAIN,
+            attribution="NASA PDS MOLA Science Team",
+            coordinate_reference_system="IAU2000:49900",
+            units="meters",
+            horizontal_resolution_meters=7400.0,
+            coverage=GeographicCoverage(
+                min_latitude=-7.0,
+                max_latitude=-3.0,
+                min_longitude=135.0,
+                max_longitude=140.0,
+            ),
+            status=DatasetLifecycleStatus.DOWNLOADED,
+            local_file_path=str(dem_path),
+        )
+    )
+    iso_mob = HumanMobilityService(
+        catalog_service=iso_cat,
+        raw_dir=raw_dir,
+        processed_dir=proc_dir,
+    )
+    monkeypatch.setattr(api_mobility, "mobility_service", iso_mob)
+
     # 1. GET /api/mobility/status
     r_status = client.get("/api/mobility/status")
     assert r_status.status_code == 200
@@ -851,7 +1062,8 @@ def test_mobility_api_endpoints_live_contracts():
     cs_body = r_cs.json()
     assert cs_body["unknown_cell_policy"] == "preserve_null_never_zero_cost"
     assert cs_body["safety_classification_policy"] == "no_safe_or_unsafe_labels_emitted"
-    assert len(cs_body["cells"]) == 77
+    expected_cells = feat_body["grid_shape"]["rows"] * feat_body["grid_shape"]["cols"]
+    assert len(cs_body["cells"]) == expected_cells
     # Border cells without 3x3 slope must have null traversal_cost_seconds_per_meter when planning_max_slope_deg is set
     border_cell = cs_body["cells"][0]
     assert border_cell["row"] == 0 and border_cell["col"] == 0

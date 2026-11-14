@@ -200,4 +200,21 @@ All endpoints are served under the `/api` prefix by the FastAPI backend. Standar
 ---
 
 ## 9. NASA Imagery Catalogue Endpoints (`/api/imagery/*`)
-- **Routes:** `GET /api/imagery/status`, `/datasets`, `/search` (PDS Imaging Atlas), `/ode-search` (ODE REST), `/products/{product_id}`, `/products/{product_id}/label`, `POST /api/imagery/products/{product_id}/acquire`, `GET /api/imagery/products/{product_id}/acquisition`, `/eligibility`, `/panoramas`, `/coverage`. Persisted products live in `datasets/catalog/imagery_products/catalog.json` with unverified rights/panorama eligibility kept explicit.
+- **Routes:** `GET /api/imagery/status`, `/datasets`, `/search` (PDS Imaging Atlas), `/ode-search` (ODE REST), `/products/{product_id}`, `/products/{product_id}/label`, `POST /api/imagery/products/{product_id}/acquire`, `GET /api/imagery/products/{product_id}/acquisition`, `/eligibility`, `/panoramas`, `/coverage`, plus isolated `GET /api/imagery/perseverance` (Mars 2020 Jezero Crater gallery feed, strictly separated from Gale route/DEM planning). Persisted products live in `datasets/catalog/imagery_products/catalog.json` with unverified rights/panorama eligibility kept explicit.
+
+---
+
+## 10. Prompt 12 Continuous Mesh Textures, NASA Source Audit & Live Mission Tracking (`/api/tracking/*`, `/api/sources/audit`)
+
+### `GET /api/sources/audit`
+- **Description:** Returns transparent verification/exclusion accounting across JPL Mars Trek WMTS layers (`mars_trek_tes_albedo`), USGS SIM 3292 (`1:20,000,000` global context-only disclosure), Curiosity rover waypoints, Perseverance Jezero Crater isolation (`isolated_from_gale_planning = true`), and NASA Worldview Earth-only exclusion (`excluded_earth_only`).
+
+### Global Ramp & Continuous Seam Parameters (`/api/terrain/*`)
+- `GET /api/terrain/mesh/manifest` returns region-wide `elevation_range_m` and `roughness_range_m` (`{ min_m, max_m }`).
+- `GET /api/terrain/ortho/{dataset_id}/texture` accepts optional `vmin` and `vmax` parameters so neighboring WebGL tiles share an identical scalar colormap ramp (`Elevation`, `Slope`, `TRI`), plus subpixel bilinear ortho resampling without cross-tile seams.
+
+### Authenticated Live Mission Telemetry (`/api/tracking/*`)
+- **`GET /api/tracking/status` (`?active_route_id=`):** Returns live positioning telemetry state (`unavailable`, `active`, `stale`, `disconnected`). Defaults to `live_available = false` (`"Live Mars position unavailable — no mission positioning provider connected."`); browser/terrestrial geolocation (`navigator.geolocation`) is never used.
+- **`POST /api/tracking/telemetry`:** Requires `X-Mars-Tracking-Token` or `Authorization: Bearer <token>` matching `MARSCOPE_TRACKING_TOKEN` (HTTP `401`/`403` otherwise). Validates `IAU2000:49900` coordinates, strictly monotonic `sequence_number` (HTTP `409` on out-of-order/duplicate sequence), timezone-aware timestamps, and computes Mars-sphere cross-track error (`R = 3,396,190 m`) and off-route flags against `active_route_id`.
+- **`POST /api/tracking/replan-preview`:** Computes a confirmation-gated proposed DEM route diff (`requires_user_confirmation = true`, distance/gain/slope/duration deltas) from the latest verified live fix without automatically mutating the active route.
+- **`GET /api/tracking/stream` & `DELETE /api/tracking/session`:** Server-Sent Events (`text/event-stream`) feed broadcasting `tracking_status` and `tracking_heartbeat` events, plus authenticated/operator session teardown restoring disconnected state.

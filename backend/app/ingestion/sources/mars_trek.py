@@ -254,5 +254,62 @@ class MarsTrekSourceAdapter(SourceAdapter):
                 known_limitations=["Visual mosaic only; does not supply terrain height."],
                 processing_history=["Catalog record discovered via MarsTrekSourceAdapter"],
             ),
+            Dataset(
+                id="mars_trek_tes_albedo",
+                product_id="Mars_MGS_TES_Albedo_mosaic_global_7410m",
+                product_title="NASA Mars Trek MGS TES Global Lambertian Albedo Mosaic (7.4 km/px)",
+                product_type="THERMAL_ALBEDO / Global Reference Mosaic",
+                mission="Mars Global Surveyor (MGS)",
+                instrument="Thermal Emission Spectrometer (TES)",
+                source_archive=self.source_name,
+                original_product_url=(
+                    "https://trek.nasa.gov/tiles/Mars/EQ/"
+                    "Mars_MGS_TES_Albedo_mosaic_global_7410m/1.0.0/default/default028mm/{z}/{y}/{x}.png"
+                ),
+                original_label_url=(
+                    "https://trek.nasa.gov/tiles/Mars/EQ/"
+                    "Mars_MGS_TES_Albedo_mosaic_global_7410m/1.0.0/WMTSCapabilities.xml"
+                ),
+                license=LicenseStatus.VERIFIED_OPEN_PUBLIC_DOMAIN,
+                attribution="NASA/JPL/ASU/Mars Trek",
+                processing_level="Global TES Albedo Mosaic (PNG WMTS)",
+                calibration_status="Visual/radiometric global albedo context (7.4 km/px)",
+                coverage=GeographicCoverage(
+                    min_latitude=-90.0,
+                    max_latitude=90.0,
+                    min_longitude=-180.0,
+                    max_longitude=180.0,
+                    center_latitude=0.0,
+                    center_longitude=0.0,
+                    longitude_range="[-180, 180]",
+                ),
+                coordinate_reference_system="IAU2000:49900",
+                latitude_convention="Planetocentric",
+                longitude_direction="East",
+                map_projection="Simple Cylindrical Equirectangular (OGC WMTS default028mm)",
+                planetary_radii_m={"a": 3396190.0, "b": 3376200.0, "c": 3376200.0},
+                horizontal_resolution_meters=7410.0,
+                units="Lambertian albedo (visual WMTS)",
+                data_format="OGC WMTS / PNG tiles",
+                status=DatasetLifecycleStatus.DISCOVERED,
+                verification=MetadataVerification(
+                    archive_availability=VerificationState.UNVERIFIED,
+                    product_discovery=VerificationState.VERIFIED,
+                    metadata_verification=VerificationState.UNVERIFIED,
+                    license_verification=VerificationState.VERIFIED,
+                    coverage_verification=VerificationState.UNVERIFIED,
+                    download_verification=VerificationState.NOT_APPLICABLE,
+                    processing_verification=VerificationState.NOT_APPLICABLE,
+                    field_verification={
+                        "crs": VerificationState.UNVERIFIED,
+                        "resolution": VerificationState.VERIFIED,
+                        "coverage": VerificationState.UNVERIFIED,
+                    },
+                    evidence_notes=["MGS TES Albedo global WMTS endpoint verified at trek.nasa.gov."],
+                ),
+                quality_flags=["Regional Surface Dust/Albedo Context (7.4 km/px)"],
+                known_limitations=["Coarse 7.4 km/px global albedo mosaic; regional thermophysical context only."],
+                processing_history=["Catalog record discovered via MarsTrekSourceAdapter"],
+            ),
         ]
         return products

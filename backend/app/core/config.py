@@ -3,7 +3,7 @@ MARSCOPE Configuration Module
 Martian Surface Intelligence & Exploration System
 """
 
-from typing import List
+from typing import List, Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     HOST: str = "127.0.0.1"
     PORT: int = 8000
+    TRACKING_INGEST_TOKEN: Optional[str] = None
     
     # CORS Configuration
     CORS_ORIGINS: List[str] = [

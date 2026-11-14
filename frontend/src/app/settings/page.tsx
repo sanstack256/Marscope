@@ -22,14 +22,15 @@ export default function SettingsAssumptionsPage() {
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Interactive Physics Workbench state (explicit user assumptions -> labeled inputs)
+  // Interactive Physics Workbench state (explicit user inputs — blank by default until user enters values or loads example)
   const [selectedModel, setSelectedModel] = useState<ModelKey>("weight");
-  const [massKg, setMassKg] = useState<string>("180");
-  const [deltaHm, setDeltaHm] = useState<string>("25");
-  const [pressurePa, setPressurePa] = useState<string>("700");
-  const [tempK, setTempK] = useState<string>("215");
-  const [velocityMs, setVelocityMs] = useState<string>("1.5");
-  const [slopeDeg, setSlopeDeg] = useState<string>("12");
+  const [massKg, setMassKg] = useState<string>("");
+  const [deltaHm, setDeltaHm] = useState<string>("");
+  const [pressurePa, setPressurePa] = useState<string>("");
+  const [tempK, setTempK] = useState<string>("");
+  const [velocityMs, setVelocityMs] = useState<string>("");
+  const [slopeDeg, setSlopeDeg] = useState<string>("");
+  const [exampleLoaded, setExampleLoaded] = useState<boolean>(false);
   const [calcResult, setCalcResult] = useState<PhysicsCalculationResult | null>(null);
   const [calcError, setCalcError] = useState<string | null>(null);
   const [calcLoading, setCalcLoading] = useState<boolean>(false);
@@ -84,26 +85,46 @@ export default function SettingsAssumptionsPage() {
 
   async function runPhysicsCalculation(e: React.FormEvent) {
     e.preventDefault();
-    setCalcLoading(true);
     setCalcError(null);
+    const body: Record<string, unknown> = { model_name: selectedModel };
+    const requireNum = (raw: string, label: string): number | null => {
+      const val = Number.parseFloat(raw);
+      if (!Number.isFinite(val)) {
+        setCalcError(`Enter a numeric value for "${label}" or load Example Test Inputs first.`);
+        return null;
+      }
+      return val;
+    };
+    if (["weight", "potential_energy", "uphill_force"].includes(selectedModel)) {
+      const v = requireNum(massKg, "Mass Assumption (kg)");
+      if (v === null) return;
+      body.mass_kg = v;
+    }
+    if (selectedModel === "potential_energy") {
+      const v = requireNum(deltaHm, "Elevation Delta (m)");
+      if (v === null) return;
+      body.delta_h_m = v;
+    }
+    if (["atmospheric_density", "drag"].includes(selectedModel)) {
+      const p = requireNum(pressurePa, "Pressure Input (Pa)");
+      const t = requireNum(tempK, "Temperature Input (K)");
+      if (p === null || t === null) return;
+      body.pressure_pa = p;
+      body.temperature_k = t;
+    }
+    if (selectedModel === "drag") {
+      const v = requireNum(velocityMs, "Relative Wind/Speed (m/s)");
+      if (v === null) return;
+      body.velocity_m_s = v;
+    }
+    if (selectedModel === "uphill_force") {
+      const s = requireNum(slopeDeg, "Slope Input (deg)");
+      if (s === null) return;
+      body.slope_degrees = s;
+    }
+
+    setCalcLoading(true);
     try {
-      const body: Record<string, unknown> = { model_name: selectedModel };
-      if (["weight", "potential_energy", "uphill_force"].includes(selectedModel)) {
-        body.mass_kg = Number.parseFloat(massKg);
-      }
-      if (selectedModel === "potential_energy") {
-        body.delta_h_m = Number.parseFloat(deltaHm);
-      }
-      if (["atmospheric_density", "drag"].includes(selectedModel)) {
-        body.pressure_pa = Number.parseFloat(pressurePa);
-        body.temperature_k = Number.parseFloat(tempK);
-      }
-      if (selectedModel === "drag") {
-        body.velocity_m_s = Number.parseFloat(velocityMs);
-      }
-      if (selectedModel === "uphill_force") {
-        body.slope_degrees = Number.parseFloat(slopeDeg);
-      }
 
       const res = await fetch(`${API_BASE_URL}/physics/calculate`, {
         method: "POST",
@@ -213,9 +234,29 @@ export default function SettingsAssumptionsPage() {
             <Calculator className="w-4 h-4 text-[#e25b38]" />
             <span>Validated Physics Workbench (User-Supplied Inputs)</span>
           </div>
-          <span className="text-[10px] font-mono text-amber-300 uppercase">
-            Inputs below are explicitly labeled assumptions
-          </span>
+          <div className="flex items-center gap-2 flex-wrap">
+            {exampleLoaded && (
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-sky-950/60 border border-sky-700/50 text-sky-300">
+                USER EXAMPLE VALUES — NOT MISSION TELEMETRY
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setMassKg("180");
+                setDeltaHm("25");
+                setPressurePa("700");
+                setTempK("215");
+                setVelocityMs("1.5");
+                setSlopeDeg("12");
+                setExampleLoaded(true);
+                setCalcError(null);
+              }}
+              className="px-2.5 py-1 rounded bg-[#182032] hover:bg-[#1e273d] border border-[#2a344c] text-[11px] font-mono text-sky-300"
+            >
+              Load Example Test Inputs (User Example)
+            </button>
+          </div>
         </div>
 
         <form onSubmit={runPhysicsCalculation} className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">

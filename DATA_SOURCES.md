@@ -94,3 +94,17 @@ Seven newly acquired/verified NASA planetary terrain, orthorectified image, and 
 - USGS SIM 3292 non-existent direct archive filenames returned HTTP 404 during live probe and are excluded.
 - NASA Earthdata EOSDIS authenticated endpoints were excluded to preserve strictly unauthenticated public reproducibility.
 - Jezero Crater HiRISE DTMs (Perseverance region) were inspected and excluded as out-of-footprint for the primary Gale Crater / Mount Sharp / Boxwork investigation region.
+
+---
+
+## Prompt 12 NASA Source Audit, Context Constraints & Mission Isolation
+
+| Source / Endpoint | Product / Coverage | Role & Constraints in MARSCOPE | Audit Status |
+| :--- | :--- | :--- | :--- |
+| **JPL Mars Trek MGS TES Albedo WMTS** (`mars_trek_tes_albedo`) | `Mars_MGS_TES_Albedo_mosaic_global_7410m` (`~7.41 km/px`, OGC WMTS HTTP 200) | Global thermal albedo context basemap on Mars Globe (`/api/sources`, `mars_trek.py`) | **VERIFIED AVAILABLE** (Visual Context Only) |
+| **USGS–NASA Planetary Geologic Mapping Program** (`usgs_sim_3292_global_geology`) | SIM 3292 (`Geologic Map of Mars`, scale `1:20,000,000`) | Global geological context reference; explicitly unsuitable for local Gale route/slope computation (`coverage_verification = unverified`) | **CONTEXT ONLY** (`1:20,000,000` Scale Disclosure) |
+| **MSL Curiosity Traverse Waypoints** (`MSL_waypoints.json`) | JPL MMGIS traverse catalog (`Sol 5073+`, 1,389+ verified stations) | Authoritative Gale Crater rover station lookup (`ROVER_STATION_LOCATION`) | **VERIFIED ACTIVE** |
+| **NASA Mars 2020 Perseverance Raw Images Gallery** | Live Mars 2020 RSS/API proxy (`/api/imagery/perseverance`, `perseverance_gallery.py`) | Separate Jezero Crater raw image feed (`isolated_from_gale_planning = true`); never injected into Gale terrain or route synthesis | **ISOLATED (JEZERO CRATER)** |
+| **NASA Worldview / GIBS** (`nasa_worldview_gibs`) | Earth-observation daily imagery (`worldview.earthdata.nasa.gov`) | Audited via `/api/sources/audit`; excluded as Earth-only observation tooling without Mars IAU2000 datasets | **EXCLUDED (`excluded_earth_only`)** |
+
+Clean Git checkouts with empty `datasets/raw/` and `datasets/processed/` reconcile file availability purely in memory inside `DatasetCatalogService` and `LayerCatalogService` without mutating tracked JSON catalogs under `datasets/catalog/`.

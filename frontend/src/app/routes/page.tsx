@@ -157,46 +157,76 @@ export default function RoutesComparisonPage() {
       {/* 3-Mode Comparison Cards */}
       {comparisonResult && (
         <>
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {comparisonResult.comparison.map((entry: RouteCompareEntry) => {
-              const r = entry.route;
-              const isActive = Boolean(r && activeRoute?.route_id === r.route_id);
-              return (
-                <div
-                  key={entry.mode}
-                  className={`rounded-xl border p-4 flex flex-col justify-between space-y-4 ${
-                    !entry.feasible
-                      ? "bg-[#141118] border-red-500/35"
-                      : isActive
-                        ? "bg-[#121a2a] border-cyan-400/60"
-                        : "bg-[#121622] border-[#1e2638]"
-                  }`}
-                >
-                  <div className="space-y-3">
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <div className="text-sm font-bold text-slate-100 flex items-center gap-1.5">
-                          {entry.mode === "science_priority" && (
-                            <Sparkles className="w-4 h-4 text-purple-400" />
-                          )}
-                          <span>{entry.mode_label}</span>
+          {(() => {
+            const feasibleCosts = comparisonResult.comparison
+              .filter((e) => e.feasible && e.route)
+              .map((e) => e.route!.total_cost);
+            const lowestCost = feasibleCosts.length > 0 ? Math.min(...feasibleCosts) : null;
+
+            return (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                {comparisonResult.comparison.map((entry: RouteCompareEntry) => {
+                  const r = entry.route;
+                  const isActive = Boolean(r && activeRoute?.route_id === r.route_id);
+                  const isLowestCost = Boolean(
+                    r && lowestCost != null && Math.abs(r.total_cost - lowestCost) < 1e-6
+                  );
+                  const costDeltaPct =
+                    r && lowestCost != null && lowestCost > 0
+                      ? ((r.total_cost - lowestCost) / lowestCost) * 100.0
+                      : 0.0;
+
+                  return (
+                    <div
+                      key={entry.mode}
+                      className={`rounded-xl border p-4 flex flex-col justify-between space-y-4 ${
+                        !entry.feasible
+                          ? "bg-[#141118] border-red-500/35"
+                          : isActive
+                            ? "bg-[#121a2a] border-cyan-400/60"
+                            : "bg-[#121622] border-[#1e2638]"
+                      }`}
+                    >
+                      <div className="space-y-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="text-sm font-bold text-slate-100 flex items-center gap-1.5">
+                              {entry.mode === "science_priority" && (
+                                <Sparkles className="w-4 h-4 text-purple-400" />
+                              )}
+                              <span>{entry.mode_label}</span>
+                            </div>
+                            <div className="text-[10px] font-mono text-slate-400 uppercase mt-0.5">
+                              mode: {entry.mode} {r ? `· ${r.algorithm}` : ""}
+                            </div>
+                          </div>
+                          <div className="flex flex-col items-end gap-1">
+                            {entry.feasible ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/35 text-emerald-300">
+                                <CheckCircle2 className="w-3 h-3" />
+                                Feasible
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded bg-red-500/15 border border-red-500/40 text-red-300">
+                                <ShieldAlert className="w-3 h-3" />
+                                Rejected
+                              </span>
+                            )}
+                            {entry.feasible && r && (
+                              <span
+                                className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${
+                                  isLowestCost
+                                    ? "bg-cyan-500/15 text-cyan-300 border border-cyan-500/30"
+                                    : "bg-slate-800 text-slate-400"
+                                }`}
+                              >
+                                {isLowestCost
+                                  ? "Lowest calculated terrain cost"
+                                  : `+${costDeltaPct.toFixed(1)}% cost vs lowest`}
+                              </span>
+                            )}
+                          </div>
                         </div>
-                        <div className="text-[10px] font-mono text-slate-400 uppercase mt-0.5">
-                          mode: {entry.mode}
-                        </div>
-                      </div>
-                      {entry.feasible ? (
-                        <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/35 text-emerald-300">
-                          <CheckCircle2 className="w-3 h-3" />
-                          Feasible
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded bg-red-500/15 border border-red-500/40 text-red-300">
-                          <ShieldAlert className="w-3 h-3" />
-                          Rejected
-                        </span>
-                      )}
-                    </div>
 
                     {!entry.feasible || !r ? (
                       <div className="p-3 rounded-lg bg-red-950/35 border border-red-500/30 text-xs text-red-200 leading-relaxed">
@@ -284,6 +314,8 @@ export default function RoutesComparisonPage() {
               );
             })}
           </div>
+            );
+          })()}
 
           {/* Quantitative Trade-Off Bar Chart */}
           {chartData.length > 0 && (

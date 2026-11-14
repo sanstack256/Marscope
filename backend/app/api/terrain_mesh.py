@@ -108,6 +108,8 @@ async def get_terrain_texture(
     min_lon: float = Query(..., ge=-180.0, le=360.0),
     max_lon: float = Query(..., ge=-180.0, le=360.0),
     size: int = Query(512, ge=64, le=1024),
+    vmin: Optional[float] = Query(None, description="Optional global color scale minimum for cross-tile consistency"),
+    vmax: Optional[float] = Query(None, description="Optional global color scale maximum for cross-tile consistency"),
 ) -> Response:
     if min_lat >= max_lat or min_lon >= max_lon:
         raise HTTPException(status_code=422, detail="Invalid bounding box.")
@@ -120,6 +122,8 @@ async def get_terrain_texture(
             min_lon=min_lon,
             max_lon=max_lon,
             size=size,
+            vmin=vmin,
+            vmax=vmax,
         )
         return Response(
             content=png_bytes,

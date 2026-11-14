@@ -6,14 +6,20 @@ import {
   Activity,
   AlertTriangle,
   ArrowRight,
+  ChevronLeft,
+  ChevronRight,
+  MapPinOff,
   Navigation,
   Pause,
   Play,
+  Radio,
+  RefreshCw,
   RotateCcw,
   Route as RouteIcon,
 } from "lucide-react";
 import { LocalTerrain3DViewer } from "@/components/LocalTerrain3DViewer";
 import { useRoutingStore } from "@/stores/useRoutingStore";
+import { useTrackingStore } from "@/stores/useTrackingStore";
 
 const MARS_SURFACE_GRAVITY_M_S2 = 3.72076; // NASA Mars Fact Sheet / IAU reference gravity for mechanical climb work only
 
@@ -23,9 +29,21 @@ export default function EvaSimulationPage() {
   const fetchTargets = useRoutingStore((s) => s.fetchAvailableTargets);
 
   const activeRoute = useRoutingStore((s) => s.activeRoute);
+  const startPoint = useRoutingStore((s) => s.startPoint);
+  const destinationPoint = useRoutingStore((s) => s.destinationPoint);
   const constraints = useRoutingStore((s) => s.constraints);
   const routeLoading = useRoutingStore((s) => s.routeLoading);
+  const loadBoxworkStudyExample = useRoutingStore((s) => s.loadBoxworkStudyExample);
   const computeRoute = useRoutingStore((s) => s.computeRoute);
+
+  const trackingStatus = useTrackingStore((s) => s.trackingStatus);
+  const replanPreview = useTrackingStore((s) => s.replanPreview);
+  const replanLoading = useTrackingStore((s) => s.replanLoading);
+  const replanError = useTrackingStore((s) => s.replanError);
+  const connectTrackingStream = useTrackingStore((s) => s.connectTrackingStream);
+  const requestReplanPreview = useTrackingStore((s) => s.requestReplanPreview);
+  const adoptReplanPreview = useTrackingStore((s) => s.adoptReplanPreview);
+  const dismissReplanPreview = useTrackingStore((s) => s.dismissReplanPreview);
 
   const [progressState, setProgressState] = useState<{ routeId: string | null; m: number }>({
     routeId: activeRoute?.route_id ?? null,
@@ -37,6 +55,10 @@ export default function EvaSimulationPage() {
   useEffect(() => {
     if (!targetsLoaded) void fetchTargets();
   }, [targetsLoaded, fetchTargets]);
+
+  useEffect(() => {
+    return connectTrackingStream(activeRoute?.route_id ?? null);
+  }, [activeRoute?.route_id, connectTrackingStream]);
 
   const currentRouteId = activeRoute?.route_id ?? null;
   const maxDistM = activeRoute?.total_surface_distance_m ?? 0;
@@ -99,10 +121,15 @@ export default function EvaSimulationPage() {
       }
     }
 
-    const activeInst =
-      activeRoute.instructions.find(
-        (inst) => progressM <= inst.cumulative_distance_m + 1e-6
-      ) ?? activeRoute.instructions[activeRoute.instructions.length - 1];
+    const activeIdx = activeRoute.instructions.findIndex(
+      (inst) => progressM <= inst.cumulative_distance_m + 1e-6
+    );
+    const resolvedIdx = activeIdx >= 0 ? activeIdx : activeRoute.instructions.length - 1;
+    const activeInst = activeRoute.instructions[resolvedIdx];
+    const nextInst =
+      resolvedIdx + 1 < activeRoute.instructions.length
+        ? activeRoute.instructions[resolvedIdx + 1]
+        : null;
 
     const massKg = constraints.astronaut_total_mass_kg;
     const climbWorkKJ =
@@ -115,19 +142,36 @@ export default function EvaSimulationPage() {
       cumulativeGainM: gainM,
       climbWorkKJ,
       instruction: activeInst,
+      nextInstruction: nextInst,
+      instructionIndex: resolvedIdx,
     };
   }, [activeRoute, progressM, constraints.astronaut_total_mass_kg]);
 
+  const stepInstructionBy = (delta: number) => {
+    if (!activeRoute || activeRoute.instructions.length === 0) return;
+    setPlayingRouteId(null);
+    const curIdx = sample?.instructionIndex ?? 0;
+    const targetIdx = Math.max(
+      0,
+      Math.min(activeRoute.instructions.length - 1, curIdx + delta)
+    );
+    const targetDist = activeRoute.instructions[targetIdx].cumulative_distance_m;
+    setProgressState({ routeId: currentRouteId, m: targetDist });
+  };
+
   return (
     <div className="space-y-4">
-      {/* Header */}
+      {/* Header + Explicit Simulation Isolation Disclosure */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-[#121622] border border-[#1e2638] rounded-xl px-4 py-3">
         <div>
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
             <Activity className="w-5 h-5 text-cyan-400" />
             <h1 className="text-base font-bold text-slate-100">
               Synchronized EVA Trajectory Playback
             </h1>
+            <span className="text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/50 text-amber-300">
+              SIMULATION — NOT LIVE MISSION TELEMETRY
+            </span>
             {activeRoute && (
               <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/35 text-cyan-300">
                 {activeRoute.mode_label} · {activeRoute.source_product_id}
@@ -135,7 +179,7 @@ export default function EvaSimulationPage() {
             )}
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            Scrub real DEM elevation, slope, heading, and gravitational climb work along the active route without fabricated metabolic or O2 curves.
+            Deterministic playback along exact computed polyline vertices (`activeRoute.vertices`). Separate from authenticated live positioning telemetry.
           </p>
         </div>
 
@@ -155,17 +199,31 @@ export default function EvaSimulationPage() {
             No Active Route Selected for Simulation
           </div>
           <p className="text-xs text-slate-400 max-w-lg mx-auto">
-            Compute the default Curiosity Boxwork Crater EVA route directly or configure custom targets and constraints in the Route Planner first.
+            Configure custom endpoints in the Route Planner or load and simulate the Boxwork Study Example coordinates over the real HiRISE DEM.
           </p>
-          <div className="flex items-center justify-center gap-3 pt-1">
-            <button
-              type="button"
-              onClick={() => void computeRoute()}
-              disabled={routeLoading}
-              className="px-4 py-2 rounded-lg bg-[#e25b38] hover:bg-[#c84d2d] text-xs font-semibold text-white disabled:opacity-50"
-            >
-              {routeLoading ? "Computing Route..." : "Compute Default Boxwork Route"}
-            </button>
+          <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
+            {startPoint && destinationPoint ? (
+              <button
+                type="button"
+                onClick={() => void computeRoute()}
+                disabled={routeLoading}
+                className="px-4 py-2 rounded-lg bg-[#e25b38] hover:bg-[#c84d2d] text-xs font-semibold text-white disabled:opacity-50"
+              >
+                {routeLoading ? "Computing Route..." : "Compute Active Route"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  loadBoxworkStudyExample();
+                  setTimeout(() => void computeRoute(), 60);
+                }}
+                disabled={routeLoading}
+                className="px-4 py-2 rounded-lg bg-[#e25b38] hover:bg-[#c84d2d] text-xs font-semibold text-white disabled:opacity-50"
+              >
+                {routeLoading ? "Computing Study Example..." : "Load & Simulate Boxwork Study Example"}
+              </button>
+            )}
             <Link
               href="/planner"
               className="px-4 py-2 rounded-lg bg-[#161c2b] border border-[#2a3652] text-xs font-medium text-slate-200"
@@ -183,6 +241,19 @@ export default function EvaSimulationPage() {
                 compact
                 targets={targets}
                 simulationProgressM={progressM}
+                livePositionMarker={
+                  trackingStatus?.live_available &&
+                  trackingStatus.lat != null &&
+                  trackingStatus.lon_east != null
+                    ? {
+                        lat: trackingStatus.lat,
+                        lon_east: trackingStatus.lon_east,
+                        elevation_m: trackingStatus.elevation_m,
+                        off_route: trackingStatus.route_relative?.off_route,
+                        heading_deg: trackingStatus.heading_deg,
+                      }
+                    : null
+                }
               />
             </div>
 
@@ -204,7 +275,23 @@ export default function EvaSimulationPage() {
                     className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white"
                   >
                     {playing ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
-                    <span>{playing ? "Pause" : "Play Traversal"}</span>
+                    <span>{playing ? "Pause" : "Play Simulation"}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => stepInstructionBy(-1)}
+                    className="p-1.5 rounded-lg bg-[#161c2b] border border-[#252f44] text-slate-300 hover:text-white"
+                    title="Step Back One Instruction"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => stepInstructionBy(1)}
+                    className="p-1.5 rounded-lg bg-[#161c2b] border border-[#252f44] text-slate-300 hover:text-white"
+                    title="Step Forward One Instruction"
+                  >
+                    <ChevronRight className="w-4 h-4" />
                   </button>
                   <button
                     type="button"
@@ -313,10 +400,137 @@ export default function EvaSimulationPage() {
                         Bearing: {sample.instruction.bearing_true_north_deg.toFixed(0)}° True ({sample.instruction.cardinal_direction}) · Grade {sample.instruction.grade_percent.toFixed(1)}%
                       </div>
                     )}
+                    {sample.nextInstruction && (
+                      <div className="pt-1.5 border-t border-[#1e2638] text-[10px] font-mono text-slate-400">
+                        NEXT CUE (#{sample.nextInstruction.step_index}): {sample.nextInstruction.instruction_text}
+                      </div>
+                    )}
                   </div>
                 )}
               </>
             )}
+
+            {/* Authenticated Live Mission Positioning Panel (Strictly Separated from Simulation) */}
+            <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-4 space-y-2.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-200 flex items-center gap-1.5">
+                  {trackingStatus?.live_available ? (
+                    <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                  ) : (
+                    <MapPinOff className="w-3.5 h-3.5 text-amber-400" />
+                  )}
+                  Live Mission Positioning
+                </span>
+                <span
+                  className={`text-[9px] font-mono uppercase px-1.5 py-0.5 rounded ${
+                    trackingStatus?.live_available
+                      ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                      : "bg-slate-800 text-amber-300"
+                  }`}
+                >
+                  {trackingStatus?.status ?? "disconnected"}
+                </span>
+              </div>
+
+              {!trackingStatus?.live_available ? (
+                <p className="text-amber-200/90 leading-relaxed">
+                  {trackingStatus?.message ||
+                    "Live Mars position unavailable — no mission positioning provider connected."}
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-2 gap-1.5 font-mono text-[11px]">
+                    <div className="bg-[#0d111a] p-2 rounded border border-[#1e2638]">
+                      <div className="text-[9px] text-slate-400">PROVIDER / SEQ</div>
+                      <div className="text-emerald-300 truncate">
+                        {trackingStatus.provider_id} #{trackingStatus.sequence_number}
+                      </div>
+                    </div>
+                    <div className="bg-[#0d111a] p-2 rounded border border-[#1e2638]">
+                      <div className="text-[9px] text-slate-400">FIX (IAU2000:49900)</div>
+                      <div className="text-slate-100">
+                        {trackingStatus.lat?.toFixed(5)}°, {trackingStatus.lon_east?.toFixed(5)}°E
+                      </div>
+                    </div>
+                    {trackingStatus.route_relative && (
+                      <>
+                        <div className="bg-[#0d111a] p-2 rounded border border-[#1e2638]">
+                          <div className="text-[9px] text-slate-400">CROSS-TRACK ERR</div>
+                          <div
+                            className={
+                              trackingStatus.route_relative.off_route
+                                ? "text-red-300 font-bold"
+                                : "text-cyan-300"
+                            }
+                          >
+                            {trackingStatus.route_relative.cross_track_error_m.toFixed(1)} m (
+                            {trackingStatus.route_relative.off_route ? "OFF-ROUTE" : "IN CORRIDOR"})
+                          </div>
+                        </div>
+                        <div className="bg-[#0d111a] p-2 rounded border border-[#1e2638]">
+                          <div className="text-[9px] text-slate-400">REMAINING DIST</div>
+                          <div className="text-slate-100">
+                            {trackingStatus.route_relative.remaining_distance_m.toFixed(1)} m
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {activeRoute && (
+                    <button
+                      type="button"
+                      disabled={replanLoading}
+                      onClick={() => void requestReplanPreview(activeRoute.route_id)}
+                      className="w-full py-1.5 px-3 rounded-lg bg-amber-600/25 hover:bg-amber-600/40 border border-amber-500/40 text-amber-200 font-semibold flex items-center justify-center gap-1.5"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${replanLoading ? "animate-spin" : ""}`} />
+                      <span>Preview DEM Replan Diff from Live Fix</span>
+                    </button>
+                  )}
+                  {replanError && (
+                    <div className="text-[10px] text-red-300 font-mono">{replanError}</div>
+                  )}
+                  {replanPreview && (
+                    <div className="p-2.5 rounded-lg bg-[#161c2b] border border-cyan-500/40 space-y-2 text-[11px]">
+                      <div className="font-bold text-cyan-300">
+                        Confirmation Required: Live Replan Diff
+                      </div>
+                      <div className="font-mono text-slate-300 space-y-0.5">
+                        <div>
+                          Dist delta: {replanPreview.distance_delta_m >= 0 ? "+" : ""}
+                          {replanPreview.distance_delta_m.toFixed(1)} m
+                        </div>
+                        <div>
+                          Gain delta: {replanPreview.elevation_gain_delta_m >= 0 ? "+" : ""}
+                          {replanPreview.elevation_gain_delta_m.toFixed(1)} m
+                        </div>
+                        <div>
+                          Max slope delta: {replanPreview.max_slope_delta_deg >= 0 ? "+" : ""}
+                          {replanPreview.max_slope_delta_deg.toFixed(1)}°
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => adoptReplanPreview()}
+                          className="flex-1 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-semibold"
+                        >
+                          Confirm Adopt
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => dismissReplanPreview()}
+                          className="px-2.5 py-1 rounded bg-slate-800 text-slate-300"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
 
             {/* Honest Telemetry Disclosure Card */}
             <div className="bg-amber-950/35 border border-amber-500/40 rounded-xl p-4 space-y-2 text-xs">

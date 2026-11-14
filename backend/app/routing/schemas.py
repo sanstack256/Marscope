@@ -41,7 +41,7 @@ class RoutePlanningConstraints(BaseModel):
         description="Optional max EVA time budget (hours) for outbound + return verification."
     )
     safety_reserve_fraction: float = Field(
-        0.25, ge=0.0, le=0.75,
+        0.0, ge=0.0, le=0.75,
         description="Fraction of EVA budget held in reserve (must remain unspent)."
     )
     enforce_budget: bool = Field(
@@ -49,8 +49,8 @@ class RoutePlanningConstraints(BaseModel):
         description="If true, route fails cleanly when estimated time exceeds usable budget.",
     )
     return_to_start: bool = Field(
-        True,
-        description="Whether to plan closed round-trip return leg from destination back to start.",
+        False,
+        description="Whether to plan closed round-trip return leg from destination back to start (explicitly opt-in).",
     )
     optimize_target_order: bool = Field(
         True,
@@ -90,6 +90,7 @@ class RouteCompareRequest(BaseModel):
     modes: List[RoutingMode] = Field(
         default_factory=lambda: [RoutingMode.CONSERVATIVE, RoutingMode.BALANCED, RoutingMode.SCIENCE_PRIORITY]
     )
+    algorithm: PathAlgorithm = Field(PathAlgorithm.ASTAR)
     constraints: RoutePlanningConstraints = Field(default_factory=RoutePlanningConstraints)
 
 
@@ -242,6 +243,7 @@ class RouteComputeResponse(BaseModel):
     instructions: List[NavigationInstruction] = Field(default_factory=list)
     resolution_suitability: Dict[str, Any] = Field(default_factory=dict)
     limitations: List[str] = Field(default_factory=list)
+    provenance: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RouteCompareEntry(BaseModel):

@@ -40,6 +40,7 @@ import {
   CompositionSearchResponse,
   MeasurementCategory,
   ScienceTarget,
+  SourcesAuditResponse,
   SpeciesRecord,
 } from "../../types";
 
@@ -71,6 +72,16 @@ export default function SurfaceExplorerPage() {
   const [inspectedEvidence, setInspectedEvidence] = useState<CompositionEvidence | null>(null);
   const [evidenceLoading, setEvidenceLoading] = useState<boolean>(false);
   const [savedTargetMessage, setSavedTargetMessage] = useState<string | null>(null);
+  const [sourcesAudit, setSourcesAudit] = useState<SourcesAuditResponse | null>(null);
+
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/sources/audit`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.sources) setSourcesAudit(data);
+      })
+      .catch(() => {});
+  }, []);
 
   const {
     availableLayers,
@@ -611,6 +622,45 @@ export default function SurfaceExplorerPage() {
                     );
                   })}
                 </div>
+
+                {/* Challenge NASA/USGS Sources Audit & Exclusions */}
+                {sourcesAudit && (
+                  <div className="space-y-2 pt-2 border-t border-[#1e2638]">
+                    <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      <span>NASA / USGS Sources Audit</span>
+                      <span>{sourcesAudit.sources.length}</span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {sourcesAudit.sources.map((src) => (
+                        <div
+                          key={src.id}
+                          className="p-2 rounded-lg bg-[#0d111a] border border-[#1d2536] space-y-1 text-[10px]"
+                        >
+                          <div className="flex items-center justify-between gap-1.5">
+                            <span className="font-semibold text-slate-200 truncate">{src.name}</span>
+                            <span
+                              className={`font-mono uppercase px-1.5 py-0.5 rounded shrink-0 ${
+                                src.status === "excluded_no_mars_dataset"
+                                  ? "bg-red-950/60 text-red-300 border border-red-700/40"
+                                  : src.status === "integrated_isolated_jezero"
+                                    ? "bg-amber-950/60 text-amber-300 border border-amber-700/40"
+                                    : "bg-emerald-950/50 text-emerald-300 border border-emerald-700/40"
+                              }`}
+                            >
+                              {src.status.replaceAll("_", " ")}
+                            </span>
+                          </div>
+                          {src.scale && (
+                            <div className="text-[9px] font-mono text-amber-300">Scale: {src.scale}</div>
+                          )}
+                          <p className="text-slate-400 leading-relaxed">
+                            {src.reason || src.notes}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </>
             )}
 

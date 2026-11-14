@@ -80,3 +80,11 @@ Original label files are retained. PDS3 ODL labels use the existing parser; PDS4
    - When `astronaut_total_mass_kg` is supplied, only deterministic Newtonian climb work ($\Delta PE = m \cdot g_{\text{Mars}} \cdot \Delta h$, $g_{\text{Mars}} = 3.72076\text{ m/s}^2$) is reported (`gravitational_climb_work_joules`).
    - Oxygen ($\text{O}_2$) reserves, $\text{CO}_2$ scrubbing, suit battery state-of-charge, and metabolic calorie burn curves are strictly excluded and labeled `Not Modeled (Unvalidated)` in `/simulation` (`safety_certification_enabled = false`).
 3. **MSL Navcam Panorama Boundary Remains Active:** Prompt 11 delivers local DEM-derived 3D orbital/surface terrain and science-aware routing; rover panorama station rendering remains withheld until verified individual MSL Navcam products and labels are acquired.
+
+---
+
+## 7. Prompt 12 Clean-Checkout Honesty, Source Exclusions & Live Positioning Policy
+
+1. **Clean-Checkout Non-Mutation:** With empty local `datasets/raw/` and `datasets/processed/` directories, `DatasetCatalogService` and `LayerCatalogService` demote absent local binaries strictly in memory without rewriting tracked catalog JSON files or fabricating available DEM layers.
+2. **Source Audit Exclusions & Mission Separation:** USGS SIM 3292 (`1:20,000,000`) is restricted to global geological context with unverified Gale route applicability; NASA Worldview / GIBS is explicitly audited and excluded as Earth-only; and Mars 2020 Perseverance imagery (`/api/imagery/perseverance`) is strictly isolated to Jezero Crater (`isolated_from_gale_planning = true`).
+3. **No Terrestrial Geolocation or Auto-Rerouting:** Browser `navigator.geolocation` and synthetic live telemetry are prohibited (`"Live Mars position unavailable — no mission positioning provider connected."`). Live positioning accepts only token-authenticated `IAU2000:49900` feeds, and off-route replan proposals strictly require explicit user confirmation (`/api/tracking/replan-preview`).

@@ -21,7 +21,13 @@ export interface CameraFocusTarget {
   nonce: number;
 }
 
-export type CameraPresetType = "oblique" | "top_down" | "focus_route" | "reset";
+export type CameraPresetType =
+  | "oblique"
+  | "top_down"
+  | "focus_start"
+  | "focus_destination"
+  | "focus_route"
+  | "reset";
 
 export interface CameraPresetRequest {
   preset: CameraPresetType;
@@ -57,6 +63,8 @@ interface RoutingStoreState {
   routeError: string | null;
   staleRoute: boolean;
   staleReason: string | null;
+  autoComputeEnabled: boolean;
+  studyExampleLoaded: boolean;
 
   // Synchronized Selection & 3D Camera Control
   availableTargets: ScienceTarget[];
@@ -78,6 +86,9 @@ interface RoutingStoreState {
 
   setStartPoint: (pt: RouteCoordinateInput | null) => void;
   setDestinationPoint: (pt: RouteCoordinateInput | null) => void;
+  clearEndpoints: () => void;
+  setAutoComputeEnabled: (enabled: boolean) => void;
+  scheduleAutoCompute: () => void;
   setSelectedTargetIds: (ids: string[]) => void;
   toggleTargetId: (id: string) => void;
   addCustomWaypoint: (pt: RouteCoordinateInput) => void;
@@ -87,7 +98,7 @@ interface RoutingStoreState {
   setAlgorithm: (alg: PathAlgorithm) => void;
   updateConstraints: (patch: Partial<RoutePlanningConstraints>) => void;
 
-  loadRealGaleBoxworkPreset: () => void;
+  loadBoxworkStudyExample: () => void;
   computeRoute: () => Promise<RouteComputeResponse | null>;
   compareRoutes: () => Promise<RouteCompareResponse | null>;
   selectComparedRoute: (mode: PlanningMode) => void;
@@ -103,17 +114,21 @@ const DEFAULT_CONSTRAINTS: RoutePlanningConstraints = {
   max_slope_deg: 20.0,
   max_roughness_tri_m: null,
   snap_radius_m: 60.0,
-  walking_speed_m_per_s: 0.8,
-  walking_speed_provenance: "User-Configured Planning Assumption (Unvalidated)",
-  astronaut_total_mass_kg: 130.0,
-  max_eva_duration_hours: 4.0,
-  safety_reserve_fraction: 0.25,
+  walking_speed_m_per_s: null,
+  walking_speed_provenance: null,
+  astronaut_total_mass_kg: null,
+  max_eva_duration_hours: null,
+  safety_reserve_fraction: 0.0,
   enforce_budget: false,
-  return_to_start: true,
+  return_to_start: false,
   optimize_target_order: true,
   simplification_epsilon_m: 6.0,
   max_grid_dim: 220,
 };
+
+let _computeAbortCtrl: AbortController | null = null;
+let _compareAbortCtrl: AbortController | null = null;
+let _autoComputeTimer: ReturnType<typeof setTimeout> | null = null;
 
 function _markStaleIfPresent(
   state: RoutingStoreState,
@@ -140,22 +155,16 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
   surfacePickMode: "inspect",
   pickedSurfacePoint: null,
 
-  // Real Curiosity Sol 4500+ Mount Sharp / Boxwork Crater coordinates inside DTEEC_009149_1750
-  startPoint: {
-    lat: -4.742,
-    lon_east: 137.392,
-    label: "Boxwork Station Alpha (Curiosity Sol 4500+)",
-  },
-  destinationPoint: {
-    lat: -4.756,
-    lon_east: 137.402,
-    label: "Gediz Ridge Sulfate Outcrop",
-  },
+  // Start & Destination remain empty until explicitly chosen or loaded via Boxwork Study Example
+  startPoint: null,
+  destinationPoint: null,
   selectedTargetIds: [],
   customWaypoints: [],
   activeMode: "balanced",
   algorithm: "astar",
   constraints: { ...DEFAULT_CONSTRAINTS },
+  autoComputeEnabled: true,
+  studyExampleLoaded: false,
 
   activeRoute: null,
   comparisonResult: null,
@@ -222,25 +231,84 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
   setSurfacePickMode: (mode) => set({ surfacePickMode: mode }),
   setPickedSurfacePoint: (pt) => set({ pickedSurfacePoint: pt }),
 
-  setStartPoint: (pt) =>
+  setStartPoint: (pt) => {
     set((s) => ({
       startPoint: pt,
+      studyExampleLoaded: false,
       ..._markStaleIfPresent(s, "Start position changed"),
-    })),
+    }));
+    get().scheduleAutoCompute();
+  },
 
-  setDestinationPoint: (pt) =>
+  setDestinationPoint: (pt) => {
     set((s) => ({
       destinationPoint: pt,
+      studyExampleLoaded: false,
       ..._markStaleIfPresent(s, "Destination position changed"),
-    })),
+    }));
+    get().scheduleAutoCompute();
+  },
 
-  setSelectedTargetIds: (ids) =>
+  clearEndpoints: () => {
+    if (_autoComputeTimer) {
+      clearTimeout(_autoComputeTimer);
+      _autoComputeTimer = null;
+    }
+    if (_computeAbortCtrl) {
+      _computeAbortCtrl.abort();
+      _computeAbortCtrl = null;
+    }
+    if (_compareAbortCtrl) {
+      _compareAbortCtrl.abort();
+      _compareAbortCtrl = null;
+    }
+    set({
+      startPoint: null,
+      destinationPoint: null,
+      customWaypoints: [],
+      selectedTargetIds: [],
+      activeRoute: null,
+      comparisonResult: null,
+      staleRoute: false,
+      staleReason: null,
+      routeError: null,
+      routeLoading: false,
+      compareLoading: false,
+      selectedWaypointSeq: null,
+      selectedInstructionStep: null,
+      studyExampleLoaded: false,
+    });
+  },
+
+  setAutoComputeEnabled: (enabled) => set({ autoComputeEnabled: enabled }),
+
+  scheduleAutoCompute: () => {
+    if (_autoComputeTimer) {
+      clearTimeout(_autoComputeTimer);
+      _autoComputeTimer = null;
+    }
+    const s = get();
+    if (!s.autoComputeEnabled || !s.startPoint || !s.destinationPoint) {
+      return;
+    }
+    _autoComputeTimer = setTimeout(() => {
+      _autoComputeTimer = null;
+      const latest = get();
+      if (latest.autoComputeEnabled && latest.startPoint && latest.destinationPoint) {
+        void latest.computeRoute();
+      }
+    }, 380);
+  },
+
+  setSelectedTargetIds: (ids) => {
     set((s) => ({
       selectedTargetIds: ids,
       ..._markStaleIfPresent(s, "Selected science targets changed"),
-    })),
+    }));
+    get().scheduleAutoCompute();
+  },
 
-  toggleTargetId: (id) =>
+  toggleTargetId: (id) => {
     set((s) => {
       const exists = s.selectedTargetIds.includes(id);
       const next = exists
@@ -250,25 +318,33 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
         selectedTargetIds: next,
         ..._markStaleIfPresent(s, "Selected science targets changed"),
       };
-    }),
+    });
+    get().scheduleAutoCompute();
+  },
 
-  addCustomWaypoint: (pt) =>
+  addCustomWaypoint: (pt) => {
     set((s) => ({
       customWaypoints: [...s.customWaypoints, pt],
       ..._markStaleIfPresent(s, "Waypoints changed"),
-    })),
+    }));
+    get().scheduleAutoCompute();
+  },
 
-  removeCustomWaypoint: (idx) =>
+  removeCustomWaypoint: (idx) => {
     set((s) => ({
       customWaypoints: s.customWaypoints.filter((_, i) => i !== idx),
       ..._markStaleIfPresent(s, "Waypoints changed"),
-    })),
+    }));
+    get().scheduleAutoCompute();
+  },
 
-  clearCustomWaypoints: () =>
+  clearCustomWaypoints: () => {
     set((s) => ({
       customWaypoints: [],
       ..._markStaleIfPresent(s, "Waypoints cleared"),
-    })),
+    }));
+    get().scheduleAutoCompute();
+  },
 
   setActiveMode: (mode) => {
     const compared = get().comparisonResult?.comparison.find((e) => e.mode === mode);
@@ -276,63 +352,83 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
       set({
         activeMode: mode,
         activeRoute: compared.route,
-        selectedWaypointSeq: null,
-        selectedInstructionStep: null,
+        selectedWaypointSeq: 0,
+        selectedInstructionStep:
+          compared.route.instructions.length > 0 ? compared.route.instructions[0].step_index : null,
       });
     } else {
       set((s) => ({
         activeMode: mode,
         ..._markStaleIfPresent(s, `Routing mode changed to ${mode}`),
       }));
+      get().scheduleAutoCompute();
     }
   },
 
-  setAlgorithm: (alg) =>
+  setAlgorithm: (alg) => {
     set((s) => ({
       algorithm: alg,
       ..._markStaleIfPresent(s, `Path algorithm switched to ${alg}`),
-    })),
+    }));
+    get().scheduleAutoCompute();
+  },
 
-  updateConstraints: (patch) =>
+  updateConstraints: (patch) => {
     set((s) => ({
       constraints: { ...s.constraints, ...patch },
       ..._markStaleIfPresent(s, "Route constraints updated"),
-    })),
+    }));
+    get().scheduleAutoCompute();
+  },
 
-  loadRealGaleBoxworkPreset: () =>
+  loadBoxworkStudyExample: () => {
     set((s) => ({
       selectedDemDatasetId: "hirise_dteec_009149_1750",
       startPoint: {
         lat: -4.742,
         lon_east: 137.392,
-        label: "Boxwork Station Alpha (Sol 4500+)",
+        label: "Boxwork Station Alpha (Curiosity Sol 4500+ Example)",
       },
       destinationPoint: {
         lat: -4.756,
         lon_east: 137.402,
-        label: "Gediz Ridge Sulfate Outcrop",
+        label: "Gediz Ridge Sulfate Outcrop (Example)",
       },
       customWaypoints: [
         {
           lat: -4.7485,
           lon_east: 137.3972,
-          label: "Boxwork Fracture Wall Stop",
+          label: "Boxwork Fracture Wall Stop (Example)",
         },
       ],
-      ..._markStaleIfPresent(s, "Loaded Gale Crater Boxwork preset"),
-    })),
+      studyExampleLoaded: true,
+      ..._markStaleIfPresent(s, "Loaded Gale Crater Boxwork Study Example"),
+    }));
+    get().scheduleAutoCompute();
+  },
 
   computeRoute: async () => {
+    if (_autoComputeTimer) {
+      clearTimeout(_autoComputeTimer);
+      _autoComputeTimer = null;
+    }
     const s = get();
     if (!s.startPoint || !s.destinationPoint) {
       set({ routeError: "Select both a Start and Destination point before computing a route." });
       return null;
     }
+    if (_computeAbortCtrl) {
+      _computeAbortCtrl.abort();
+    }
+    const ctrl = new AbortController();
+    _computeAbortCtrl = ctrl;
+
     set({ routeLoading: true, routeError: null });
     try {
       const res = await fetch(`${API_BASE_URL}/routing/compute`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: ctrl.signal,
         body: JSON.stringify({
           dataset_id: s.selectedDemDatasetId || null,
           start: s.startPoint,
@@ -344,6 +440,7 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
           constraints: s.constraints,
         }),
       });
+      if (ctrl.signal.aborted) return null;
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
         const msg =
@@ -353,6 +450,7 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
         throw new Error(msg);
       }
       const route: RouteComputeResponse = await res.json();
+      if (ctrl.signal.aborted) return null;
       set({
         activeRoute: route,
         routeLoading: false,
@@ -364,6 +462,9 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
       });
       return route;
     } catch (err: unknown) {
+      if ((err as { name?: string })?.name === "AbortError") {
+        return null;
+      }
       set({
         routeLoading: false,
         routeError: err instanceof Error ? err.message : "Route computation failed",
@@ -378,11 +479,18 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
       set({ routeError: "Select both a Start and Destination point before comparing routes." });
       return null;
     }
+    if (_compareAbortCtrl) {
+      _compareAbortCtrl.abort();
+    }
+    const ctrl = new AbortController();
+    _compareAbortCtrl = ctrl;
+
     set({ compareLoading: true, routeError: null });
     try {
       const res = await fetch(`${API_BASE_URL}/routing/compare`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: ctrl.signal,
         body: JSON.stringify({
           dataset_id: s.selectedDemDatasetId || null,
           start: s.startPoint,
@@ -390,14 +498,21 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
           target_ids: s.selectedTargetIds,
           waypoints: s.customWaypoints,
           modes: ["conservative", "balanced", "science_priority"],
+          algorithm: s.algorithm,
           constraints: s.constraints,
         }),
       });
+      if (ctrl.signal.aborted) return null;
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
-        throw new Error(errBody?.detail || `HTTP ${res.status}`);
+        const msg =
+          typeof errBody?.detail === "string"
+            ? errBody.detail
+            : JSON.stringify(errBody?.detail || `HTTP ${res.status}`);
+        throw new Error(msg);
       }
       const cmp: RouteCompareResponse = await res.json();
+      if (ctrl.signal.aborted) return null;
       const preferred =
         cmp.comparison.find((e) => e.mode === s.activeMode && e.feasible && e.route)?.route ||
         cmp.comparison.find((e) => e.feasible && e.route)?.route ||
@@ -412,6 +527,9 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
       });
       return cmp;
     } catch (err: unknown) {
+      if ((err as { name?: string })?.name === "AbortError") {
+        return null;
+      }
       set({
         compareLoading: false,
         routeError: err instanceof Error ? err.message : "Route comparison failed",

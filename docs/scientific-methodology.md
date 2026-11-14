@@ -99,3 +99,11 @@ Panorama eligibility defaults to `panorama_eligibility_unverified`. A product is
    - Orthogonal passability guards prohibit diagonal corner-cutting adjacent to NoData or excessive-slope cells (`strict_no_corner_cutting`).
    - `simplify_leg_safely()` enforces Bresenham/supercover line-of-sight passability checks plus a 3D vertical chord deviation bound ($\le \min(2.5, \max(1.0, 0.4\epsilon))$ m) so steep ridges or troughs are preserved as intermediate vertices.
    - Summary `mean_slope_deg`, `max_slope_deg`, and `mean_roughness_tri_m` aggregate over **all raw traversed DEM grid cells** (`leg_res.cells`) rather than simplified polyline vertices alone.
+
+---
+
+## 11. Prompt 12 Exact Trajectory Geometry, Opt-In Constraints & Telemetry Separation
+
+1. **Exact Polyline Geometry (`LocalTerrain3DViewer.tsx`):** Route trajectories render strictly as exact linear 3D polyline segments connecting graph-verified `activeRoute.vertices` coordinates rather than Catmull-Rom or spline interpolations that could curve into unverified high-slope or NoData cells.
+2. **Opt-In Constraint & Metric Grouping:** Mission reserve/return margins (`safety_reserve_fraction = 0.0`, `return_to_start = false`) and walking speed / astronaut mass inputs are strictly opt-in rather than silent assumptions. Route comparison reports four demarcated metric groups (`Terrain Metrics`, `Evidence-Backed Constraints`, `Uncertainty`, `Planning Assumptions`) and tags the lowest numeric-cost candidate strictly as `"Lowest calculated terrain cost"` (`safety_certification_enabled = false`).
+3. **Live Telemetry vs Deterministic Simulation (`tracking_service.py`, `simulation/page.tsx`):** Authenticated live mission telemetry (`IAU2000:49900`, monotonic sequences, Mars-sphere cross-track deviation, confirmation-gated replan previews) is strictly separated from `Mission Simulation` playback (`SIMULATION — NOT LIVE MISSION TELEMETRY`).

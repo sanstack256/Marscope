@@ -16,6 +16,7 @@ from app.ingestion.sources.hirise import HiriseSourceAdapter
 from app.ingestion.sources.mars_trek import MarsTrekSourceAdapter
 from app.ingestion.sources.msl_curiosity import MslCuriositySourceAdapter
 from app.ingestion.sources.pds_mola import PdsMolaSourceAdapter
+from app.ingestion.sources.usgs_pgm import UsgsPlanetaryGeologicMappingAdapter
 from app.schemas.dataset import Dataset, DatasetLifecycleStatus, VerificationState
 
 
@@ -30,6 +31,7 @@ class DatasetCatalogService:
             HiriseSourceAdapter(),
             MslCuriositySourceAdapter(),
             MarsTrekSourceAdapter(),
+            UsgsPlanetaryGeologicMappingAdapter(),
         ]
         self._load_persisted_catalog()
 
@@ -142,8 +144,7 @@ class DatasetCatalogService:
         is_wmts = "{" in dataset.original_product_url
         has_local_file = False
         if not is_wmts and dataset.local_file_path:
-            local_abs = self.catalog_storage_dir.parent.parent / dataset.local_file_path
-            if local_abs.exists():
+            if self._resolve_existing_path(dataset.local_file_path) is not None:
                 has_local_file = True
                 dataset.verification.download_verification = VerificationState.VERIFIED
 
@@ -270,6 +271,18 @@ class DatasetCatalogService:
             })
         return report
 
+    def _resolve_existing_path(self, rel_or_abs: Optional[str]) -> Optional[Path]:
+        if not rel_or_abs:
+            return None
+        p = Path(rel_or_abs)
+        if p.is_absolute():
+            return p if p.exists() else None
+        for root in (self.raw_data_dir.parent, self.catalog_storage_dir.parent):
+            cand = root / p
+            if cand.exists():
+                return cand
+        return None
+
     def _persist_dataset(self, dataset: Dataset) -> None:
         file_path = self.catalog_storage_dir / f"{dataset.id}.json"
         file_path.write_text(dataset.model_dump_json(indent=2), encoding="utf-8")
@@ -278,6 +291,30 @@ class DatasetCatalogService:
         for json_file in self.catalog_storage_dir.glob("*.json"):
             try:
                 ds = Dataset.model_validate_json(json_file.read_text(encoding="utf-8"))
+                is_wmts = "{" in (ds.original_product_url or "")
+                if ds.local_file_path and self._resolve_existing_path(ds.local_file_path) is None:
+                    ds.local_file_path = None
+                    if not is_wmts:
+                        ds.verification.download_verification = VerificationState.UNVERIFIED
+                if ds.processed_file_path and self._resolve_existing_path(ds.processed_file_path) is None:
+                    ds.processed_file_path = None
+                    ds.verification.processing_verification = VerificationState.UNVERIFIED
+                if (
+                    not is_wmts
+                    and ds.local_file_path is None
+                    and ds.processed_file_path is None
+                    and ds.status in {
+                        DatasetLifecycleStatus.DOWNLOADED,
+                        DatasetLifecycleStatus.VALIDATED,
+                        DatasetLifecycleStatus.PROCESSED,
+                        DatasetLifecycleStatus.AVAILABLE,
+                    }
+                ):
+                    ds.status = (
+                        DatasetLifecycleStatus.METADATA_VERIFIED
+                        if ds.verification.metadata_verification == VerificationState.VERIFIED
+                        else DatasetLifecycleStatus.DISCOVERED
+                    )
                 self._datasets[ds.id] = ds
             except Exception as exc:
                 print(f"Failed to read catalog entry from {json_file}: {exc}")

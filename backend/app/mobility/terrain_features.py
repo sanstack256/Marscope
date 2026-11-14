@@ -473,7 +473,8 @@ def compute_elevation_profile(
                     continue
                 # Continuous pixel coordinates (r_f, c_f)
                 inv_t = ~reader.transform
-                c_f, r_f = inv_t @ (lon_query, lat)
+                c_f = inv_t.a * lon_query + inv_t.b * lat + inv_t.c
+                r_f = inv_t.d * lon_query + inv_t.e * lat + inv_t.f
                 r_i = int(math.floor(r_f))
                 c_i = int(math.floor(c_f))
                 if r_i < 0 or r_i >= reader.height or c_i < 0 or c_i >= reader.width:

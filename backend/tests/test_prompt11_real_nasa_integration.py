@@ -145,9 +145,9 @@ def test_real_nasa_gale_boxwork_route_comparison_and_geojson():
 def test_real_nasa_second_hirise_and_mola_dem_manifests():
     client = TestClient(app)
 
-    # Check second HiRISE Stereo DTM (Bradbury to Vera Rubin Ridge) if present
+    # Check second HiRISE Stereo DTM (Bradbury to Vera Rubin Ridge) if present on disk
     ds2 = catalog_service.get_dataset("hirise_dteec_040770_1755")
-    if ds2 and ds2.local_file_path:
+    if ds2 and ds2.local_file_path and (catalog_service.raw_data_dir.parent / ds2.local_file_path).exists():
         r2 = client.get(
             "/api/terrain/mesh/manifest?dataset_id=hirise_dteec_040770_1755&max_lod=1&tile_grid_size=33"
         )
@@ -156,9 +156,12 @@ def test_real_nasa_second_hirise_and_mola_dem_manifests():
         assert m2["product_id"].startswith("DTEEC_040770_1755")
         assert m2["native_resolution_m"] == pytest.approx(1.01, abs=0.05)
 
-    # Check MOLA 128ppd Gale basin DEM + resolution suitability gate
+    # Check MOLA 128ppd Gale basin DEM + resolution suitability gate if present on disk
     ds_mola = catalog_service.get_dataset("mola_megt00n090hb")
-    if ds_mola and ds_mola.local_file_path:
+    if ds_mola and (
+        (ds_mola.local_file_path and (catalog_service.raw_data_dir.parent / ds_mola.local_file_path).exists())
+        or (ds_mola.processed_file_path and (catalog_service.raw_data_dir.parent / ds_mola.processed_file_path).exists())
+    ):
         rm = client.get(
             "/api/terrain/mesh/manifest?dataset_id=mola_megt00n090hb&max_lod=1&tile_grid_size=33"
         )

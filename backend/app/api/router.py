@@ -22,6 +22,7 @@ from app.api import (
     targets,
     terrain,
     terrain_mesh,
+    tracking,
 )
 
 api_router = APIRouter(prefix="/api")
@@ -40,4 +41,5 @@ api_router.include_router(targets.router)
 api_router.include_router(sources.router)
 api_router.include_router(physics.router)
 api_router.include_router(localization.router)
+api_router.include_router(tracking.router)
 api_router.include_router(destinations.router)

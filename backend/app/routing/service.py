@@ -675,12 +675,38 @@ class ScienceAwareRoutingService:
                 "targets": req.target_ids,
                 "waypoints": [[w.lat, w.lon_east] for w in req.waypoints],
                 "mode": req.mode.value,
+                "algorithm": req.algorithm.value,
                 "constraints": req.constraints.model_dump(),
             },
             sort_keys=True,
         )
         sig_hash = hashlib.sha256(sig_payload.encode("utf-8")).hexdigest()[:16]
         route_id = f"rt_{req.mode.value}_{uuid.uuid4().hex[:10]}"
+
+        ds_obj = self.catalog_service.get_dataset(ds_id)
+        provenance_block: Dict[str, Any] = {
+            "dem_dataset_id": ds_id,
+            "dem_product_id": prod_id,
+            "crs": "IAU2000:49900",
+            "vertical_datum": ds_obj.calibration_status if ds_obj else "MOLA Areoid / Ellipsoid (dataset-defined)",
+            "coordinate_convention": "Planetocentric latitude (-90..90), East-positive longitude [0..360)",
+            "algorithm": req.algorithm.value,
+            "mode": req.mode.value,
+            "mode_label": policy.label,
+            "policy_weights": {
+                "slope_weight": policy.slope_weight,
+                "uphill_weight": policy.uphill_weight,
+                "downhill_weight": policy.downhill_weight,
+                "roughness_weight": policy.roughness_weight,
+                "uncertainty_weight": policy.uncertainty_weight,
+                "science_corridor_bonus": policy.science_corridor_bonus,
+            },
+            "effective_slope_limit_deg": round(grid.effective_slope_limit_deg, 2),
+            "speed_assumption": assumption_cls,
+            "return_to_start": req.constraints.return_to_start,
+            "route_signature": sig_hash,
+            "safety_certification": "None — terrain optimization reflects DEM geometry & planning constraints only",
+        }
 
         resp = RouteComputeResponse(
             route_id=route_id,
@@ -733,6 +759,7 @@ class ScienceAwareRoutingService:
             instructions=instructions,
             resolution_suitability=suit_dump,
             limitations=limitations,
+            provenance=provenance_block,
         )
         self._store_route(resp)
         return resp
@@ -750,6 +777,7 @@ class ScienceAwareRoutingService:
                 target_ids=req.target_ids,
                 waypoints=req.waypoints,
                 mode=mode,
+                algorithm=req.algorithm,
                 constraints=req.constraints,
             )
             try:

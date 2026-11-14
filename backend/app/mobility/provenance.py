@@ -49,6 +49,10 @@ def build_terrain_data_inventory(
             cand = Path(ds.local_file_path)
             if cand.exists():
                 raw_path = cand
+            else:
+                cand_rel = raw_dir.parent / ds.local_file_path
+                if cand_rel.exists():
+                    raw_path = cand_rel
         if raw_path is None:
             cand_raw = raw_dir / ds.product_id.lower()
             if cand_raw.exists():

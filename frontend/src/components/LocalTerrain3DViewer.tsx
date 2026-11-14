@@ -8,6 +8,7 @@ import {
   Crosshair,
   Eye,
   Flag,
+  Grid,
   Layers,
   Loader2,
   MapPin,
@@ -22,9 +23,42 @@ import type {
   PickedSurfacePoint,
   ScienceTarget,
   SurfacePickMode,
+  TerrainMeshManifest,
   TerrainMeshTile,
   TextureOverlayMode,
 } from "@/types";
+
+const TERRAIN_TEX_SIZE = 512;
+
+function buildTileTextureUrl(
+  tile: TerrainMeshTile,
+  manifest: TerrainMeshManifest,
+  overlayMode: TextureOverlayMode
+): string {
+  const texDatasetId =
+    overlayMode === "ortho" && manifest.ortho_dataset_id
+      ? manifest.ortho_dataset_id
+      : manifest.dataset_id;
+  const texOverlay: TextureOverlayMode =
+    overlayMode === "ortho" && !manifest.ortho_dataset_id ? "elevation" : overlayMode;
+
+  const qs = new URLSearchParams({
+    overlay: texOverlay,
+    min_lat: tile.bounds.min_lat.toFixed(7),
+    max_lat: tile.bounds.max_lat.toFixed(7),
+    min_lon: tile.bounds.min_lon.toFixed(7),
+    max_lon: tile.bounds.max_lon.toFixed(7),
+    size: String(TERRAIN_TEX_SIZE),
+  });
+  if (texOverlay === "elevation" && manifest.elevation_range_m) {
+    qs.set("vmin", String(manifest.elevation_range_m.min_m));
+    qs.set("vmax", String(manifest.elevation_range_m.max_m));
+  } else if (texOverlay === "roughness" && manifest.roughness_range_m) {
+    qs.set("vmin", String(manifest.roughness_range_m.min_m));
+    qs.set("vmax", String(manifest.roughness_range_m.max_m));
+  }
+  return `${API_BASE_URL}/terrain/ortho/${encodeURIComponent(texDatasetId)}/texture?${qs.toString()}`;
+}
 
 const MARS_EQUATORIAL_RADIUS_M = 3396190.0;
 
@@ -51,9 +85,18 @@ interface TileMeshUserData {
   maxNorthM: number;
 }
 
+export interface LivePositionMarker {
+  lat: number;
+  lon_east: number;
+  elevation_m?: number | null;
+  off_route?: boolean;
+  heading_deg?: number | null;
+}
+
 interface LocalTerrain3DViewerProps {
   targets?: ScienceTarget[];
   simulationProgressM?: number | null;
+  livePositionMarker?: LivePositionMarker | null;
   onSurfaceInspect?: (point: PickedSurfacePoint) => void;
   compact?: boolean;
 }
@@ -61,6 +104,7 @@ interface LocalTerrain3DViewerProps {
 export function LocalTerrain3DViewer({
   targets = [],
   simulationProgressM = null,
+  livePositionMarker = null,
   onSurfaceInspect,
   compact = false,
 }: LocalTerrain3DViewerProps) {
@@ -74,8 +118,10 @@ export function LocalTerrain3DViewer({
   const controlsRef = useRef<OrbitControls | null>(null);
   const terrainGroupRef = useRef<THREE.Group | null>(null);
   const overlayGroupRef = useRef<THREE.Group | null>(null);
+  const tileBoundsGroupRef = useRef<THREE.Group | null>(null);
   const refElevMRef = useRef<number>(-4500);
   const sceneInitializedRef = useRef<boolean>(false);
+  const fittedManifestKeyRef = useRef<string>("");
   const cameraAnimRef = useRef<{
     active: boolean;
     startPos: THREE.Vector3;
@@ -92,7 +138,14 @@ export function LocalTerrain3DViewer({
   const [tilesLoadedCount, setTilesLoadedCount] = useState(0);
   const [tileError, setTileError] = useState<string | null>(null);
   const [showTargets, setShowTargets] = useState(true);
+  const [showRoute, setShowRoute] = useState(true);
+  const [showTileBoundaries, setShowTileBoundaries] = useState(false);
+  const [lodMode, setLodMode] = useState<"auto" | "manual">("auto");
   const [renderedVertexTotal, setRenderedVertexTotal] = useState(0);
+  const [pendingPickConfirm, setPendingPickConfirm] = useState<{
+    mode: "set_start" | "set_destination";
+    point: PickedSurfacePoint;
+  } | null>(null);
 
   const selectedDemDatasetId = useRoutingStore((s) => s.selectedDemDatasetId);
   const meshManifest = useRoutingStore((s) => s.meshManifest);
@@ -108,6 +161,7 @@ export function LocalTerrain3DViewer({
   const selectedTargetIds = useRoutingStore((s) => s.selectedTargetIds);
   const activeRoute = useRoutingStore((s) => s.activeRoute);
   const selectedWaypointSeq = useRoutingStore((s) => s.selectedWaypointSeq);
+  const selectedInstructionStep = useRoutingStore((s) => s.selectedInstructionStep);
   const cameraFocusRequest = useRoutingStore((s) => s.cameraFocusRequest);
   const cameraPresetRequest = useRoutingStore((s) => s.cameraPresetRequest);
 
@@ -205,10 +259,11 @@ export function LocalTerrain3DViewer({
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.075;
+    controls.dampingFactor = 0.085;
     controls.screenSpacePanning = false;
+    controls.minPolarAngle = 0.04;
     controls.maxPolarAngle = Math.PI * 0.485;
-    controls.minDistance = 40;
+    controls.minDistance = 15;
     controls.maxDistance = 45000;
     controls.target.set(0, 0, 0);
 
@@ -216,18 +271,20 @@ export function LocalTerrain3DViewer({
       cameraAnimRef.current = null;
     });
 
-    // Physically inspired Martian directional lighting + soft dust bounce ambient
-    const ambient = new THREE.AmbientLight("#6e5347", 0.72);
-    const hemi = new THREE.HemisphereLight("#ffdfc4", "#231a16", 0.55);
-    const sun = new THREE.DirectionalLight("#fff1df", 1.85);
+    // Physically grounded Martian directional lighting + soft dust bounce ambient (no specular glare)
+    const ambient = new THREE.AmbientLight("#5c4338", 0.58);
+    const hemi = new THREE.HemisphereLight("#e8c8ae", "#231915", 0.62);
+    const sun = new THREE.DirectionalLight("#f7e3ce", 1.5);
     sun.position.set(2200, 3200, 1400);
-    const fill = new THREE.DirectionalLight("#7aa2cc", 0.35);
+    const fill = new THREE.DirectionalLight("#7aa2cc", 0.25);
     fill.position.set(-1800, 1200, -1600);
     scene.add(ambient, hemi, sun, fill);
 
     const terrainGroup = new THREE.Group();
     const overlayGroup = new THREE.Group();
+    const tileBoundsGroup = new THREE.Group();
     scene.add(terrainGroup);
+    scene.add(tileBoundsGroup);
     scene.add(overlayGroup);
 
     rendererRef.current = renderer;
@@ -235,6 +292,7 @@ export function LocalTerrain3DViewer({
     cameraRef.current = camera;
     controlsRef.current = controls;
     terrainGroupRef.current = terrainGroup;
+    tileBoundsGroupRef.current = tileBoundsGroup;
     overlayGroupRef.current = overlayGroup;
     sceneInitializedRef.current = true;
 
@@ -301,19 +359,27 @@ export function LocalTerrain3DViewer({
       if (onSurfaceInspect) onSurfaceInspect(picked);
 
       if (st.surfacePickMode === "set_start") {
-        st.setStartPoint({
-          lat: picked.lat,
-          lon_east: picked.lon_east,
-          label: `Start (${picked.lat.toFixed(4)}°, ${picked.lon_east.toFixed(4)}°)`,
-        });
-        st.setSurfacePickMode("inspect");
+        if (st.startPoint) {
+          setPendingPickConfirm({ mode: "set_start", point: picked });
+        } else {
+          st.setStartPoint({
+            lat: picked.lat,
+            lon_east: picked.lon_east,
+            label: `Start (${picked.lat.toFixed(4)}°, ${picked.lon_east.toFixed(4)}°)`,
+          });
+          st.setSurfacePickMode("inspect");
+        }
       } else if (st.surfacePickMode === "set_destination") {
-        st.setDestinationPoint({
-          lat: picked.lat,
-          lon_east: picked.lon_east,
-          label: `Dest (${picked.lat.toFixed(4)}°, ${picked.lon_east.toFixed(4)}°)`,
-        });
-        st.setSurfacePickMode("inspect");
+        if (st.destinationPoint) {
+          setPendingPickConfirm({ mode: "set_destination", point: picked });
+        } else {
+          st.setDestinationPoint({
+            lat: picked.lat,
+            lon_east: picked.lon_east,
+            label: `Dest (${picked.lat.toFixed(4)}°, ${picked.lon_east.toFixed(4)}°)`,
+          });
+          st.setSurfacePickMode("inspect");
+        }
       } else if (st.surfacePickMode === "add_waypoint") {
         st.addCustomWaypoint({
           lat: picked.lat,
@@ -392,7 +458,45 @@ export function LocalTerrain3DViewer({
     []
   );
 
-  // Load DEM mesh tiles + synced overlay textures whenever manifest, LOD, or overlay changes
+  const activeOverlayRef = useRef<TextureOverlayMode>(activeOverlayMode);
+  useEffect(() => {
+    activeOverlayRef.current = activeOverlayMode;
+  }, [activeOverlayMode]);
+
+  // Auto-LOD distance selector: adjusts LOD smoothly based on camera distance when lodMode === "auto"
+  useEffect(() => {
+    const controls = controlsRef.current;
+    const camera = cameraRef.current;
+    if (!controls || !camera || !meshManifest || lodMode !== "auto") return;
+
+    const wM = meshManifest.physical_extent_m.width_m || 2000;
+    const hM = meshManifest.physical_extent_m.height_m || 2000;
+    const span = Math.max(wM, hM, 400);
+    const maxAvailLod = Math.max(0, ...meshManifest.lod_levels.map((l) => l.lod));
+    let timerId: number | null = null;
+
+    const evaluateAutoLod = () => {
+      if (timerId !== null) window.clearTimeout(timerId);
+      timerId = window.setTimeout(() => {
+        const dist = camera.position.distanceTo(controls.target);
+        let desired = 1;
+        if (dist > span * 1.45) desired = 0;
+        else if (dist < span * 0.72) desired = Math.min(2, maxAvailLod);
+        else desired = Math.min(1, maxAvailLod);
+        if (desired !== useRoutingStore.getState().activeLod) {
+          setActiveLod(desired);
+        }
+      }, 220);
+    };
+
+    controls.addEventListener("change", evaluateAutoLod);
+    return () => {
+      controls.removeEventListener("change", evaluateAutoLod);
+      if (timerId !== null) window.clearTimeout(timerId);
+    };
+  }, [meshManifest, lodMode, setActiveLod]);
+
+  // Load DEM mesh geometry (decoupled from activeOverlayMode so texture swaps never reload geometry or reset camera)
   useEffect(() => {
     const terrainGroup = terrainGroupRef.current;
     if (!meshManifest || !terrainGroup || lodDescriptors.length === 0) return;
@@ -401,15 +505,6 @@ export function LocalTerrain3DViewer({
     let cancelled = false;
     setTilesLoading(true);
     setTileError(null);
-
-    const texDatasetId =
-      activeOverlayMode === "ortho" && meshManifest.ortho_dataset_id
-        ? meshManifest.ortho_dataset_id
-        : meshManifest.dataset_id;
-    const texOverlay: TextureOverlayMode =
-      activeOverlayMode === "ortho" && !meshManifest.ortho_dataset_id
-        ? "elevation"
-        : activeOverlayMode;
 
     const clearGroupChildren = (group: THREE.Group) => {
       while (group.children.length > 0) {
@@ -425,7 +520,7 @@ export function LocalTerrain3DViewer({
       try {
         const fetchedTiles: TerrainMeshTile[] = await Promise.all(
           lodDescriptors.map(async (desc) => {
-            const cacheKey = `${meshManifest.dataset_id}:${desc.tile_id}`;
+            const cacheKey = `${meshManifest.dataset_id}:${desc.tile_id}:${desc.grid_cols}`;
             const cached = tileCacheRef.current.get(cacheKey);
             if (cached) return cached;
 
@@ -445,7 +540,7 @@ export function LocalTerrain3DViewer({
             }
             const data: TerrainMeshTile = await res.json();
             tileCacheRef.current.set(cacheKey, data);
-            if (tileCacheRef.current.size > 48) {
+            if (tileCacheRef.current.size > 64) {
               const firstKey = tileCacheRef.current.keys().next().value;
               if (firstKey) tileCacheRef.current.delete(firstKey);
             }
@@ -455,7 +550,7 @@ export function LocalTerrain3DViewer({
 
         if (cancelled || !terrainGroupRef.current) return;
 
-        // Establish a stable local elevation baseline (mean elev across loaded tiles)
+        // Establish stable local elevation baseline across loaded tiles
         let elevSum = 0;
         let elevCount = 0;
         fetchedTiles.forEach((t) => {
@@ -472,6 +567,7 @@ export function LocalTerrain3DViewer({
 
         let totalVerts = 0;
         const texLoader = new THREE.TextureLoader();
+        const currentOverlay = activeOverlayRef.current;
 
         fetchedTiles.forEach((tile) => {
           const rows = tile.grid_rows;
@@ -504,8 +600,9 @@ export function LocalTerrain3DViewer({
               positions[idx * 3 + 1] = yCoord;
               positions[idx * 3 + 2] = zCoord;
 
-              uvs[idx * 2] = uFrac;
-              uvs[idx * 2 + 1] = 1 - vFrac; // Match PNG flipY=true (top = North = v=1)
+              // Half-texel inset aligns adjacent tile boundary pixels without bilinear edge seams
+              uvs[idx * 2] = (0.5 + uFrac * (TERRAIN_TEX_SIZE - 1)) / TERRAIN_TEX_SIZE;
+              uvs[idx * 2 + 1] = 1 - (0.5 + vFrac * (TERRAIN_TEX_SIZE - 1)) / TERRAIN_TEX_SIZE;
             }
           }
 
@@ -523,12 +620,8 @@ export function LocalTerrain3DViewer({
               const vsw = tile.valid_mask[sw] === 1;
               const vse = tile.valid_mask[se] === 1;
 
-              if (va && vsw && vb) {
-                indices.push(a, sw, b);
-              }
-              if (vb && vsw && vse) {
-                indices.push(b, sw, se);
-              }
+              if (va && vsw && vb) indices.push(a, sw, b);
+              if (vb && vsw && vse) indices.push(b, sw, se);
             }
           }
 
@@ -539,14 +632,18 @@ export function LocalTerrain3DViewer({
           geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
           geom.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
           geom.setIndex(indices);
-          geom.computeVertexNormals();
+          if (tile.normals && tile.normals.length === numVerts * 3) {
+            geom.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(tile.normals), 3));
+          } else {
+            geom.computeVertexNormals();
+          }
           geom.computeBoundingBox();
           geom.computeBoundingSphere();
 
           const mat = new THREE.MeshStandardMaterial({
             color: new THREE.Color("#9e7a66"),
-            roughness: 0.9,
-            metalness: 0.04,
+            roughness: 0.92,
+            metalness: 0.02,
             side: THREE.FrontSide,
           });
 
@@ -559,15 +656,7 @@ export function LocalTerrain3DViewer({
             maxNorthM: maxN,
           } satisfies TileMeshUserData;
 
-          const texQs = new URLSearchParams({
-            overlay: texOverlay,
-            min_lat: tile.bounds.min_lat.toFixed(7),
-            max_lat: tile.bounds.max_lat.toFixed(7),
-            min_lon: tile.bounds.min_lon.toFixed(7),
-            max_lon: tile.bounds.max_lon.toFixed(7),
-            size: activeLod >= 2 ? "512" : "512",
-          });
-          const texUrl = `${API_BASE_URL}/terrain/ortho/${encodeURIComponent(texDatasetId)}/texture?${texQs.toString()}`;
+          const texUrl = buildTileTextureUrl(tile, meshManifest, currentOverlay);
           const cachedTex = textureCacheRef.current.get(texUrl);
           if (cachedTex) {
             mat.color.set("#ffffff");
@@ -586,7 +675,7 @@ export function LocalTerrain3DViewer({
                 loadedTex.wrapT = THREE.ClampToEdgeWrapping;
                 loadedTex.anisotropy = Math.min(4, rendererRef.current?.capabilities.getMaxAnisotropy() || 1);
                 textureCacheRef.current.set(texUrl, loadedTex);
-                if (textureCacheRef.current.size > 48) {
+                if (textureCacheRef.current.size > 64) {
                   const oldest = textureCacheRef.current.keys().next().value;
                   if (oldest) {
                     textureCacheRef.current.get(oldest)?.dispose();
@@ -615,17 +704,21 @@ export function LocalTerrain3DViewer({
         setRenderedVertexTotal(totalVerts);
         setTilesLoading(false);
 
-        // Fit camera automatically to new DEM footprint extent
-        const wM = meshManifest.physical_extent_m.width_m || 2400;
-        const hM = meshManifest.physical_extent_m.height_m || 2400;
-        const span = Math.max(wM, hM, 600);
-        const startPos = new THREE.Vector3(span * 0.42, span * 0.45, span * 0.56);
-        const startTarget = new THREE.Vector3(0, 0, 0);
-        if (cameraRef.current && controlsRef.current) {
-          cameraRef.current.far = Math.max(80000, span * 25);
-          cameraRef.current.updateProjectionMatrix();
-          controlsRef.current.maxDistance = Math.max(12000, span * 8);
-          animateCameraTo(startPos, startTarget, 450);
+        // Auto-fit camera ONLY when DEM dataset or region bounds change (preserve focus on LOD/overlay switches)
+        const manifestKey = `${meshManifest.dataset_id}:${meshManifest.requested_bounds.min_lat}:${meshManifest.requested_bounds.max_lat}:${meshManifest.requested_bounds.min_lon}:${meshManifest.requested_bounds.max_lon}`;
+        if (manifestKey !== fittedManifestKeyRef.current) {
+          fittedManifestKeyRef.current = manifestKey;
+          const wM = meshManifest.physical_extent_m.width_m || 2400;
+          const hM = meshManifest.physical_extent_m.height_m || 2400;
+          const span = Math.max(wM, hM, 600);
+          const startPos = new THREE.Vector3(span * 0.42, span * 0.45, span * 0.56);
+          const startTarget = new THREE.Vector3(0, 0, 0);
+          if (cameraRef.current && controlsRef.current) {
+            cameraRef.current.far = Math.max(80000, span * 25);
+            cameraRef.current.updateProjectionMatrix();
+            controlsRef.current.maxDistance = Math.max(12000, span * 8);
+            animateCameraTo(startPos, startTarget, 450);
+          }
         }
       } catch (err: unknown) {
         if ((err as { name?: string })?.name === "AbortError" || cancelled) return;
@@ -639,7 +732,110 @@ export function LocalTerrain3DViewer({
       cancelled = true;
       controller.abort();
     };
-  }, [meshManifest, activeLod, activeOverlayMode, lodDescriptors, animateCameraTo]);
+  }, [meshManifest, activeLod, lodDescriptors, animateCameraTo]);
+
+  // Hot-swap texture overlays cleanly without tearing down mesh geometry or resetting camera
+  useEffect(() => {
+    const terrainGroup = terrainGroupRef.current;
+    if (!terrainGroup || !meshManifest || tilesLoadedCount === 0) return;
+
+    let cancelled = false;
+    const texLoader = new THREE.TextureLoader();
+
+    terrainGroup.children.forEach((child) => {
+      const mesh = child as THREE.Mesh;
+      const ud = mesh.userData as TileMeshUserData | undefined;
+      if (!ud?.tile) return;
+      const mat = mesh.material as THREE.MeshStandardMaterial;
+      const texUrl = buildTileTextureUrl(ud.tile, meshManifest, activeOverlayMode);
+
+      const cached = textureCacheRef.current.get(texUrl);
+      if (cached) {
+        mat.color.set("#ffffff");
+        mat.map = cached;
+        mat.needsUpdate = true;
+        return;
+      }
+
+      texLoader.load(
+        texUrl,
+        (loadedTex) => {
+          if (cancelled) {
+            loadedTex.dispose();
+            return;
+          }
+          loadedTex.colorSpace = THREE.SRGBColorSpace;
+          loadedTex.wrapS = THREE.ClampToEdgeWrapping;
+          loadedTex.wrapT = THREE.ClampToEdgeWrapping;
+          loadedTex.anisotropy = Math.min(4, rendererRef.current?.capabilities.getMaxAnisotropy() || 1);
+          textureCacheRef.current.set(texUrl, loadedTex);
+          if (textureCacheRef.current.size > 64) {
+            const oldest = textureCacheRef.current.keys().next().value;
+            if (oldest) {
+              textureCacheRef.current.get(oldest)?.dispose();
+              textureCacheRef.current.delete(oldest);
+            }
+          }
+          mat.color.set("#ffffff");
+          mat.map = loadedTex;
+          mat.needsUpdate = true;
+        },
+        undefined,
+        () => {
+          // Keep current shading if texture fails
+        }
+      );
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeOverlayMode, meshManifest, tilesLoadedCount]);
+
+  // Diagnostic tile boundaries overlay (strictly OFF by default; toggleable for verification)
+  useEffect(() => {
+    const boundsGroup = tileBoundsGroupRef.current;
+    const terrainGroup = terrainGroupRef.current;
+    if (!boundsGroup || !terrainGroup || !meshManifest) return;
+
+    while (boundsGroup.children.length > 0) {
+      const obj = boundsGroup.children[boundsGroup.children.length - 1] as THREE.Line;
+      boundsGroup.remove(obj);
+      if (obj.geometry) obj.geometry.dispose();
+      const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+      mats.forEach((m) => m?.dispose());
+    }
+    if (!showTileBoundaries) return;
+
+    const exag = verticalExaggeration;
+    const refElev = refElevMRef.current;
+    terrainGroup.children.forEach((child) => {
+      const mesh = child as THREE.Mesh;
+      const ud = mesh.userData as TileMeshUserData | undefined;
+      if (!ud?.tile) return;
+      const t = ud.tile;
+      const rows = t.grid_rows;
+      const cols = t.grid_cols;
+      const pts: THREE.Vector3[] = [];
+      const pushRc = (r: number, c: number) => {
+        const idx = r * cols + c;
+        const vFrac = rows > 1 ? r / (rows - 1) : 0;
+        const uFrac = cols > 1 ? c / (cols - 1) : 0;
+        const eastM = ud.minEastM + uFrac * (ud.maxEastM - ud.minEastM);
+        const northM = ud.maxNorthM - vFrac * (ud.maxNorthM - ud.minNorthM);
+        const zVal = t.valid_mask[idx] === 1 && t.elevations_m[idx] != null ? (t.elevations_m[idx] as number) : refElev;
+        pts.push(new THREE.Vector3(eastM, (zVal - refElev) * exag + 2.5, -northM));
+      };
+      for (let c = 0; c < cols; c += 1) pushRc(0, c);
+      for (let r = 1; r < rows; r += 1) pushRc(r, cols - 1);
+      for (let c = cols - 2; c >= 0; c -= 1) pushRc(rows - 1, c);
+      for (let r = rows - 2; r >= 0; r -= 1) pushRc(r, 0);
+
+      const lineGeom = new THREE.BufferGeometry().setFromPoints(pts);
+      const lineMat = new THREE.LineBasicMaterial({ color: "#38bdf8", transparent: true, opacity: 0.75 });
+      boundsGroup.add(new THREE.Line(lineGeom, lineMat));
+    });
+  }, [showTileBoundaries, meshManifest, verticalExaggeration, tilesLoadedCount]);
 
   // Apply O(1) vertical exaggeration & rebuild 3D routes/markers cleanly
   useEffect(() => {
@@ -776,40 +972,78 @@ export function LocalTerrain3DViewer({
       addBeaconPin(toSceneVec(destinationPoint.lat, destinationPoint.lon_east, elev, 1.3), "#f43f5e", 1.3);
     }
 
-    // Render Active Route 3D Tube + Return Leg + Direction Cones + Waypoint Highlights
-    if (activeRoute && activeRoute.vertices.length >= 2) {
+    // Render Active Route exact piecewise polyline (NO CatmullRomCurve3 smoothing) + Return Leg + Cones + Selected Segment
+    if (showRoute && activeRoute && activeRoute.vertices.length >= 2) {
       const returnLegStartSeq =
         activeRoute.legs.find((l) => l.is_return_leg)?.vertex_start_seq ?? Number.POSITIVE_INFINITY;
+      const activeInstr =
+        selectedInstructionStep != null
+          ? activeRoute.instructions.find((ins) => ins.step_index === selectedInstructionStep)
+          : undefined;
+      const upVec = new THREE.Vector3(0, 1, 0);
+      const radius = pinScale * 0.24;
 
-      const buildTube = (pts: THREE.Vector3[], colorHex: string) => {
-        if (pts.length < 2) return;
-        const curve = new THREE.CatmullRomCurve3(pts, false, "catmullrom", 0.08);
-        const segCount = Math.min(400, Math.max(32, pts.length * 4));
-        const tubeGeom = new THREE.TubeGeometry(curve, segCount, pinScale * 0.24, 8, false);
-        const tubeMat = new THREE.MeshStandardMaterial({
+      const buildExactPolyline = (vertsSubset: typeof activeRoute.vertices, colorHex: string) => {
+        if (vertsSubset.length < 2) return;
+        const pts = vertsSubset.map((v) => toSceneVec(v.lat, v.lon_east, v.elevation_m, 3.5));
+
+        // Exact sharp-vertex 3D core line
+        const lineGeom = new THREE.BufferGeometry().setFromPoints(pts);
+        const lineMat = new THREE.LineBasicMaterial({ color: colorHex });
+        overlayGroup.add(new THREE.Line(lineGeom, lineMat));
+
+        const segMat = new THREE.MeshStandardMaterial({
           color: colorHex,
           emissive: colorHex,
-          emissiveIntensity: 0.45,
+          emissiveIntensity: 0.42,
           roughness: 0.35,
         });
-        overlayGroup.add(new THREE.Mesh(tubeGeom, tubeMat));
+        const highlightMat = new THREE.MeshStandardMaterial({
+          color: "#fde047",
+          emissive: "#facc15",
+          emissiveIntensity: 0.75,
+          roughness: 0.25,
+        });
+
+        for (let i = 0; i < pts.length - 1; i += 1) {
+          const p0 = pts[i];
+          const p1 = pts[i + 1];
+          const segVec = new THREE.Vector3().subVectors(p1, p0);
+          const len = segVec.length();
+          if (len < 1e-4) continue;
+          const v0 = vertsSubset[i];
+          const v1 = vertsSubset[i + 1];
+          const instrStartCum =
+            activeInstr != null ? activeInstr.cumulative_distance_m - activeInstr.segment_distance_m : 0;
+          const isHighlighted =
+            (selectedWaypointSeq != null && (selectedWaypointSeq === v0.seq || selectedWaypointSeq === v1.seq)) ||
+            (activeInstr != null &&
+              activeInstr.segment_distance_m > 0 &&
+              v1.cumulative_distance_m > instrStartCum + 0.05 &&
+              v0.cumulative_distance_m < activeInstr.cumulative_distance_m - 0.05);
+          const r = isHighlighted ? radius * 1.55 : radius;
+          const cylGeom = new THREE.CylinderGeometry(r, r, len, 8, 1);
+          const cyl = new THREE.Mesh(cylGeom, isHighlighted ? highlightMat : segMat);
+          cyl.position.copy(p0).add(p1).multiplyScalar(0.5);
+          cyl.quaternion.setFromUnitVectors(upVec, segVec.normalize());
+          overlayGroup.add(cyl);
+
+          // Spherical joint cap at exact vertex position to avoid miter gaps
+          const joint = new THREE.Mesh(new THREE.SphereGeometry(r, 8, 8), isHighlighted ? highlightMat : segMat);
+          joint.position.copy(p0);
+          overlayGroup.add(joint);
+        }
       };
 
-      const outboundPts: THREE.Vector3[] = [];
-      const returnPts: THREE.Vector3[] = [];
-      activeRoute.vertices.forEach((v) => {
-        const pt = toSceneVec(v.lat, v.lon_east, v.elevation_m, 3.5);
-        if (v.seq <= returnLegStartSeq) outboundPts.push(pt);
-        if (v.seq >= returnLegStartSeq) returnPts.push(pt);
-      });
+      const outboundVerts = activeRoute.vertices.filter((v) => v.seq <= returnLegStartSeq);
+      const returnVerts = activeRoute.vertices.filter((v) => v.seq >= returnLegStartSeq);
 
-      buildTube(outboundPts, "#38bdf8");
-      if (returnPts.length >= 2) {
-        buildTube(returnPts, "#fb923c");
+      buildExactPolyline(outboundVerts, "#38bdf8");
+      if (returnVerts.length >= 2) {
+        buildExactPolyline(returnVerts, "#fb923c");
       }
 
-      // 3D directional heading cones along instructions/segments
-      const upVec = new THREE.Vector3(0, 1, 0);
+      // 3D directional heading cones along straight exact segments
       const stepStride = Math.max(1, Math.floor(activeRoute.vertices.length / 18));
       for (let i = 0; i < activeRoute.vertices.length - 1; i += stepStride) {
         const v0 = activeRoute.vertices[i];
@@ -892,6 +1126,35 @@ export function LocalTerrain3DViewer({
         overlayGroup.add(roverMesh);
       }
     }
+
+    // Authenticated Live Mission Telemetry Beacon (strictly rendered only from authenticated live fixes)
+    if (livePositionMarker) {
+      const liveElev =
+        livePositionMarker.elevation_m ??
+        lookupElevNear(livePositionMarker.lat, livePositionMarker.lon_east);
+      const livePos = toSceneVec(livePositionMarker.lat, livePositionMarker.lon_east, liveElev, 7);
+      const beaconColor = livePositionMarker.off_route ? "#ef4444" : "#10b981";
+      const liveRingGeom = new THREE.RingGeometry(pinScale * 1.15, pinScale * 1.65, 24);
+      const liveRingMat = new THREE.MeshBasicMaterial({
+        color: beaconColor,
+        side: THREE.DoubleSide,
+      });
+      const liveRing = new THREE.Mesh(liveRingGeom, liveRingMat);
+      liveRing.rotation.x = -Math.PI / 2;
+      liveRing.position.copy(livePos).add(new THREE.Vector3(0, -3, 0));
+      overlayGroup.add(liveRing);
+
+      const liveCore = new THREE.Mesh(
+        new THREE.SphereGeometry(pinScale * 0.72, 14, 14),
+        new THREE.MeshStandardMaterial({
+          color: beaconColor,
+          emissive: beaconColor,
+          emissiveIntensity: 0.9,
+        })
+      );
+      liveCore.position.copy(livePos);
+      overlayGroup.add(liveCore);
+    }
   }, [
     meshManifest,
     verticalExaggeration,
@@ -903,7 +1166,10 @@ export function LocalTerrain3DViewer({
     showTargets,
     selectedTargetIds,
     selectedWaypointSeq,
+    selectedInstructionStep,
+    showRoute,
     simulationProgressM,
+    livePositionMarker,
     tilesLoadedCount,
   ]);
 
@@ -929,7 +1195,7 @@ export function LocalTerrain3DViewer({
     );
   }, [cameraFocusRequest, meshManifest, verticalExaggeration, animateCameraTo]);
 
-  // Respond to camera presets (`oblique`, `top_down`, `focus_route`, `reset`)
+  // Respond to camera presets (`oblique`, `top_down`, `focus_start`, `focus_destination`, `focus_route`, `reset`)
   useEffect(() => {
     if (!cameraPresetRequest || !meshManifest) return;
     const wM = meshManifest.physical_extent_m.width_m || 2000;
@@ -944,6 +1210,38 @@ export function LocalTerrain3DViewer({
         new THREE.Vector3(span * 0.42, span * 0.45, span * 0.56),
         new THREE.Vector3(0, 0, 0),
         500
+      );
+    } else if (preset === "focus_start" && startPoint) {
+      const { eastM, northM } = latLonToLocalMeters(
+        startPoint.lat,
+        startPoint.lon_east,
+        meshManifest.origin.lat,
+        meshManifest.origin.lon_east
+      );
+      const yBase =
+        activeRoute?.vertices[0] != null
+          ? (activeRoute.vertices[0].elevation_m - refElevMRef.current) * verticalExaggeration
+          : 0;
+      const off = Math.max(180, span * 0.16);
+      animateCameraTo(
+        new THREE.Vector3(eastM + off * 0.65, yBase + off * 0.85, -northM + off * 0.75),
+        new THREE.Vector3(eastM, yBase, -northM),
+        480
+      );
+    } else if (preset === "focus_destination" && destinationPoint) {
+      const { eastM, northM } = latLonToLocalMeters(
+        destinationPoint.lat,
+        destinationPoint.lon_east,
+        meshManifest.origin.lat,
+        meshManifest.origin.lon_east
+      );
+      const lastV = activeRoute?.vertices[activeRoute.vertices.length - 1];
+      const yBase = lastV != null ? (lastV.elevation_m - refElevMRef.current) * verticalExaggeration : 0;
+      const off = Math.max(180, span * 0.16);
+      animateCameraTo(
+        new THREE.Vector3(eastM + off * 0.65, yBase + off * 0.85, -northM + off * 0.75),
+        new THREE.Vector3(eastM, yBase, -northM),
+        480
       );
     } else if (preset === "focus_route" && activeRoute && activeRoute.vertices.length >= 2) {
       let minE = Infinity;
@@ -975,7 +1273,7 @@ export function LocalTerrain3DViewer({
         520
       );
     }
-  }, [cameraPresetRequest, meshManifest, activeRoute, verticalExaggeration, animateCameraTo]);
+  }, [cameraPresetRequest, meshManifest, activeRoute, startPoint, destinationPoint, verticalExaggeration, animateCameraTo]);
 
   const pickModes: Array<{ id: SurfacePickMode; label: string; icon: typeof Crosshair; activeClass: string }> = [
     { id: "inspect", label: "Inspect", icon: Crosshair, activeClass: "bg-slate-700 text-white" },
@@ -996,8 +1294,9 @@ export function LocalTerrain3DViewer({
       {/* Three.js WebGL Mount */}
       <div ref={containerRef} className="w-full h-full cursor-crosshair" />
 
-      {/* Top-Left DEM, LOD & Texture Controls */}
-      <div className="absolute top-2.5 left-2.5 z-10 flex flex-wrap items-center gap-1.5 max-w-[70%]">
+      {/* Unified Non-Overlapping Top HUD Controls (Left: DEM/LOD/Overlay/Scale · Right: Pick/Camera) */}
+      <div className="absolute top-2.5 left-2.5 right-2.5 z-10 flex flex-wrap items-start justify-between gap-1.5 pointer-events-none">
+        <div className="flex flex-wrap items-center gap-1.5 pointer-events-auto">
         {meshManifest && meshManifest.available_dems.length > 0 && (
           <select
             value={selectedDemDatasetId}
@@ -1013,12 +1312,26 @@ export function LocalTerrain3DViewer({
           </select>
         )}
 
-        {/* LOD Selector */}
+        {/* Adaptive / Manual LOD Selector */}
         <div className="flex bg-[#0b101b]/95 border border-[#243047] rounded-lg p-0.5 text-[10px] font-mono">
+          <button
+            onClick={() => setLodMode("auto")}
+            className={`px-2 py-0.5 rounded transition-colors ${
+              lodMode === "auto"
+                ? "bg-emerald-600 text-white font-semibold"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+            title="Adaptive camera-distance LOD"
+          >
+            Auto
+          </button>
           {(meshManifest?.lod_levels ?? [{ lod: 0 }, { lod: 1 }, { lod: 2 }]).map((l) => (
             <button
               key={l.lod}
-              onClick={() => setActiveLod(l.lod)}
+              onClick={() => {
+                setLodMode("manual");
+                setActiveLod(l.lod);
+              }}
               className={`px-2 py-0.5 rounded transition-colors ${
                 activeLod === l.lod
                   ? "bg-cyan-600 text-white font-semibold"
@@ -1071,8 +1384,8 @@ export function LocalTerrain3DViewer({
         </div>
       </div>
 
-      {/* Top-Right Pick Mode & Camera Controls */}
-      <div className="absolute top-2.5 right-2.5 z-10 flex flex-col items-end gap-1.5">
+      {/* Pick Mode & Camera Controls */}
+        <div className="flex flex-wrap items-center justify-end gap-1.5 pointer-events-auto">
         {!compact && (
           <div className="flex bg-[#0b101b]/95 border border-[#243047] rounded-lg p-0.5 text-[10px] font-mono">
             {pickModes.map((pm) => {
@@ -1094,7 +1407,7 @@ export function LocalTerrain3DViewer({
           </div>
         )}
 
-        <div className="flex items-center gap-1 bg-[#0b101b]/95 border border-[#243047] rounded-lg p-1 text-[10px] font-mono">
+        <div className="flex flex-wrap items-center gap-1 bg-[#0b101b]/95 border border-[#243047] rounded-lg p-1 text-[10px] font-mono">
           <button
             onClick={() => requestCameraPreset("oblique")}
             className="px-2 py-0.5 rounded text-slate-300 hover:bg-[#182235]"
@@ -1112,6 +1425,22 @@ export function LocalTerrain3DViewer({
             Top
           </button>
           <button
+            onClick={() => requestCameraPreset("focus_start")}
+            disabled={!startPoint}
+            className="px-2 py-0.5 rounded text-emerald-300 hover:bg-[#182235] disabled:opacity-40"
+            title="Focus Start Station"
+          >
+            Start
+          </button>
+          <button
+            onClick={() => requestCameraPreset("focus_destination")}
+            disabled={!destinationPoint}
+            className="px-2 py-0.5 rounded text-rose-300 hover:bg-[#182235] disabled:opacity-40"
+            title="Focus Destination"
+          >
+            Dest
+          </button>
+          <button
             onClick={() => requestCameraPreset("focus_route")}
             disabled={!activeRoute}
             className="px-2 py-0.5 rounded text-cyan-300 hover:bg-[#182235] disabled:opacity-40"
@@ -1119,6 +1448,16 @@ export function LocalTerrain3DViewer({
           >
             <RouteIcon className="w-3 h-3 inline mr-1" />
             Route
+          </button>
+          <button
+            onClick={() => setShowRoute((v) => !v)}
+            disabled={!activeRoute}
+            className={`px-2 py-0.5 rounded transition-colors disabled:opacity-40 ${
+              showRoute && activeRoute ? "bg-sky-500/20 text-sky-300" : "text-slate-400 hover:bg-[#182235]"
+            }`}
+            title="Toggle active route path visibility"
+          >
+            Path
           </button>
           <button
             onClick={() => setShowTargets((v) => !v)}
@@ -1130,8 +1469,70 @@ export function LocalTerrain3DViewer({
             <Eye className="w-3 h-3 inline mr-1" />
             Targets
           </button>
+          <button
+            onClick={() => setShowTileBoundaries((v) => !v)}
+            className={`px-2 py-0.5 rounded transition-colors ${
+              showTileBoundaries ? "bg-amber-500/20 text-amber-300" : "text-slate-400 hover:bg-[#182235]"
+            }`}
+            title="Diagnostic Tile Boundaries (off by default)"
+          >
+            <Grid className="w-3 h-3 inline mr-1" />
+            Tiles
+          </button>
+          <button
+            onClick={() => requestCameraPreset("reset")}
+            className="px-2 py-0.5 rounded text-slate-400 hover:text-slate-200 hover:bg-[#182235]"
+            title="Reset Camera View"
+          >
+            <RefreshCw className="w-3 h-3 inline mr-1" />
+            Reset
+          </button>
+        </div>
         </div>
       </div>
+
+      {/* Overwrite Confirmation Prompt for Existing Start / Destination */}
+      {pendingPickConfirm && (
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 bg-[#0e1525]/95 border border-amber-500/50 rounded-xl px-4 py-2 text-xs font-mono text-slate-200 shadow-2xl">
+          <span>
+            Replace existing{" "}
+            <strong className={pendingPickConfirm.mode === "set_start" ? "text-emerald-300" : "text-rose-300"}>
+              {pendingPickConfirm.mode === "set_start" ? "Start" : "Destination"}
+            </strong>{" "}
+            with {pendingPickConfirm.point.lat.toFixed(4)}°, {pendingPickConfirm.point.lon_east.toFixed(4)}°E (
+            {pendingPickConfirm.point.elevation_m.toFixed(1)} m)?
+          </span>
+          <button
+            onClick={() => {
+              const p = pendingPickConfirm.point;
+              if (pendingPickConfirm.mode === "set_start") {
+                useRoutingStore.getState().setStartPoint({
+                  lat: p.lat,
+                  lon_east: p.lon_east,
+                  label: `Start (${p.lat.toFixed(4)}°, ${p.lon_east.toFixed(4)}°)`,
+                });
+              } else {
+                useRoutingStore.getState().setDestinationPoint({
+                  lat: p.lat,
+                  lon_east: p.lon_east,
+                  label: `Dest (${p.lat.toFixed(4)}°, ${p.lon_east.toFixed(4)}°)`,
+                });
+              }
+              useRoutingStore.getState().setSurfacePickMode("inspect");
+              setPendingPickConfirm(null);
+            }}
+            className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white font-semibold"
+          >
+            Confirm
+          </button>
+          <button
+            onClick={() => setPendingPickConfirm(null)}
+            className="px-2 py-1 rounded border border-[#2d3b55] text-slate-300 hover:bg-[#161f32]"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
 
       {/* Loading / Error State Overlay */}
       {(manifestLoading || tilesLoading) && (
@@ -1140,7 +1541,7 @@ export function LocalTerrain3DViewer({
           <span>
             {manifestLoading
               ? "Loading DEM 3D mesh manifest..."
-              : `Streaming LOD ${activeLod} DEM tiles (${lodDescriptors.length})...`}
+              : `Streaming ${lodMode === "auto" ? "Auto " : ""}LOD ${activeLod} DEM tiles (${lodDescriptors.length})...`}
           </span>
         </div>
       )}

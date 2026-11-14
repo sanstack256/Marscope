@@ -194,3 +194,24 @@ async def imagery_coverage():
                for p in service.all_products() if p.footprint is not None]
     return {"status": "available" if records else "coverage_unavailable",
             "products_with_footprints": len(records), "records": records}
+
+
+@router.get("/perseverance")
+async def list_perseverance_raw_images(
+    sol: Optional[int] = Query(None, ge=0, description="Mars 2020 Sol number in Jezero Crater"),
+    camera: Optional[str] = Query(None, description="Camera filter (e.g. SUPERCAM_RMI, NAVCAM_LEFT, MCZ_RIGHT)"),
+    limit: int = Query(12, ge=1, le=50),
+    page: int = Query(0, ge=0),
+):
+    """
+    Query the official NASA Mars 2020 Perseverance Raw Images Gallery (Jezero Crater).
+    Strictly isolated from Gale Crater / Curiosity routes and targets.
+    """
+    from app.ingestion.sources.perseverance_gallery import PerseveranceGalleryService
+
+    return await PerseveranceGalleryService.fetch_raw_images(
+        sol=sol,
+        camera=camera,
+        limit=limit,
+        page=page,
+    )

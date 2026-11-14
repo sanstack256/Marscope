@@ -12,9 +12,9 @@ import {
 
 interface MissionStoreState {
   planningMode: PlanningMode;
-  maxDurationHours: number;
-  safetyReserveFactor: number;
-  maxSlopeLimitDeg: number;
+  maxDurationHours: number | null;
+  safetyReserveFactor: number | null;
+  maxSlopeLimitDeg: number | null;
   selectedTargets: ScienceTarget[];
 
   // Destination & Localization states backed by API
@@ -31,8 +31,8 @@ interface MissionStoreState {
   selectedCandidateId: string | null;
 
   setPlanningMode: (mode: PlanningMode) => void;
-  setDuration: (hours: number) => void;
-  setSafetyReserve: (factor: number) => void;
+  setDuration: (hours: number | null) => void;
+  setSafetyReserve: (factor: number | null) => void;
   addTarget: (target: ScienceTarget) => void;
   removeTarget: (targetId: string) => void;
   clearTargets: () => void;
@@ -50,9 +50,9 @@ interface MissionStoreState {
 
 export const useMissionStore = create<MissionStoreState>((set) => ({
   planningMode: "balanced",
-  maxDurationHours: 6.0,
-  safetyReserveFactor: 1.5,
-  maxSlopeLimitDeg: 25.0,
+  maxDurationHours: null,
+  safetyReserveFactor: null,
+  maxSlopeLimitDeg: null,
   selectedTargets: [],
 
   selectedDestination: null,

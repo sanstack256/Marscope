@@ -18,6 +18,7 @@ from app.science.target_registry import TargetRegistryService
 from app.services.destination_service import DestinationEvaluationService
 from app.services.layer_service import LayerCatalogService
 from app.services.localization_service import LocalizationService
+from app.services.tracking_service import TrackingService
 from app.terrain.mesh import TerrainMeshService
 
 # Project root path resolution
@@ -74,3 +75,4 @@ routing_service = ScienceAwareRoutingService(
     target_registry=target_registry,
     composition_search=composition_search_service,
 )
+tracking_service = TrackingService(routing_service=routing_service)

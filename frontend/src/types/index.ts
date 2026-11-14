@@ -1049,6 +1049,8 @@ export interface TerrainMeshManifest {
   tiles: MeshTileDescriptor[];
   available_dems: MeshDemSummary[];
   resolution_suitability: Record<string, ScaleSuitabilityRecord>;
+  elevation_range_m?: { min_m: number; max_m: number } | null;
+  roughness_range_m?: { min_m: number; max_m: number } | null;
 }
 
 export interface TerrainMeshTile {
@@ -1071,6 +1073,7 @@ export interface TerrainMeshTile {
   native_resolution_m?: number | null;
   elevations_m: (number | null)[];
   valid_mask: number[];
+  normals?: number[] | null;
   slope_deg?: (number | null)[] | null;
   roughness_tri_m?: (number | null)[] | null;
   valid_vertex_count: number;
@@ -1252,6 +1255,7 @@ export interface RouteComputeResponse {
   vertices: RouteVertex[];
   instructions: NavigationInstruction[];
   resolution_suitability: Record<string, ScaleSuitabilityRecord>;
+  provenance?: Record<string, unknown> | null;
   limitations: string[];
 }
 
@@ -1277,4 +1281,135 @@ export interface PickedSurfacePoint {
   slope_deg?: number | null;
   roughness_tri_m?: number | null;
   dataset_id: string;
+}
+
+export interface TerrainPointLookupResponse {
+  available: boolean;
+  latitude: number;
+  longitude: number;
+  crs: string;
+  latitude_convention: string;
+  longitude_direction: string;
+  elevation_m?: number | null;
+  slope_deg?: number | null;
+  aspect_deg?: number | null;
+  roughness_tri_m?: number | null;
+  source_dataset_id?: string | null;
+  source_product_id?: string | null;
+  resolution_m?: number | null;
+  units?: string | null;
+  unavailable_reason?: string | null;
+  warnings: string[];
+}
+
+export interface SourcesAuditEntry {
+  id: string;
+  name: string;
+  status: string;
+  notes?: string;
+  reason?: string;
+  scale?: string;
+  isolated_from_gale_planning?: boolean;
+  included_in_mars_pipeline?: boolean;
+  layers?: string[];
+  endpoints?: string[];
+}
+
+export interface SourcesAuditResponse {
+  primary_study_region: {
+    name: string;
+    crs: string;
+    bounding_box: { min_lat: number; max_lat: number; min_lon: number; max_lon: number };
+  };
+  sources: SourcesAuditEntry[];
+}
+
+export interface PerseveranceRawImage {
+  imageid: string;
+  sol: number;
+  mission: string;
+  site: string;
+  isolated_from_gale_planning: boolean;
+  camera_instrument?: string | null;
+  camera_filter?: string | null;
+  title?: string | null;
+  caption?: string | null;
+  date_taken_utc?: string | null;
+  image_url_medium?: string | null;
+  image_url_large?: string | null;
+  image_url_full_res?: string | null;
+}
+
+export interface PerseveranceGalleryResponse {
+  status: string;
+  mission: string;
+  site: string;
+  isolated_from_gale_planning: boolean;
+  isolation_note: string;
+  source_url: string;
+  retrieved_at_utc?: string | null;
+  total_results: number;
+  images: PerseveranceRawImage[];
+  error?: string | null;
+}
+
+export interface RouteRelativeTelemetry {
+  route_id: string;
+  nearest_segment_index: number;
+  along_track_distance_m: number;
+  cross_track_error_m: number;
+  remaining_distance_m: number;
+  progress_fraction: number;
+  corridor_threshold_m: number;
+  off_route: boolean;
+  heading_deg?: number | null;
+  next_waypoint_label?: string | null;
+  next_waypoint_lat?: number | null;
+  next_waypoint_lon_east?: number | null;
+  distance_to_next_waypoint_m?: number | null;
+}
+
+export interface TrackingStatusResponse {
+  status: "disconnected" | "live" | "stale";
+  live_available: boolean;
+  message: string;
+  is_simulation: boolean;
+  ingest_token_configured: boolean;
+  provider_id?: string | null;
+  session_id?: string | null;
+  crs: string;
+  sequence_number?: number | null;
+  lat?: number | null;
+  lon_east?: number | null;
+  elevation_m?: number | null;
+  horizontal_uncertainty_m?: number | null;
+  heading_deg?: number | null;
+  fix_timestamp_utc?: string | null;
+  age_seconds?: number | null;
+  stale_after_seconds?: number | null;
+  route_relative?: RouteRelativeTelemetry | null;
+}
+
+export interface TrackingReplanPreviewResponse {
+  requires_user_confirmation: boolean;
+  live_fix_used: {
+    provider_id: string;
+    sequence_number: number;
+    lat: number;
+    lon_east: number;
+    timestamp_utc: string;
+    horizontal_uncertainty_m?: number | null;
+  };
+  coverage_verified: boolean;
+  dem_dataset_id: string;
+  dem_source_product_id: string;
+  dem_resolution_m: number;
+  previous_route_id: string;
+  proposed_route: RouteComputeResponse;
+  distance_delta_m: number;
+  elevation_gain_delta_m: number;
+  max_slope_delta_deg: number;
+  duration_delta_seconds?: number | null;
+  warnings: string[];
+  notes: string;
 }
