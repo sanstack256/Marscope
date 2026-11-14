@@ -18,6 +18,7 @@ import {
   Target,
 } from "lucide-react";
 import { API_BASE_URL } from "@/lib/constants";
+import { useEvidenceStore } from "@/stores/useEvidenceStore";
 import { useRoutingStore, type CameraPresetType } from "@/stores/useRoutingStore";
 import type {
   PickedSurfacePoint,
@@ -29,6 +30,21 @@ import type {
 } from "@/types";
 
 const TERRAIN_TEX_SIZE = 512;
+
+export type BeaconMarkerShape = "start" | "destination" | "waypoint" | "target";
+
+/**
+ * Shared marker head silhouette mapping.
+ * Start and Destination intentionally share the identical spherical pin silhouette
+ * and proportions; directional arrows belong strictly to the route polyline.
+ */
+export function getMarkerHeadGeometryKind(
+  shape: BeaconMarkerShape
+): "sphere" | "box" | "octahedron" {
+  if (shape === "waypoint") return "box";
+  if (shape === "target") return "octahedron";
+  return "sphere";
+}
 
 function buildTileTextureUrl(
   tile: TerrainMeshTile,
@@ -158,6 +174,9 @@ export function LocalTerrain3DViewer({
   const activeOverlayMode = useRoutingStore((s) => s.activeOverlayMode);
   const verticalExaggeration = useRoutingStore((s) => s.verticalExaggeration);
   const surfacePickMode = useRoutingStore((s) => s.surfacePickMode);
+  const corridorAssessment = useEvidenceStore((s) => s.corridorAssessment);
+  const evidenceOverlays = useEvidenceStore((s) => s.overlays);
+  const selectedSegmentId = useEvidenceStore((s) => s.selectedSegmentId);
   const startPoint = useRoutingStore((s) => s.startPoint);
   const destinationPoint = useRoutingStore((s) => s.destinationPoint);
   const customWaypoints = useRoutingStore((s) => s.customWaypoints);
@@ -946,12 +965,11 @@ export function LocalTerrain3DViewer({
       stem.position.set(0, poleHeight * 0.5, 0);
       stem.userData = userData;
 
+      const headKind = getMarkerHeadGeometryKind(shape);
       let headGeom: THREE.BufferGeometry;
-      if (shape === "destination") {
-        headGeom = new THREE.ConeGeometry(0.58, 1.1, 6);
-      } else if (shape === "waypoint") {
+      if (headKind === "box") {
         headGeom = new THREE.BoxGeometry(0.72, 0.72, 0.72);
-      } else if (shape === "target") {
+      } else if (headKind === "octahedron") {
         headGeom = new THREE.OctahedronGeometry(0.56, 0);
       } else {
         headGeom = new THREE.SphereGeometry(0.52, 14, 14);
@@ -1020,7 +1038,7 @@ export function LocalTerrain3DViewer({
     if (destinationPoint) {
       const elev = lookupElevNear(destinationPoint.lat, destinationPoint.lon_east);
       addBeaconPin(
-        toSceneVec(destinationPoint.lat, destinationPoint.lon_east, elev, 1.3),
+        toSceneVec(destinationPoint.lat, destinationPoint.lon_east, elev, 2),
         "#f43f5e",
         1.3,
         { kind: "destination" },
@@ -1223,6 +1241,106 @@ export function LocalTerrain3DViewer({
       overlayGroup.add(liveGroup);
       zoomAdaptiveMarkersRef.current.push({ obj: liveGroup, weight: 1.0 });
     }
+
+    // Evidence Intelligence Corridor, Segments, Gaps, Candidates & Observations
+    if (corridorAssessment && corridorAssessment.dataset_id === meshManifest.dataset_id) {
+      if (evidenceOverlays.showCorridor) {
+        const drawBoundary = (pts: number[][], colorHex: string) => {
+          if (pts.length < 2) return;
+          const vecs = pts.map(([lon, lat]) => {
+            const elev = lookupElevNear(lat, lon);
+            return toSceneVec(lat, lon, elev, 2.5);
+          });
+          const g = new THREE.BufferGeometry().setFromPoints(vecs);
+          const m = new THREE.LineBasicMaterial({ color: colorHex, transparent: true, opacity: 0.78 });
+          overlayGroup.add(new THREE.Line(g, m));
+        };
+        drawBoundary(corridorAssessment.corridor_geometry.left_boundary, "#22d3ee");
+        drawBoundary(corridorAssessment.corridor_geometry.right_boundary, "#22d3ee");
+      }
+
+      if (evidenceOverlays.showSegments) {
+        corridorAssessment.segments.forEach((seg) => {
+          const isSel = selectedSegmentId === seg.segment_id;
+          const elev = lookupElevNear(seg.end_coord.lat, seg.end_coord.lon_east);
+          const pos = toSceneVec(seg.end_coord.lat, seg.end_coord.lon_east, elev, 4.5);
+          const m = new THREE.Mesh(
+            new THREE.BoxGeometry(isSel ? 0.9 : 0.55, isSel ? 0.9 : 0.55, isSel ? 0.9 : 0.55),
+            new THREE.MeshBasicMaterial({ color: isSel ? "#facc15" : "#38bdf8" })
+          );
+          m.position.copy(pos);
+          overlayGroup.add(m);
+          zoomAdaptiveMarkersRef.current.push({ obj: m, weight: isSel ? 1.1 : 0.75 });
+        });
+      }
+
+      if (evidenceOverlays.showGaps) {
+        corridorAssessment.evidence_gaps.slice(0, 24).forEach((gap) => {
+          const b = gap.bounds;
+          if (b.min_lat == null || b.max_lat == null || b.min_lon == null || b.max_lon == null) return;
+          const corners = [
+            [b.min_lat, b.min_lon],
+            [b.min_lat, b.max_lon],
+            [b.max_lat, b.max_lon],
+            [b.max_lat, b.min_lon],
+            [b.min_lat, b.min_lon],
+          ].map(([lt, ln]) => toSceneVec(lt, ln, lookupElevNear(lt, ln), 3.0));
+          const g = new THREE.BufferGeometry().setFromPoints(corners);
+          const m = new THREE.LineBasicMaterial({ color: "#f59e0b", transparent: true, opacity: 0.75 });
+          overlayGroup.add(new THREE.Line(g, m));
+        });
+      }
+
+      if (evidenceOverlays.showTerrainCandidates) {
+        corridorAssessment.terrain_candidates.slice(0, 25).forEach((tc) => {
+          const pos = toSceneVec(
+            tc.latitude,
+            tc.longitude_east,
+            tc.geometric_measurements.elevation_m ?? lookupElevNear(tc.latitude, tc.longitude_east),
+            5.0
+          );
+          const m = new THREE.Mesh(
+            new THREE.OctahedronGeometry(0.55, 0),
+            new THREE.MeshBasicMaterial({ color: "#fb923c" })
+          );
+          m.position.copy(pos);
+          overlayGroup.add(m);
+          zoomAdaptiveMarkersRef.current.push({ obj: m, weight: 0.8 });
+        });
+      }
+
+      if (evidenceOverlays.showOpticalCandidates) {
+        corridorAssessment.optical_candidates.slice(0, 25).forEach((oc) => {
+          const pos = toSceneVec(oc.latitude, oc.longitude_east, lookupElevNear(oc.latitude, oc.longitude_east), 5.5);
+          const m = new THREE.Mesh(
+            new THREE.OctahedronGeometry(0.5, 0),
+            new THREE.MeshBasicMaterial({ color: "#e879f9" })
+          );
+          m.position.copy(pos);
+          overlayGroup.add(m);
+          zoomAdaptiveMarkersRef.current.push({ obj: m, weight: 0.75 });
+        });
+      }
+
+      if (evidenceOverlays.showObservations) {
+        corridorAssessment.observations.slice(0, 30).forEach((obs) => {
+          if (obs.latitude == null || obs.longitude_east == null) return;
+          const pos = toSceneVec(
+            obs.latitude,
+            obs.longitude_east,
+            lookupElevNear(obs.latitude, obs.longitude_east),
+            5.5
+          );
+          const m = new THREE.Mesh(
+            new THREE.SphereGeometry(0.5, 10, 10),
+            new THREE.MeshBasicMaterial({ color: "#34d399" })
+          );
+          m.position.copy(pos);
+          overlayGroup.add(m);
+          zoomAdaptiveMarkersRef.current.push({ obj: m, weight: 0.8 });
+        });
+      }
+    }
   }, [
     meshManifest,
     verticalExaggeration,
@@ -1240,6 +1358,9 @@ export function LocalTerrain3DViewer({
     simulationProgressM,
     livePositionMarker,
     tilesLoadedCount,
+    corridorAssessment,
+    evidenceOverlays,
+    selectedSegmentId,
   ]);
 
   // Respond to external camera focus requests (e.g. clicking an instruction row or target)

@@ -1,0 +1,154 @@
+"""
+MARSCOPE Evidence Intelligence API Router
+Martian Surface Intelligence & Exploration System
+
+Exposes corridor evidence assessment, segment/coverage/feature/observation/
+uncertainty/provenance sub-resources, multi-route evidence comparison, and
+persistent Marswalk Mission Dossier endpoints.
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException
+
+from app.evidence_intelligence.schemas import (
+    CorridorAssessRequest,
+    CorridorAssessment,
+    MissionDossierRequest,
+    MissionDossierResponse,
+    RouteEvidenceComparisonRequest,
+    RouteEvidenceComparisonResponse,
+)
+from app.services.container import evidence_intelligence_service
+
+router = APIRouter(prefix="/evidence-intelligence", tags=["Evidence Intelligence"])
+
+
+def _get_corridor_or_404(assessment_id: str) -> CorridorAssessment:
+    assessment = evidence_intelligence_service.get_corridor_assessment(assessment_id)
+    if assessment is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Corridor assessment '{assessment_id}' not found.",
+        )
+    return assessment
+
+
+@router.post("/corridor/assess", response_model=CorridorAssessment)
+def assess_corridor(request: CorridorAssessRequest):
+    """Compute a complete evidence-backed Marswalk corridor assessment."""
+    try:
+        return evidence_intelligence_service.assess_corridor(request)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/corridor/{assessment_id}", response_model=CorridorAssessment)
+def get_corridor_assessment(assessment_id: str):
+    """Retrieve a previously computed corridor assessment."""
+    return _get_corridor_or_404(assessment_id)
+
+
+@router.get("/corridor/{assessment_id}/segments")
+def get_corridor_segments(assessment_id: str):
+    """Return per-segment terrain, coverage, and provenance breakdown."""
+    assessment = _get_corridor_or_404(assessment_id)
+    return {
+        "assessment_id": assessment.assessment_id,
+        "segment_scale_m": assessment.segment_scale_m,
+        "segments": assessment.segments,
+    }
+
+
+@router.get("/corridor/{assessment_id}/coverage")
+def get_corridor_coverage(assessment_id: str):
+    """Return corridor spatial coverage summary, resolution adequacy, and evidence gaps."""
+    assessment = _get_corridor_or_404(assessment_id)
+    return {
+        "assessment_id": assessment.assessment_id,
+        "coverage_summary": assessment.coverage_summary,
+        "resolution_adequacy": assessment.resolution_adequacy,
+        "evidence_gaps": assessment.evidence_gaps,
+        "dataset_inventory": assessment.dataset_inventory,
+    }
+
+
+@router.get("/corridor/{assessment_id}/features")
+def get_corridor_features(assessment_id: str):
+    """Return terrain morphology candidates, optical candidates, and rejected optical false positives."""
+    assessment = _get_corridor_or_404(assessment_id)
+    return {
+        "assessment_id": assessment.assessment_id,
+        "terrain_candidates": assessment.terrain_candidates,
+        "optical_candidates": assessment.optical_candidates,
+        "rejected_optical_candidates": assessment.rejected_optical_candidates,
+    }
+
+
+@router.get("/corridor/{assessment_id}/observations")
+def get_corridor_observations(assessment_id: str):
+    """Return verified rover observations and imagery records associated within the corridor radius."""
+    assessment = _get_corridor_or_404(assessment_id)
+    return {
+        "assessment_id": assessment.assessment_id,
+        "observation_search_radius_m": assessment.observation_search_radius_m,
+        "observations": assessment.observations,
+    }
+
+
+@router.get("/corridor/{assessment_id}/uncertainty")
+def get_corridor_uncertainty(assessment_id: str):
+    """Return uncertainty summary, precision limits, and unquantified physical unknowns."""
+    assessment = _get_corridor_or_404(assessment_id)
+    return {
+        "assessment_id": assessment.assessment_id,
+        "uncertainty": assessment.uncertainty,
+        "resolution_adequacy": assessment.resolution_adequacy,
+    }
+
+
+@router.get("/corridor/{assessment_id}/provenance")
+def get_corridor_provenance(assessment_id: str):
+    """Return the full provenance dependency graph and dataset validation stages."""
+    assessment = _get_corridor_or_404(assessment_id)
+    return {
+        "assessment_id": assessment.assessment_id,
+        "provenance_graph": assessment.provenance_graph,
+        "dataset_inventory": assessment.dataset_inventory,
+    }
+
+
+@router.post("/routes/compare-evidence", response_model=RouteEvidenceComparisonResponse)
+def compare_routes_evidence(request: RouteEvidenceComparisonRequest):
+    """Compare candidate planning modes using corridor terrain, coverage, and observation evidence."""
+    try:
+        return evidence_intelligence_service.compare_routes_evidence(request)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/mission-dossier/generate", response_model=MissionDossierResponse)
+def generate_mission_dossier(request: MissionDossierRequest):
+    """Generate and persist a reproducible Marswalk Mission Dossier."""
+    try:
+        return evidence_intelligence_service.generate_mission_dossier(request)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/mission-dossier/{dossier_id}", response_model=MissionDossierResponse)
+def get_mission_dossier(dossier_id: str):
+    """Retrieve a persisted Marswalk Mission Dossier."""
+    dossier = evidence_intelligence_service.get_mission_dossier(dossier_id)
+    if dossier is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Mission dossier '{dossier_id}' not found.",
+        )
+    return dossier

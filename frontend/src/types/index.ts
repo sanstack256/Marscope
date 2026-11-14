@@ -1550,3 +1550,253 @@ export interface TrackingReplanPreviewResponse {
   warnings: string[];
   notes: string;
 }
+
+export type ReadinessState =
+  | "ASSESSED"
+  | "PARTIALLY_ASSESSED"
+  | "INSUFFICIENT_EVIDENCE"
+  | "NOT_ASSESSED";
+
+export interface DatasetValidationStage {
+  dataset_id: string;
+  product_id: string;
+  product_type: string;
+  catalogued: boolean;
+  discovered: boolean;
+  acquired: boolean;
+  integrity_verified: boolean;
+  label_parsed: boolean;
+  scientifically_validated: boolean;
+  processed: boolean;
+  renderable: boolean;
+  derived: boolean;
+  native_resolution_m?: number | null;
+  sha256_checksum?: string | null;
+  missing_requirement?: string | null;
+}
+
+export interface CorridorPolygon {
+  centerline: number[][];
+  left_boundary: number[][];
+  right_boundary: number[][];
+  polygon_ring: number[][];
+  clipped_to_dem_footprint: boolean;
+  projection: string;
+  corridor_width_m: number;
+}
+
+export interface TerrainMorphologyCandidate {
+  candidate_id: string;
+  morphology_type: string;
+  segment_id?: string | null;
+  latitude: number;
+  longitude_east: number;
+  footprint_bounds: Record<string, number>;
+  detection_method: string;
+  input_dataset_id: string;
+  input_product_id: string;
+  input_resolution_m: number;
+  detection_parameters: Record<string, unknown>;
+  geometric_measurements: Record<string, number>;
+  resolution_status: string;
+  classification: string;
+  validation_state: string;
+  limitations: string[];
+  provenance: Record<string, unknown>;
+}
+
+export interface RejectedOpticalCandidate {
+  feature_id: string;
+  latitude: number;
+  longitude_east: number;
+  rejection_reason: string;
+  valid_pixel_fraction: number;
+  local_contrast_zscore: number;
+}
+
+export interface AssociatedObservation {
+  observation_id: string;
+  mission: string;
+  instrument: string;
+  sol?: number | null;
+  observation_time?: string | null;
+  latitude?: number | null;
+  longitude_east?: number | null;
+  coordinate_uncertainty_m?: number | null;
+  product_id: string;
+  distance_from_route_m?: number | null;
+  nearest_segment_id?: string | null;
+  measurement_type: string;
+  product_available: boolean;
+  is_panorama: boolean;
+  classification: string;
+  spatial_association_note: string;
+}
+
+export interface ResolutionAdequacyRecord {
+  analysis_domain: string;
+  status: string;
+  source_dataset_id?: string | null;
+  native_resolution_m?: number | null;
+  policy_version: string;
+  rationale: string;
+}
+
+export interface SegmentCoverageReport {
+  segment_id: string;
+  dem_coverage_fraction: number;
+  valid_elevation_fraction: number;
+  slope_available: boolean;
+  tri_available: boolean;
+  optical_coverage_fraction: number;
+  optical_quality_note: string;
+  geological_map_coverage: boolean;
+  geological_map_scale_note: string;
+  spectral_data_available: boolean;
+  thermal_data_available: boolean;
+  rover_observation_count: number;
+  panorama_available: boolean;
+  source_resolution_m?: number | null;
+  unverified_regions_present: boolean;
+}
+
+export interface EvidenceGapCell {
+  gap_id: string;
+  gap_type: string;
+  segment_id?: string | null;
+  bounds: Record<string, number>;
+  reason: string;
+}
+
+export interface CorridorSegmentAssessment {
+  segment_id: string;
+  segment_index: number;
+  start_coord: { lat: number; lon_east: number; label?: string | null };
+  end_coord: { lat: number; lon_east: number; label?: string | null };
+  geodesic_distance_m: number;
+  surface_distance_m: number;
+  start_elevation_m?: number | null;
+  end_elevation_m?: number | null;
+  elevation_change_m?: number | null;
+  max_slope_deg?: number | null;
+  mean_slope_deg?: number | null;
+  max_tri_m?: number | null;
+  mean_tri_m?: number | null;
+  tri_physical_radius_m: number;
+  local_relief_m?: number | null;
+  mean_profile_curvature_inv_m?: number | null;
+  source_dem_id: string;
+  source_product_id: string;
+  native_resolution_m: number;
+  valid_data_coverage_fraction: number;
+  uncertainty_summary: string;
+  associated_observation_ids: string[];
+  optical_candidate_ids: string[];
+  morphology_candidate_ids: string[];
+  unverified_area_present: boolean;
+  coverage: SegmentCoverageReport;
+}
+
+export interface CorridorAssessment {
+  assessment_id: string;
+  dataset_id: string;
+  source_product_id: string;
+  crs: string;
+  local_projection: string;
+  corridor_width_m: number;
+  segment_scale_m: number;
+  observation_search_radius_m: number;
+  corridor_geometry: CorridorPolygon;
+  route_horizontal_distance_m: number;
+  route_surface_distance_m: number;
+  segments: CorridorSegmentAssessment[];
+  terrain_candidates: TerrainMorphologyCandidate[];
+  optical_candidates: OpticalCandidateFeature[];
+  rejected_optical_candidates: RejectedOpticalCandidate[];
+  observations: AssociatedObservation[];
+  coverage_summary: Record<string, unknown>;
+  resolution_adequacy: ResolutionAdequacyRecord[];
+  evidence_gaps: EvidenceGapCell[];
+  uncertainty: {
+    dem_vertical_precision_note: string;
+    horizontal_resolution_m: number;
+    corridor_valid_fraction: number;
+    resolution_limited_segments: number;
+    nodata_segments: number;
+    coordinate_uncertainty_note: string;
+    unquantified_limitations: string[];
+  };
+  dataset_inventory: DatasetValidationStage[];
+  compute_time_ms: number;
+}
+
+export interface RouteEvidenceComparisonEntry {
+  mode: string;
+  mode_label: string;
+  feasible: boolean;
+  error_reason?: string | null;
+  assessment_id?: string | null;
+  horizontal_distance_m?: number | null;
+  surface_distance_m?: number | null;
+  elevation_gain_m?: number | null;
+  elevation_loss_m?: number | null;
+  max_slope_deg?: number | null;
+  mean_slope_deg?: number | null;
+  max_tri_m?: number | null;
+  mean_tri_m?: number | null;
+  local_relief_max_m?: number | null;
+  terrain_coverage_fraction?: number | null;
+  optical_coverage_fraction?: number | null;
+  unknown_data_fraction?: number | null;
+  resolution_adequacy_status?: string | null;
+  associated_observation_count: number;
+  science_targets_reached_count: number;
+  unresolved_candidate_count: number;
+  data_gap_count: number;
+  composite_risk_score?: number | null;
+  composite_risk_status: string;
+}
+
+export interface RouteEvidenceComparisonResponse {
+  dataset_id: string;
+  source_product_id: string;
+  corridor_width_m: number;
+  entries: RouteEvidenceComparisonEntry[];
+  tradeoff_explanations: string[];
+  compute_time_ms: number;
+}
+
+export interface PhysicalEnergyBudget {
+  available: boolean;
+  classification: string;
+  input_total_mass_kg?: number | null;
+  astronaut_suit_mass_kg?: number | null;
+  payload_mass_kg?: number | null;
+  surface_weight_n?: number | null;
+  mars_gravity_m_s2: number;
+  gravity_parameter_source: string;
+  gravity_parameter_version: string;
+  positive_elevation_gain_m: number;
+  negative_elevation_loss_m: number;
+  gravitational_pe_increase_j?: number | null;
+  gravitational_pe_decrease_j?: number | null;
+  net_gravitational_pe_change_j?: number | null;
+  disclaimer: string;
+  unavailable_reason?: string | null;
+}
+
+export interface MissionDossierResponse {
+  dossier_id: string;
+  mission_name: string;
+  study_region: string;
+  readiness_state: ReadinessState;
+  readiness_reasons: string[];
+  missing_inputs: string[];
+  corridor_assessment: CorridorAssessment;
+  route_comparison?: RouteEvidenceComparisonResponse | null;
+  physical_energy_budget: PhysicalEnergyBudget;
+  mobility_assessment: Record<string, unknown>;
+  scientific_opportunities: Array<Record<string, unknown>>;
+  unmodeled_parameters: string[];
+  safety_certification_note: string;
+}

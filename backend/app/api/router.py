@@ -10,6 +10,7 @@ from app.api import (
     composition,
     datasets,
     destinations,
+    evidence_intelligence,
     health,
     imagery,
     layers,
@@ -43,3 +44,4 @@ api_router.include_router(physics.router)
 api_router.include_router(localization.router)
 api_router.include_router(tracking.router)
 api_router.include_router(destinations.router)
+api_router.include_router(evidence_intelligence.router)

@@ -86,11 +86,12 @@ class HumanMobilityService:
             else (local_dems[0].dataset_id if local_dems else None)
         )
 
+        routing_operational = len(local_dems) > 0
         return MobilityEngineStatusResponse(
             processing_version=PROCESSING_VERSION,
             traversal_model_id=TRAVERSAL_MODEL_ID,
             traversal_model_version=TRAVERSAL_MODEL_VERSION,
-            route_optimization_enabled=True,
+            route_optimization_enabled=routing_operational,
             safety_certification_enabled=False,
             active_dem_dataset_id=active_id,
             available_dem_count=len(inventory),
@@ -107,7 +108,7 @@ class HumanMobilityService:
                 "configurable_mobility_scenarios": True,
                 "transparent_kinematic_traversal_model": len(local_dems) > 0,
                 "spatially_explicit_cost_surface": len(local_dems) > 0,
-                "route_optimization": False,
+                "route_optimization": routing_operational,
                 "physiological_or_oxygen_consumption_model": False,
             },
             scientific_constraints=[

@@ -8,7 +8,7 @@ Never generates synthetic fallback terrain surfaces.
 
 import json
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from app.schemas.terrain import (
     TerrainLayerMetadata,
     TerrainPointResponse,
@@ -17,7 +17,11 @@ from app.schemas.terrain import (
 )
 from app.services.container import PROCESSED_DIR, RAW_DIR, catalog_service, destination_service, layer_service
 from app.terrain.derivatives import MultiScaleTerrainResponse, analyze_multiscale_terrain_point
-from app.terrain.optical_analysis import OpticalAnalysisResponse, analyze_optical_region
+from app.terrain.optical_analysis import (
+    OpticalAnalysisResponse,
+    analyze_optical_region,
+    render_optical_derived_crop_png,
+)
 
 router = APIRouter(prefix="/terrain", tags=["Terrain Intelligence"])
 
@@ -166,3 +170,29 @@ async def get_optical_feature_analysis(
         max_lon=max_lon,
         max_candidates=max_candidates,
     )
+
+
+@router.get("/optical-crop")
+async def get_optical_derived_crop(
+    dataset_id: str = Query("hirise_dteec_009149_1750"),
+    min_lat: float = Query(..., ge=-90.0, le=90.0),
+    max_lat: float = Query(..., ge=-90.0, le=90.0),
+    min_lon: float = Query(..., ge=-180.0, le=360.0),
+    max_lon: float = Query(..., ge=-180.0, le=360.0),
+    size: int = Query(192, ge=64, le=512),
+) -> Response:
+    """Return a derived Sobel-edge visualization crop PNG (never modifies source imagery)."""
+    try:
+        png_bytes = render_optical_derived_crop_png(
+            catalog_service=catalog_service,
+            raw_dir=RAW_DIR,
+            dataset_id=dataset_id,
+            min_lat=min_lat,
+            max_lat=max_lat,
+            min_lon=min_lon,
+            max_lon=max_lon,
+            size=size,
+        )
+        return Response(content=png_bytes, media_type="image/png")
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

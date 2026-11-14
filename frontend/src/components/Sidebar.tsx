@@ -16,6 +16,7 @@ import {
   Images,
   Settings,
   ChevronRight,
+  ClipboardCheck,
 } from "lucide-react";
 import { APP_NAME, API_BASE_URL } from "../lib/constants";
 import { useLayerStore } from "../stores/useLayerStore";
@@ -27,6 +28,7 @@ const ICON_MAP: Record<string, React.ElementType> = {
   "/targets": Telescope,
   "/planner": Compass,
   "/routes": GitCompare,
+  "/mission-readiness": ClipboardCheck,
   "/simulation": PlayCircle,
   "/evidence": Database,
   "/imagery": Images,
@@ -40,6 +42,7 @@ const NAV_LINKS = [
   { name: "Target Explorer", href: "/targets" },
   { name: "Route Planner", href: "/planner", badge: "Config" },
   { name: "Route Comparison", href: "/routes" },
+  { name: "Mission Readiness", href: "/mission-readiness", badge: "EVD" },
   { name: "Mission Simulation", href: "/simulation" },
   { name: "Evidence & Provenance", href: "/evidence" },
   { name: "NASA Imagery Catalogue", href: "/imagery" },

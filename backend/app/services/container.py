@@ -19,6 +19,7 @@ from app.services.destination_service import DestinationEvaluationService
 from app.services.layer_service import LayerCatalogService
 from app.services.localization_service import LocalizationService
 from app.services.tracking_service import TrackingService
+from app.evidence_intelligence.report import EvidenceIntelligenceService
 from app.terrain.mesh import TerrainMeshService
 
 # Project root path resolution
@@ -76,3 +77,9 @@ routing_service = ScienceAwareRoutingService(
     composition_search=composition_search_service,
 )
 tracking_service = TrackingService(routing_service=routing_service)
+evidence_intelligence_service = EvidenceIntelligenceService(
+    catalog_service=catalog_service,
+    routing_service=routing_service,
+    raw_dir=RAW_DIR,
+    processed_dir=PROCESSED_DIR,
+)
