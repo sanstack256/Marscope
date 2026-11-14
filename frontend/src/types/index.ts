@@ -1120,6 +1120,8 @@ export interface OpticalCandidateFeature {
   score: number;
   edge_magnitude_dn: number;
   local_contrast_zscore: number;
+  estimated_diameter_m?: number | null;
+  algorithm_version?: string;
   classification: ScientificDataClassification;
   validation_state: string;
   disclaimer: string;
@@ -1581,6 +1583,8 @@ export interface CorridorPolygon {
   right_boundary: number[][];
   polygon_ring: number[][];
   clipped_to_dem_footprint: boolean;
+  clipped_to_dem_bounds?: boolean;
+  corridor_area_m2?: number | null;
   projection: string;
   corridor_width_m: number;
 }
@@ -1625,9 +1629,14 @@ export interface AssociatedObservation {
   coordinate_uncertainty_m?: number | null;
   product_id: string;
   distance_from_route_m?: number | null;
+  distance_from_corridor_m?: number | null;
+  association_type?: string;
   nearest_segment_id?: string | null;
   measurement_type: string;
+  availability_status?: string;
   product_available: boolean;
+  availability_check_note?: string | null;
+  spatial_reference_verified?: boolean;
   is_panorama: boolean;
   classification: string;
   spatial_association_note: string;
@@ -1649,6 +1658,12 @@ export interface SegmentCoverageReport {
   slope_available: boolean;
   tri_available: boolean;
   optical_coverage_fraction: number;
+  optical_footprint_coverage_fraction?: number;
+  valid_optical_pixel_coverage_fraction?: number;
+  optical_covered_area_m2?: number | null;
+  optical_contributing_product_ids?: string[];
+  segment_corridor_area_m2?: number | null;
+  dem_valid_area_m2?: number | null;
   optical_quality_note: string;
   geological_map_coverage: boolean;
   geological_map_scale_note: string;
@@ -1658,6 +1673,8 @@ export interface SegmentCoverageReport {
   panorama_available: boolean;
   source_resolution_m?: number | null;
   unverified_regions_present: boolean;
+  validation_status?: string;
+  temporal_applicability_note?: string;
 }
 
 export interface EvidenceGapCell {
@@ -1673,8 +1690,20 @@ export interface CorridorSegmentAssessment {
   segment_index: number;
   start_coord: { lat: number; lon_east: number; label?: string | null };
   end_coord: { lat: number; lon_east: number; label?: string | null };
+  vertices?: Array<{ lat: number; lon_east: number; label?: string | null }>;
+  corridor_polygon?: number[][];
+  corridor_area_m2?: number | null;
+  cumulative_start_m?: number | null;
+  cumulative_end_m?: number | null;
   geodesic_distance_m: number;
+  horizontal_distance_m?: number | null;
   surface_distance_m: number;
+  three_d_distance_m?: number | null;
+  straight_line_distance_m?: number | null;
+  terrain_pixel_count?: number;
+  valid_terrain_pixel_count?: number;
+  resolution_supportable?: boolean;
+  resolution_support_note?: string | null;
   start_elevation_m?: number | null;
   end_elevation_m?: number | null;
   elevation_change_m?: number | null;
@@ -1728,6 +1757,35 @@ export interface CorridorAssessment {
   };
   dataset_inventory: DatasetValidationStage[];
   compute_time_ms: number;
+  cache_validity?: "CURRENT" | "STALE" | "RECOMPUTING" | "FAILED" | "UNAVAILABLE";
+  stale_reasons?: string[];
+  readiness_policy_version?: string;
+  convolution_buffer_m?: number | null;
+  convolution_buffer_px?: number | null;
+  route_decision_explainer?: RouteDecisionExplainer | null;
+}
+
+export interface RouteDecisionExplainer {
+  mode: string;
+  algorithm: string;
+  hard_constraints: Record<string, unknown>;
+  soft_cost_weights: Record<string, number>;
+  grid_exclusion_summary: Record<string, number>;
+  total_cost_breakdown: Record<string, number>;
+  dominant_cost_driver: string;
+  verified_science_targets_applied: Array<Record<string, unknown>>;
+  unverified_optical_candidates_excluded_from_bonus: number;
+  sensitivity_notes: string[];
+  decision_trace_summary: string;
+}
+
+export interface DomainAssessmentRecord {
+  domain: string;
+  status: string;
+  evidence_basis: string;
+  policy_version: string;
+  threshold_or_rule: string;
+  notes: string[];
 }
 
 export interface RouteEvidenceComparisonEntry {
@@ -1799,4 +1857,144 @@ export interface MissionDossierResponse {
   scientific_opportunities: Array<Record<string, unknown>>;
   unmodeled_parameters: string[];
   safety_certification_note: string;
+  mathematical_assessment_complete?: boolean;
+  operational_safety_certified?: boolean;
+  domain_assessments?: DomainAssessmentRecord[];
+  readiness_policy_version?: string;
+  cache_validity?: "CURRENT" | "STALE" | "RECOMPUTING" | "FAILED" | "UNAVAILABLE";
+  stale_reasons?: string[];
+}
+
+export interface EvaExplicitResourceSpec {
+  resource_name: string;
+  initial_quantity: number;
+  unit: string;
+  consumption_rate: number;
+  rate_unit: string;
+  reserve_fraction: number;
+  source_note?: string | null;
+}
+
+export interface EvaResourceEvaluationEntry {
+  resource_name: string;
+  status: string;
+  initial_quantity?: number | null;
+  unit: string;
+  normalized_rate_per_second?: number | null;
+  exposure_duration_s?: number | null;
+  reserve_required?: number | null;
+  estimated_consumed?: number | null;
+  remaining_after_eva?: number | null;
+  margin_above_reserve?: number | null;
+  equation_applied: string;
+  explanation: string;
+}
+
+export interface EvaTimeBudgetBreakdown {
+  available: boolean;
+  outbound_travel_s?: number | null;
+  science_stops_s?: number | null;
+  operational_overhead_s: number;
+  return_travel_s?: number | null;
+  reserve_protected_s?: number | null;
+  total_required_s?: number | null;
+  mission_duration_limit_s?: number | null;
+  usable_budget_s?: number | null;
+  time_margin_s?: number | null;
+  within_time_budget?: boolean | null;
+  speed_model_used: string;
+  speed_model_validation_note: string;
+  missing_inputs: string[];
+}
+
+export interface EvaEnergyBudgetBreakdown {
+  available: boolean;
+  astronaut_suit_mass_kg?: number | null;
+  payload_mass_kg?: number | null;
+  total_mass_kg?: number | null;
+  mars_gravity_m_s2: number;
+  surface_weight_n?: number | null;
+  outbound_climb_gain_m: number;
+  outbound_descent_loss_m: number;
+  return_climb_gain_m: number;
+  return_descent_loss_m: number;
+  outbound_climb_work_j?: number | null;
+  return_climb_work_j?: number | null;
+  total_positive_climb_work_j?: number | null;
+  net_gravitational_pe_change_j?: number | null;
+  disclaimer: string;
+  missing_inputs: string[];
+}
+
+export interface EvaSegmentScheduleItem {
+  sequence_index: number;
+  leg_role: string;
+  segment_id?: string | null;
+  label: string;
+  start_time_s?: number | null;
+  end_time_s?: number | null;
+  duration_constant_speed_s?: number | null;
+  duration_tobler_approx_s?: number | null;
+  distance_m: number;
+  elevation_gain_m: number;
+  elevation_loss_m: number;
+  cumulative_climb_work_j?: number | null;
+  vertices: Array<{ lat: number; lon_east: number; label?: string | null }>;
+  corridor_polygon: number[][];
+  evidence_status: string;
+}
+
+export interface EvaReturnPlanReport {
+  return_route_computed: boolean;
+  return_strategy: string;
+  return_route_vertices: Array<{ seq: number; lat: number; lon_east: number; elevation_m: number }>;
+  return_horizontal_distance_m: number;
+  return_surface_distance_m: number;
+  return_elevation_gain_m: number;
+  return_elevation_loss_m: number;
+  return_duration_constant_s?: number | null;
+  return_duration_tobler_s?: number | null;
+  asymmetric_climb_delta_m: number;
+  return_margin_s?: number | null;
+  point_of_no_return_distance_m?: number | null;
+  feasible_within_usable_budget?: boolean | null;
+  warnings: string[];
+}
+
+export interface EvaConstraintCheckRecord {
+  constraint_id: string;
+  category: string;
+  status: string;
+  configured_limit?: string | null;
+  evaluated_value?: string | null;
+  explanation: string;
+}
+
+export interface EvaMissionEnvelopeResponse {
+  mission_id: string;
+  mission_name: string;
+  study_region: string;
+  dataset_id: string;
+  source_product_id: string;
+  route_id: string;
+  assessment_id: string;
+  envelope_status: string;
+  operational_safety_certified: boolean;
+  missing_inputs: string[];
+  outbound_summary: Record<string, number>;
+  time_budget: EvaTimeBudgetBreakdown;
+  energy_budget: EvaEnergyBudgetBreakdown;
+  resource_budget: {
+    overall_status: string;
+    entries: EvaResourceEvaluationEntry[];
+    missing_inputs: string[];
+    limitations: string[];
+  };
+  return_plan: EvaReturnPlanReport;
+  schedule: EvaSegmentScheduleItem[];
+  constraints: EvaConstraintCheckRecord[];
+  uncertainty_notes: string[];
+  limitations: string[];
+  cache_validity: string;
+  compute_time_ms: number;
 }

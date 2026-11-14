@@ -117,6 +117,35 @@ def get_corridor_provenance(assessment_id: str):
         "assessment_id": assessment.assessment_id,
         "provenance_graph": assessment.provenance_graph,
         "dataset_inventory": assessment.dataset_inventory,
+        "dependency_signature": assessment.dependency_signature,
+        "cache_validity": assessment.cache_validity,
+        "stale_reasons": assessment.stale_reasons,
+    }
+
+
+@router.get("/corridor/{assessment_id}/decision-trace")
+def get_corridor_decision_trace(assessment_id: str):
+    """Return hard/soft route constraint trace, cell exclusions, and readiness policy version."""
+    assessment = _get_corridor_or_404(assessment_id)
+    return {
+        "assessment_id": assessment.assessment_id,
+        "readiness_policy_version": assessment.readiness_policy_version,
+        "cache_validity": assessment.cache_validity,
+        "stale_reasons": assessment.stale_reasons,
+        "dependency_signature": assessment.dependency_signature,
+        "convolution_buffer_m": assessment.convolution_buffer_m,
+        "convolution_buffer_px": assessment.convolution_buffer_px,
+        "route_decision_explainer": assessment.route_decision_explainer,
+        "segment_resolution_checks": [
+            {
+                "segment_id": s.segment_id,
+                "resolution_supportable": s.resolution_supportable,
+                "resolution_support_note": s.resolution_support_note,
+                "terrain_pixel_count": s.terrain_pixel_count,
+                "valid_terrain_pixel_count": s.valid_terrain_pixel_count,
+            }
+            for s in assessment.segments
+        ],
     }
 
 

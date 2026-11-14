@@ -10,6 +10,7 @@ from app.api import (
     composition,
     datasets,
     destinations,
+    eva_operations,
     evidence_intelligence,
     health,
     imagery,
@@ -45,3 +46,4 @@ api_router.include_router(localization.router)
 api_router.include_router(tracking.router)
 api_router.include_router(destinations.router)
 api_router.include_router(evidence_intelligence.router)
+api_router.include_router(eva_operations.router)

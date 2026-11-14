@@ -39,6 +39,66 @@ class ReadinessState(str, Enum):
     NOT_ASSESSED = "NOT_ASSESSED"
 
 
+class ObservationAssociationType(str, Enum):
+    INTERSECTS_ROUTE = "INTERSECTS_ROUTE"
+    INTERSECTS_CORRIDOR = "INTERSECTS_CORRIDOR"
+    NEAR_CORRIDOR = "NEAR_CORRIDOR"
+    OUTSIDE_SEARCH_RADIUS = "OUTSIDE_SEARCH_RADIUS"
+    UNLOCATED = "UNLOCATED"
+    SPATIAL_REFERENCE_UNVERIFIED = "SPATIAL_REFERENCE_UNVERIFIED"
+
+
+class ProductAvailabilityStatus(str, Enum):
+    VERIFIED_LOCAL = "VERIFIED_LOCAL"
+    VERIFIED_REMOTE = "VERIFIED_REMOTE"
+    URL_UNVERIFIED = "URL_UNVERIFIED"
+    MISSING = "MISSING"
+    ACCESS_DENIED = "ACCESS_DENIED"
+    ARCHIVE_UNAVAILABLE = "ARCHIVE_UNAVAILABLE"
+
+
+class CacheValidityState(str, Enum):
+    CURRENT = "CURRENT"
+    STALE = "STALE"
+    RECOMPUTING = "RECOMPUTING"
+    FAILED = "FAILED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class DomainAssessmentRecord(BaseModel):
+    domain: str
+    status: str  # ASSESSED | PARTIALLY_ASSESSED | INSUFFICIENT_EVIDENCE | UNAVAILABLE | UNVALIDATED
+    evidence_basis: str
+    policy_version: str = "readiness-v2.0"
+    threshold_or_rule: str
+    notes: List[str] = Field(default_factory=list)
+
+
+class AssessmentDependencySignature(BaseModel):
+    dem_dataset_id: str
+    dem_product_id: str
+    dem_file_checksum: Optional[str] = None
+    optical_dataset_id: Optional[str] = None
+    optical_product_id: Optional[str] = None
+    optical_file_checksum: Optional[str] = None
+    geology_dataset_ids: List[str] = Field(default_factory=list)
+    geology_checksums: Dict[str, Optional[str]] = Field(default_factory=dict)
+    observation_catalog_checksum: Optional[str] = None
+    route_signature: Optional[str] = None
+    route_geometry_hash: str
+    corridor_width_m: float
+    segment_scale_m: float
+    observation_search_radius_m: float
+    routing_algorithm_version: str = "routing_v2_science_aware"
+    terrain_assessment_version: str = "terrain_corridor_v3"
+    optical_detector_version: str = "optical_candidate_v3"
+    observation_matcher_version: str = "obs_strtree_v2"
+    eva_model_version: str = "eva_envelope_v1"
+    readiness_policy_version: str = "readiness-v2.0"
+    mission_config_hash: Optional[str] = None
+    signature_digest: str
+
+
 class DatasetValidationStage(BaseModel):
     dataset_id: str
     product_id: str
@@ -63,8 +123,12 @@ class CorridorPolygon(BaseModel):
     right_boundary: List[List[float]] = Field(default_factory=list)
     polygon_ring: List[List[float]] = Field(default_factory=list)
     clipped_to_dem_footprint: bool = False
+    clipped_to_dem_bounds: bool = True
+    corridor_area_m2: Optional[float] = None
     projection: str
+    projection_epsg_or_wkt: Optional[str] = None
     corridor_width_m: float
+    polygon_wkt: Optional[str] = None
 
 
 class TerrainMorphologyCandidate(BaseModel):
@@ -98,11 +162,17 @@ class AssociatedObservation(BaseModel):
     coordinate_uncertainty_m: Optional[float] = None
     product_id: str
     distance_from_route_m: Optional[float] = None
+    distance_from_corridor_m: Optional[float] = None
+    association_type: ObservationAssociationType = ObservationAssociationType.NEAR_CORRIDOR
     nearest_segment_id: Optional[str] = None
     spatial_footprint: Optional[Dict[str, float]] = None
+    footprint_geometry: Optional[Dict[str, Any]] = None
     processing_level: Optional[str] = None
     measurement_type: str
-    product_available: bool = True
+    availability_status: ProductAvailabilityStatus = ProductAvailabilityStatus.URL_UNVERIFIED
+    product_available: bool = False
+    availability_check_note: Optional[str] = None
+    spatial_reference_verified: bool = True
     is_panorama: bool = False
     panorama_metadata: Optional[Dict[str, Any]] = None
     classification: ScientificDataClassification = ScientificDataClassification.DIRECTLY_MEASURED
@@ -136,6 +206,21 @@ class SegmentCoverageReport(BaseModel):
     panorama_available: bool
     source_resolution_m: Optional[float] = None
     unverified_regions_present: bool
+    # Prompt 15 exact per-segment metric denominators & non-double-counted multi-product coverage
+    segment_corridor_area_m2: Optional[float] = None
+    dem_valid_area_m2: Optional[float] = None
+    optical_footprint_coverage_fraction: float = 0.0
+    valid_optical_pixel_coverage_fraction: float = 0.0
+    optical_covered_area_m2: Optional[float] = None
+    optical_contributing_product_ids: List[str] = Field(default_factory=list)
+    geological_coverage_fraction: float = 0.0
+    thermal_coverage_fraction: float = 0.0
+    spectral_coverage_fraction: float = 0.0
+    spatial_resolution_adequate_for_eva: Optional[bool] = None
+    validation_status: str = "unvalidated_planning_evidence"
+    temporal_applicability_note: str = (
+        "Static orbital/rover archive; not live environmental state"
+    )
 
 
 class EvidenceGapCell(BaseModel):
@@ -151,8 +236,21 @@ class CorridorSegmentAssessment(BaseModel):
     segment_index: int
     start_coord: RouteCoordinateInput
     end_coord: RouteCoordinateInput
+    vertices: List[RouteCoordinateInput] = Field(default_factory=list)
+    geometry_geojson: Optional[Dict[str, Any]] = None
+    corridor_polygon: List[List[float]] = Field(default_factory=list)  # [[lon_east, lat], ...]
+    corridor_area_m2: Optional[float] = None
+    cumulative_start_m: Optional[float] = None
+    cumulative_end_m: Optional[float] = None
     geodesic_distance_m: float
+    horizontal_distance_m: Optional[float] = None
     surface_distance_m: float
+    three_d_distance_m: Optional[float] = None
+    straight_line_distance_m: Optional[float] = None
+    terrain_pixel_count: int = 0
+    valid_terrain_pixel_count: int = 0
+    resolution_supportable: bool = True
+    resolution_support_note: Optional[str] = None
     start_elevation_m: Optional[float] = None
     end_elevation_m: Optional[float] = None
     elevation_change_m: Optional[float] = None
@@ -198,6 +296,7 @@ class CorridorAssessRequest(BaseModel):
     selected_target_ids: List[str] = Field(default_factory=list)
     selected_imagery_ids: List[str] = Field(default_factory=list)
     constraints: Optional[RoutePlanningConstraints] = None
+    force_recompute: bool = False
 
 
 class CorridorAssessment(BaseModel):
@@ -224,6 +323,13 @@ class CorridorAssessment(BaseModel):
     dataset_inventory: List[DatasetValidationStage] = Field(default_factory=list)
     compute_time_ms: float
     provenance_graph: ProvenanceDependencyGraph
+    cache_validity: CacheValidityState = CacheValidityState.CURRENT
+    stale_reasons: List[str] = Field(default_factory=list)
+    dependency_signature: Optional[AssessmentDependencySignature] = None
+    readiness_policy_version: str = "readiness-v2.0"
+    convolution_buffer_m: Optional[float] = None
+    convolution_buffer_px: Optional[int] = None
+    route_decision_explainer: Optional[Dict[str, Any]] = None
 
 
 class RouteEvidenceComparisonEntry(BaseModel):
@@ -319,6 +425,7 @@ class MissionDossierRequest(BaseModel):
     return_reserve_fraction: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     astronaut_suit_mass_kg: Optional[float] = Field(default=None, gt=0.0, le=500.0)
     payload_mass_kg: Optional[float] = Field(default=None, ge=0.0, le=500.0)
+    force_recompute: bool = False
 
 
 class MissionDossierResponse(BaseModel):
@@ -338,3 +445,10 @@ class MissionDossierResponse(BaseModel):
         "UNVERIFIED / NOT SAFETY CERTIFIED — analytical mission dossier only."
     )
     provenance_graph: ProvenanceDependencyGraph
+    mathematical_assessment_complete: bool = False
+    operational_safety_certified: bool = False
+    domain_assessments: List[DomainAssessmentRecord] = Field(default_factory=list)
+    readiness_policy_version: str = "readiness-v2.0"
+    cache_validity: CacheValidityState = CacheValidityState.CURRENT
+    stale_reasons: List[str] = Field(default_factory=list)
+    dependency_signature: Optional[AssessmentDependencySignature] = None

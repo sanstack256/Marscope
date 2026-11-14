@@ -201,6 +201,46 @@ class ScienceStopSummary(BaseModel):
     distance_from_route_m: float
 
 
+class EdgeEvaluationDetail(BaseModel):
+    from_rc: List[int]
+    to_rc: List[int]
+    from_lat: float
+    from_lon_east: float
+    to_lat: float
+    to_lon_east: float
+    horizontal_distance_m: float
+    elevation_change_m: float
+    effective_slope_deg: float
+    allowed_by_hard_constraints: bool
+    rejection_reasons: List[str] = Field(default_factory=list)
+    base_distance_cost: float
+    slope_penalty_cost: float
+    uphill_penalty_cost: float
+    downhill_penalty_cost: float
+    roughness_penalty_cost: float
+    uncertainty_penalty_cost: float
+    nodata_proximity_penalty_cost: float
+    science_corridor_bonus_credit: float
+    clamped_multiplier: float
+    total_edge_cost: Optional[float] = None
+
+
+class RouteDecisionExplainer(BaseModel):
+    mode: RoutingMode
+    algorithm: PathAlgorithm
+    hard_constraints: Dict[str, Any] = Field(default_factory=dict)
+    soft_cost_weights: Dict[str, float] = Field(default_factory=dict)
+    grid_exclusion_summary: Dict[str, int] = Field(default_factory=dict)
+    total_cost_breakdown: Dict[str, float] = Field(default_factory=dict)
+    dominant_cost_driver: str
+    sampled_traversed_edges: List[EdgeEvaluationDetail] = Field(default_factory=list)
+    rejected_neighbor_edges: List[EdgeEvaluationDetail] = Field(default_factory=list)
+    verified_science_targets_applied: List[Dict[str, Any]] = Field(default_factory=list)
+    unverified_optical_candidates_excluded_from_bonus: int = 0
+    sensitivity_notes: List[str] = Field(default_factory=list)
+    decision_trace_summary: str
+
+
 class RouteComputeResponse(BaseModel):
     route_id: str
     route_signature: str
@@ -247,6 +287,7 @@ class RouteComputeResponse(BaseModel):
     limitations: List[str] = Field(default_factory=list)
     provenance: Dict[str, Any] = Field(default_factory=dict)
     provenance_graph: Optional[ProvenanceDependencyGraph] = None
+    decision_explainer: Optional[RouteDecisionExplainer] = None
 
 
 class RouteCompareEntry(BaseModel):

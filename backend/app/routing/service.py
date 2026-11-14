@@ -17,6 +17,8 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 import uuid
 
+import numpy as np
+
 from app.ingestion.catalog import DatasetCatalogService
 from app.mobility.coverage import _resolve_raw_dem_open_path
 from app.mobility.resolution import evaluate_dem_resolution_suitability
@@ -33,12 +35,14 @@ from app.science.provenance_graph import (
 )
 from app.routing.schemas import (
     BudgetDiagnostic,
+    EdgeEvaluationDetail,
     RouteCompareEntry,
     RouteCompareRequest,
     RouteCompareResponse,
     RouteComputeRequest,
     RouteComputeResponse,
     RouteCoordinateInput,
+    RouteDecisionExplainer,
     RouteLegSummary,
     RoutePlanningConstraints,
     RouteStatusResponse,
@@ -414,6 +418,9 @@ class ScienceAwareRoutingService:
         seq_counter = 0
         all_raw_slopes: List[float] = []
         all_raw_tris: List[float] = []
+        traversed_edge_expls: List[Dict[str, Any]] = []
+        rejected_neighbor_expls: List[Dict[str, Any]] = []
+        seen_rejected_pairs: set = set()
 
         for leg_i in range(len(node_chain) - 1):
             n_from = node_chain[leg_i]
@@ -446,6 +453,22 @@ class ScienceAwareRoutingService:
                     step_h = math.hypot((rc_c - pc) * grid.dx_m, (rc_r - pr) * grid.dy_m)
                     step_dz = abs(float(grid.elevation_m[rc_r, rc_c]) - float(grid.elevation_m[pr, pc]))
                     leg_slopes.append(math.degrees(math.atan2(step_dz, max(0.01, step_h))))
+                    traversed_edge_expls.append(grid.explain_edge(pr, pc, rc_r, rc_c, policy))
+                    if len(rejected_neighbor_expls) < 24:
+                        for dr_n in (-1, 0, 1):
+                            for dc_n in (-1, 0, 1):
+                                if dr_n == 0 and dc_n == 0:
+                                    continue
+                                nr, nc = pr + dr_n, pc + dc_n
+                                if 0 <= nr < grid.rows and 0 <= nc < grid.cols:
+                                    key = (pr, pc, nr, nc)
+                                    if key not in seen_rejected_pairs and not grid.can_step(pr, pc, nr, nc):
+                                        seen_rejected_pairs.add(key)
+                                        rejected_neighbor_expls.append(grid.explain_edge(pr, pc, nr, nc, policy))
+                                        if len(rejected_neighbor_expls) >= 24:
+                                            break
+                            if len(rejected_neighbor_expls) >= 24:
+                                break
                 if math.isfinite(grid.tri_m[rc_r, rc_c]):
                     leg_tris.append(float(grid.tri_m[rc_r, rc_c]))
             all_raw_slopes.extend(leg_slopes)
@@ -825,9 +848,161 @@ class ScienceAwareRoutingService:
             limitations=limitations,
             provenance=provenance_block,
             provenance_graph=route_prov_graph,
+            decision_explainer=self._build_decision_explainer(
+                req=req,
+                policy=policy,
+                grid=grid,
+                traversed_edge_expls=traversed_edge_expls,
+                rejected_neighbor_expls=rejected_neighbor_expls,
+                sci_reached=sci_reached,
+                tot_horiz=tot_horiz,
+                tot_secs=tot_secs,
+                total_cost=total_cost,
+                ev_hits=ev_hits,
+            ),
         )
         self._store_route(resp)
         return resp
+
+    @staticmethod
+    def _build_decision_explainer(
+        *,
+        req: RouteComputeRequest,
+        policy: Any,
+        grid: TerrainGrid,
+        traversed_edge_expls: List[Dict[str, Any]],
+        rejected_neighbor_expls: List[Dict[str, Any]],
+        sci_reached: List[ScienceStopSummary],
+        tot_horiz: float,
+        tot_secs: Optional[float],
+        total_cost: float,
+        ev_hits: int,
+    ) -> RouteDecisionExplainer:
+        excl = grid.exclusion_statistics()
+        keys = (
+            "base_distance_cost",
+            "slope_penalty_cost",
+            "uphill_penalty_cost",
+            "downhill_penalty_cost",
+            "roughness_penalty_cost",
+            "uncertainty_penalty_cost",
+            "nodata_proximity_penalty_cost",
+            "science_corridor_bonus_credit",
+        )
+        totals = {k: round(sum(float(e.get(k) or 0.0) for e in traversed_edge_expls), 3) for k in keys}
+        totals["total_raw_grid_cost"] = round(float(total_cost), 3)
+
+        penalty_items = {
+            "base_distance": totals["base_distance_cost"],
+            "slope_penalty": totals["slope_penalty_cost"],
+            "uphill_effort": totals["uphill_penalty_cost"],
+            "downhill_effort": totals["downhill_penalty_cost"],
+            "roughness_penalty": totals["roughness_penalty_cost"],
+            "uncertainty_penalty": totals["uncertainty_penalty_cost"],
+            "nodata_proximity_penalty": totals["nodata_proximity_penalty_cost"],
+        }
+        dominant = max(penalty_items.items(), key=lambda kv: kv[1])[0] if traversed_edge_expls else "base_distance"
+
+        # Sample representative traversed edges (evenly spaced + peak slope + peak cost)
+        sampled_indices: List[int] = []
+        n_edges = len(traversed_edge_expls)
+        if n_edges > 0:
+            step = max(1, n_edges // 16)
+            sampled_indices.extend(range(0, n_edges, step))
+            max_slope_idx = max(range(n_edges), key=lambda i: traversed_edge_expls[i]["effective_slope_deg"])
+            max_cost_idx = max(range(n_edges), key=lambda i: float(traversed_edge_expls[i]["total_edge_cost"] or 0.0))
+            for extra in (max_slope_idx, max_cost_idx, n_edges - 1):
+                if extra not in sampled_indices:
+                    sampled_indices.append(extra)
+        sampled_edges = [EdgeEvaluationDetail(**traversed_edge_expls[i]) for i in sampled_indices[:24]]
+        rejected_edges = [EdgeEvaluationDetail(**e) for e in rejected_neighbor_expls[:24]]
+
+        verified_applied = [
+            {
+                "target_id": s.target_id,
+                "name": s.name,
+                "matched_species": s.matched_species,
+                "instrument_source": s.instrument_source,
+                "scientific_value": s.scientific_value,
+                "role": "verified_science_target_or_composition_stop",
+            }
+            for s in sci_reached
+        ]
+
+        # Deterministic sensitivity notes from actual grid distribution
+        eff_limit = grid.effective_slope_limit_deg
+        tight_cap = max(1.0, eff_limit - 3.0)
+        relaxed_cap = min(45.0, eff_limit + 3.0)
+        valid_slopes = grid.valid_elev & np.isfinite(grid.slope_deg)
+        tight_pass = int(np.count_nonzero(valid_slopes & (grid.slope_deg <= tight_cap)))
+        base_pass = int(excl["traversable_cells"])
+        relax_pass = int(np.count_nonzero(valid_slopes & (grid.slope_deg <= relaxed_cap)))
+
+        sens_notes: List[str] = [
+            (
+                f"Slope limit sensitivity: tightening limit by 3.0 deg (to {tight_cap:.1f} deg) changes slope-eligible cells "
+                f"from {base_pass} to {tight_pass}; relaxing by 3.0 deg (to {relaxed_cap:.1f} deg) expands to {relax_pass}."
+            ),
+            (
+                f"DEM resolution sensitivity: active grid uses ~{grid.native_resolution_m:.2f} m/px native elevation; "
+                f"relief features smaller than ~{grid.native_resolution_m * 2.0:.1f} m are smoothed before slope/TRI gating."
+            ),
+            (
+                "Corridor width sensitivity: widening assessment corridor increases optical & observation capture area "
+                "for evidence evaluation without altering A*/Dijkstra centerline cost."
+            ),
+        ]
+        if req.constraints.walking_speed_m_per_s and tot_secs is not None:
+            flat_sec = tot_horiz / req.constraints.walking_speed_m_per_s
+            grade_delta = tot_secs - flat_sec
+            sens_notes.append(
+                f"Walking speed assumption ({req.constraints.walking_speed_m_per_s:.2f} m/s unvalidated): "
+                f"flat-ground time would be {flat_sec / 60.0:.1f} min vs {tot_secs / 60.0:.1f} min with Tobler-style grade attenuation (+{grade_delta / 60.0:.1f} min)."
+            )
+        else:
+            sens_notes.append(
+                "Walking speed sensitivity: walking_speed_m_per_s is omitted, so traverse duration stays null until configured."
+            )
+
+        summary = (
+            f"Computed with {req.algorithm.value.upper()} in {policy.label} mode under effective hard slope cap "
+            f"{eff_limit:.1f} deg; excluded {excl['nodata_excluded_cells']} nodata, {excl['slope_excluded_cells']} steep, "
+            f"and {excl['roughness_excluded_cells']} rough cells. Dominant cost term: {dominant}. "
+            f"Verified composition hits in search halo: {ev_hits}; unverified optical detections excluded from routing bonus."
+        )
+
+        return RouteDecisionExplainer(
+            mode=req.mode,
+            algorithm=req.algorithm,
+            hard_constraints={
+                "effective_slope_limit_deg": round(eff_limit, 2),
+                "configured_max_slope_deg": req.constraints.max_slope_deg,
+                "max_roughness_tri_m": req.constraints.max_roughness_tri_m,
+                "nodata_cells_forbidden": True,
+                "diagonal_corner_cutting_forbidden": True,
+                "simplify_line_of_sight_verified": True,
+                "snap_radius_m": req.constraints.snap_radius_m,
+            },
+            soft_cost_weights={
+                "slope_weight": float(policy.slope_weight),
+                "uphill_weight": float(policy.uphill_weight),
+                "downhill_weight": float(policy.downhill_weight),
+                "roughness_weight": float(policy.roughness_weight),
+                "uncertainty_weight": float(policy.uncertainty_weight),
+                "nodata_proximity_weight": float(policy.nodata_proximity_weight),
+                "science_corridor_bonus": float(policy.science_corridor_bonus),
+                "min_cost_multiplier": float(policy.min_cost_multiplier),
+            },
+            grid_exclusion_summary=excl,
+            total_cost_breakdown=totals,
+            dominant_cost_driver=dominant,
+            sampled_traversed_edges=sampled_edges,
+            rejected_neighbor_edges=rejected_edges,
+            verified_science_targets_applied=verified_applied,
+            unverified_optical_candidates_excluded_from_bonus=0,
+            sensitivity_notes=sens_notes,
+            decision_trace_summary=summary,
+        )
 
     def compare_routes(self, req: RouteCompareRequest) -> RouteCompareResponse:
         entries: List[RouteCompareEntry] = []

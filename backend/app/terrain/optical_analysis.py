@@ -52,16 +52,58 @@ class OpticalCandidateFeature(BaseModel):
     edge_continuity: float = 0.0
     local_contrast_zscore: float
     valid_pixel_fraction: float = 1.0
+    area_pixels: int = 0
+    estimated_diameter_px: Optional[float] = None
+    estimated_diameter_m: Optional[float] = None
+    boundary_completeness: float = 1.0
+    image_quality_ok: bool = True
     native_pixel_scale_m: Optional[float] = None
     product_id: Optional[str] = None
     ortho_dataset_id: Optional[str] = None
-    detection_method: str = "sobel_multiscale_block_contrast_v2"
+    detection_method: str = "sobel_multiscale_block_contrast_v3"
+    detector_version: str = "optical_candidate_v3"
     processing_parameters: Dict[str, Any] = Field(default_factory=dict)
+    in_corridor: Optional[bool] = None
+    distance_from_route_m: Optional[float] = None
+    distance_from_corridor_m: Optional[float] = None
+    nearest_segment_id: Optional[str] = None
+    association_type: Optional[str] = None
     classification: ScientificDataClassification = ScientificDataClassification.MARSCOPE_DERIVED
     validation_state: str = "candidate_requiring_interpretation"
     disclaimer: str = (
-        "Automated optical candidate only; not a confirmed boulder, obstacle, or geological structure."
+        "Automated 2D optical contrast candidate only; does not measure object height or volume "
+        "and is not a confirmed boulder, obstacle, or geological hazard."
     )
+
+
+def evaluate_rounded_feature_eligibility(
+    *,
+    native_pixel_scale_m: float,
+    diameter_px: float,
+    valid_pixel_fraction: float,
+    local_contrast_zscore: float,
+    image_std_dn: float,
+    boundary_completeness: float,
+) -> Dict[str, Any]:
+    """
+    Resolution-aware object-detection eligibility policy replacing single pixel-scale heuristics.
+    Requires >= 4 px spatial object extent, complete footprint (>= 0.85), adequate contrast
+    dynamic range (std_dn >= 4.0 and |z| >= 1.0), and fine spatial resolution (<= 0.5 m/px).
+    """
+    reasons: List[str] = []
+    if native_pixel_scale_m > 0.5:
+        reasons.append(f"pixel scale {native_pixel_scale_m:.2f} m/px > 0.50 m/px limit")
+    if diameter_px < 4.0:
+        reasons.append(f"object diameter {diameter_px:.1f} px < 4.0 px Nyquist discrimination minimum")
+    if valid_pixel_fraction < 0.85 or boundary_completeness < 0.85:
+        reasons.append("incomplete or clipped valid pixel footprint")
+    if image_std_dn < 4.0 or abs(local_contrast_zscore) < 1.0:
+        reasons.append("insufficient local image quality / dynamic contrast")
+    return {
+        "eligible": len(reasons) == 0,
+        "reasons": reasons,
+        "policy_version": "rounded_feature_eligibility_v1",
+    }
 
 
 class RejectedOpticalCandidate(BaseModel):
@@ -156,7 +198,7 @@ def analyze_optical_array(
     rejected: List[RejectedOpticalCandidate] = []
     block = 16
     center_core = clean[1:-1, 1:-1]
-    boulder_supported = native_pixel_scale_m <= 0.5
+    image_quality_ok = bool(std_dn >= 4.0)
 
     for br in range(0, center_core.shape[0] - block + 1, block):
         for bc in range(0, center_core.shape[1] - block + 1, block):
@@ -164,6 +206,14 @@ def analyze_optical_array(
             sub_edge = edge[br : br + block, bc : bc + block]
             sub_valid_frac = float(np.count_nonzero(np.isfinite(sub_dn))) / float(block * block)
             sub_edge_frac = float(np.count_nonzero(np.isfinite(sub_edge))) / float(block * block)
+            boundary_complete = min(sub_valid_frac, sub_edge_frac)
+            anomaly_px = int(
+                np.count_nonzero(
+                    np.where(np.isfinite(sub_dn), np.abs(sub_dn - mean_dn) >= 1.25 * std_dn, False)
+                )
+            )
+            est_diam_px = round(2.0 * math.sqrt(max(0, anomaly_px) / math.pi), 2)
+            est_diam_m = round(est_diam_px * native_pixel_scale_m, 2) if native_pixel_scale_m > 0 else None
 
             lat_top = max_lat - ((br + 1.0) / float(out_h)) * (max_lat - min_lat)
             lat_bot = max_lat - ((br + block + 1.0) / float(out_h)) * (max_lat - min_lat)
@@ -196,6 +246,15 @@ def analyze_optical_array(
                 max(1, np.count_nonzero(np.isfinite(sub_edge)))
             )
 
+            rounded_elig = evaluate_rounded_feature_eligibility(
+                native_pixel_scale_m=native_pixel_scale_m,
+                diameter_px=est_diam_px,
+                valid_pixel_fraction=sub_valid_frac,
+                local_contrast_zscore=z_dn,
+                image_std_dn=std_dn,
+                boundary_completeness=boundary_complete,
+            )
+
             # Classify into disciplined optical taxonomy
             ctype: Optional[str] = None
             if z_edge > 0.85 and edge_cont >= 0.25:
@@ -203,9 +262,9 @@ def analyze_optical_array(
             elif z_dn < -1.25:
                 ctype = "shadow_candidate" if edge_cont >= 0.15 else "dark_region"
             elif z_dn > 1.35:
-                ctype = "bright_region"
-            elif z_edge > 1.25 and boulder_supported:
-                ctype = "possible_boulder_feature"
+                ctype = "candidate_rounded_feature" if rounded_elig["eligible"] else "bright_region"
+            elif z_edge > 1.25 and rounded_elig["eligible"]:
+                ctype = "candidate_rounded_feature"
 
             if ctype is None:
                 continue
@@ -240,6 +299,11 @@ def analyze_optical_array(
                     edge_continuity=round(edge_cont, 3),
                     local_contrast_zscore=round(z_dn, 3),
                     valid_pixel_fraction=round(sub_valid_frac, 3),
+                    area_pixels=anomaly_px if anomaly_px > 0 else int(round(sub_valid_frac * block * block)),
+                    estimated_diameter_px=est_diam_px,
+                    estimated_diameter_m=est_diam_m,
+                    boundary_completeness=round(boundary_complete, 3),
+                    image_quality_ok=image_quality_ok,
                     native_pixel_scale_m=round(native_pixel_scale_m, 3),
                     product_id=product_id,
                     ortho_dataset_id=ortho_dataset_id,
@@ -247,7 +311,7 @@ def analyze_optical_array(
                         "sample_grid": [out_h, out_w],
                         "block_px": block,
                         "min_valid_fraction": min_valid_fraction,
-                        "boulder_scale_supported": boulder_supported,
+                        "rounded_feature_eligibility": rounded_elig,
                     },
                 )
             )
@@ -265,8 +329,8 @@ def analyze_optical_array(
         input_units=["DN (8-bit calibrated reflectance)"],
         input_crs="IAU2000:49900",
         input_resolution_m=round(native_pixel_scale_m, 3),
-        method="3x3 Sobel gradient magnitude + edge continuity + block contrast z-score + deterministic FP gate",
-        algorithm_version="optical_candidate_v2",
+        method="3x3 Sobel gradient magnitude + edge continuity + block contrast z-score + rounded feature eligibility + FP gate",
+        algorithm_version="optical_candidate_v3",
         parameters={"sample_grid": [out_h, out_w], "block_px": block, "min_valid_fraction": min_valid_fraction},
         assumptions=[
             "Visual contrast or edge continuity alone never confirms a boulder, fissure, cave, or unstable slope.",

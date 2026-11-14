@@ -15,12 +15,14 @@ export interface EvidenceOverlayToggles {
   showTerrainCandidates: boolean;
   showOpticalCandidates: boolean;
   showObservations: boolean;
+  showReturnRoute: boolean;
 }
 
 interface EvidenceState {
   corridorAssessment: CorridorAssessment | null;
   routeComparison: RouteEvidenceComparisonResponse | null;
   missionDossier: MissionDossierResponse | null;
+  decisionTrace: Record<string, unknown> | null;
   selectedSegmentId: string | null;
   loadingCorridor: boolean;
   loadingComparison: boolean;
@@ -37,7 +39,9 @@ interface EvidenceState {
     mode?: string;
     corridor_width_m?: number;
     observation_search_radius_m?: number;
+    force_recompute?: boolean;
   }) => Promise<CorridorAssessment | null>;
+  fetchDecisionTrace: (assessmentId: string) => Promise<Record<string, unknown> | null>;
   compareRoutesEvidence: (params: {
     dataset_id: string;
     start: { lat: number; lon_east: number; label?: string | null };
@@ -58,6 +62,7 @@ interface EvidenceState {
     return_reserve_fraction?: number | null;
     astronaut_suit_mass_kg?: number | null;
     payload_mass_kg?: number | null;
+    force_recompute?: boolean;
   }) => Promise<MissionDossierResponse | null>;
 }
 
@@ -65,6 +70,7 @@ export const useEvidenceStore = create<EvidenceState>((set) => ({
   corridorAssessment: null,
   routeComparison: null,
   missionDossier: null,
+  decisionTrace: null,
   selectedSegmentId: null,
   loadingCorridor: false,
   loadingComparison: false,
@@ -77,6 +83,7 @@ export const useEvidenceStore = create<EvidenceState>((set) => ({
     showTerrainCandidates: true,
     showOpticalCandidates: true,
     showObservations: true,
+    showReturnRoute: true,
   },
 
   setSelectedSegmentId: (segmentId) => set({ selectedSegmentId: segmentId }),
@@ -108,6 +115,20 @@ export const useEvidenceStore = create<EvidenceState>((set) => ({
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Failed to assess corridor";
       set({ error: msg, loadingCorridor: false });
+      return null;
+    }
+  },
+
+  fetchDecisionTrace: async (assessmentId) => {
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/evidence-intelligence/corridor/${encodeURIComponent(assessmentId)}/decision-trace`
+      );
+      if (!res.ok) return null;
+      const data = await res.json();
+      set({ decisionTrace: data });
+      return data;
+    } catch {
       return null;
     }
   },

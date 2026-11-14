@@ -59,6 +59,7 @@ class TerrainGrid:
     uncertainty_score: np.ndarray  # float64 [0, 1]
     science_field: np.ndarray  # float64 [0, 1]
     effective_slope_limit_deg: float
+    max_roughness_tri_m: Optional[float] = None
 
     @classmethod
     def from_arrays(
@@ -131,6 +132,7 @@ class TerrainGrid:
             uncertainty_score=uncert,
             science_field=sci,
             effective_slope_limit_deg=eff_limit,
+            max_roughness_tri_m=float(max_roughness_tri_m) if max_roughness_tri_m is not None else None,
         )
 
     def latlon_to_rc(self, lat: float, lon_east: float) -> Tuple[int, int, bool]:
@@ -289,6 +291,135 @@ class TerrainGrid:
         )
         multiplier = max(policy.min_cost_multiplier, raw_mult)
         return horiz_m * multiplier
+
+    def exclusion_statistics(self) -> Dict[str, int]:
+        """Count exact hard-constraint cell exclusions across the solver DEM grid."""
+        total_cells = int(self.rows * self.cols)
+        nodata_excluded = int(np.count_nonzero(~self.valid_elev))
+        slope_fail = self.valid_elev & (
+            (~np.isfinite(self.slope_deg)) | (self.slope_deg > self.effective_slope_limit_deg)
+        )
+        slope_excluded = int(np.count_nonzero(slope_fail))
+        if self.max_roughness_tri_m is not None:
+            rough_fail = (
+                self.valid_elev
+                & np.isfinite(self.slope_deg)
+                & (self.slope_deg <= self.effective_slope_limit_deg)
+                & ((~np.isfinite(self.tri_m)) | (self.tri_m > float(self.max_roughness_tri_m)))
+            )
+            roughness_excluded = int(np.count_nonzero(rough_fail))
+        else:
+            roughness_excluded = 0
+        traversable_cells = int(np.count_nonzero(self.traversable))
+        return {
+            "total_cells": total_cells,
+            "traversable_cells": traversable_cells,
+            "nodata_excluded_cells": nodata_excluded,
+            "slope_excluded_cells": slope_excluded,
+            "roughness_excluded_cells": roughness_excluded,
+        }
+
+    def explain_edge(
+        self, r0: int, c0: int, r1: int, c1: int, policy: RoutingModePolicy
+    ) -> Dict[str, Any]:
+        """
+        Return explicit hard-constraint eligibility and decomposed soft-cost terms for
+        edge (r0,c0) -> (r1,c1) using the exact same formulation as can_step() and edge_cost().
+        """
+        rejection_reasons: List[str] = []
+        dr = r1 - r0
+        dc = c1 - c0
+        if dr == 0 and dc == 0:
+            rejection_reasons.append("zero_displacement_step")
+        if not self.valid_elev[r0, c0] or not self.traversable[r0, c0]:
+            rejection_reasons.append(
+                "origin_nodata" if not self.valid_elev[r0, c0] else "origin_not_traversable"
+            )
+        if not self.valid_elev[r1, c1] or not self.traversable[r1, c1]:
+            if not self.valid_elev[r1, c1]:
+                rejection_reasons.append("destination_nodata")
+            elif not np.isfinite(self.slope_deg[r1, c1]) or self.slope_deg[r1, c1] > self.effective_slope_limit_deg:
+                rejection_reasons.append("destination_exceeds_slope_limit")
+            elif self.max_roughness_tri_m is not None and (
+                not np.isfinite(self.tri_m[r1, c1]) or self.tri_m[r1, c1] > float(self.max_roughness_tri_m)
+            ):
+                rejection_reasons.append("destination_exceeds_roughness_limit")
+            else:
+                rejection_reasons.append("destination_not_traversable")
+
+        if abs(dr) == 1 and abs(dc) == 1:
+            if not (self.traversable[r0 + dr, c0] and self.traversable[r0, c0 + dc]):
+                rejection_reasons.append("diagonal_corner_cut_blocked")
+
+        horiz_m = math.hypot(dc * self.dx_m, dr * self.dy_m)
+        z0 = float(self.elevation_m[r0, c0]) if np.isfinite(self.elevation_m[r0, c0]) else 0.0
+        z1 = float(self.elevation_m[r1, c1]) if np.isfinite(self.elevation_m[r1, c1]) else 0.0
+        dz = z1 - z0 if (np.isfinite(self.elevation_m[r0, c0]) and np.isfinite(self.elevation_m[r1, c1])) else 0.0
+        grade = dz / max(1e-6, horiz_m)
+        seg_slope = math.degrees(math.atan2(abs(dz), max(1e-6, horiz_m)))
+        if (
+            np.isfinite(self.elevation_m[r0, c0])
+            and np.isfinite(self.elevation_m[r1, c1])
+            and seg_slope > self.effective_slope_limit_deg
+        ):
+            rejection_reasons.append("segment_chord_slope_exceeds_limit")
+
+        allowed = len(rejection_reasons) == 0 and self.can_step(r0, c0, r1, c1)
+        s0 = float(self.slope_deg[r0, c0]) if np.isfinite(self.slope_deg[r0, c0]) else seg_slope
+        s1 = float(self.slope_deg[r1, c1]) if np.isfinite(self.slope_deg[r1, c1]) else seg_slope
+        local_slope = 0.5 * (s0 + s1)
+        eff_slope = max(local_slope, seg_slope)
+        slope_norm = eff_slope / max(1.0, self.effective_slope_limit_deg)
+
+        t0 = float(self.tri_m[r0, c0]) if np.isfinite(self.tri_m[r0, c0]) else 0.0
+        t1 = float(self.tri_m[r1, c1]) if np.isfinite(self.tri_m[r1, c1]) else 0.0
+        tri_norm = (0.5 * (t0 + t1)) / max(1.0, 0.5 * (self.dx_m + self.dy_m))
+
+        uphill = max(0.0, grade)
+        downhill = max(0.0, -grade)
+
+        slope_term = policy.slope_weight * (slope_norm * slope_norm)
+        uphill_term = policy.uphill_weight * uphill
+        downhill_term = policy.downhill_weight * downhill
+        rough_term = policy.roughness_weight * tri_norm
+        uncert_term = policy.uncertainty_weight * float(self.uncertainty_score[r1, c1])
+        nodata_term = policy.nodata_proximity_weight * float(self.nodata_adj_penalty[r1, c1])
+        sci_credit = policy.science_corridor_bonus * float(self.science_field[r1, c1])
+
+        raw_mult = (
+            1.0
+            + slope_term
+            + uphill_term
+            + downhill_term
+            + rough_term
+            + uncert_term
+            + nodata_term
+            - sci_credit
+        )
+        clamped_mult = max(policy.min_cost_multiplier, raw_mult)
+        return {
+            "from_rc": [int(r0), int(c0)],
+            "to_rc": [int(r1), int(c1)],
+            "from_lat": round(float(self.lats[r0]), 7),
+            "from_lon_east": round(float(self.lons_east[c0]), 7),
+            "to_lat": round(float(self.lats[r1]), 7),
+            "to_lon_east": round(float(self.lons_east[c1]), 7),
+            "horizontal_distance_m": round(horiz_m, 4),
+            "elevation_change_m": round(dz, 4),
+            "effective_slope_deg": round(eff_slope, 4),
+            "allowed_by_hard_constraints": bool(allowed),
+            "rejection_reasons": rejection_reasons,
+            "base_distance_cost": round(horiz_m, 4),
+            "slope_penalty_cost": round(horiz_m * slope_term, 4),
+            "uphill_penalty_cost": round(horiz_m * uphill_term, 4),
+            "downhill_penalty_cost": round(horiz_m * downhill_term, 4),
+            "roughness_penalty_cost": round(horiz_m * rough_term, 4),
+            "uncertainty_penalty_cost": round(horiz_m * uncert_term, 4),
+            "nodata_proximity_penalty_cost": round(horiz_m * nodata_term, 4),
+            "science_corridor_bonus_credit": round(horiz_m * sci_credit, 4),
+            "clamped_multiplier": round(clamped_mult, 4),
+            "total_edge_cost": round(horiz_m * clamped_mult, 4) if allowed else None,
+        }
 
     def line_of_sight_valid(self, r0: int, c0: int, r1: int, c1: int) -> bool:
         """
@@ -553,6 +684,9 @@ def build_terrain_grid_from_dataset(
                 uncertainty_score=uncert,
                 science_field=sci_field,
                 effective_slope_limit_deg=eff_limit,
+                max_roughness_tri_m=(
+                    float(constraints.max_roughness_tri_m) if constraints.max_roughness_tri_m is not None else None
+                ),
             )
 
         if src.crs and src.crs.is_projected:

@@ -20,6 +20,7 @@ from app.services.layer_service import LayerCatalogService
 from app.services.localization_service import LocalizationService
 from app.services.tracking_service import TrackingService
 from app.evidence_intelligence.report import EvidenceIntelligenceService
+from app.eva_operations.mission import EvaOperationsService
 from app.terrain.mesh import TerrainMeshService
 
 # Project root path resolution
@@ -81,5 +82,10 @@ evidence_intelligence_service = EvidenceIntelligenceService(
     catalog_service=catalog_service,
     routing_service=routing_service,
     raw_dir=RAW_DIR,
+    processed_dir=PROCESSED_DIR,
+)
+eva_operations_service = EvaOperationsService(
+    routing_service=routing_service,
+    evidence_service=evidence_intelligence_service,
     processed_dir=PROCESSED_DIR,
 )
