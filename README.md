@@ -167,7 +167,7 @@ MARSCOPE strictly enforces an anti-fabrication standard:
 
 ## 7. Current Project Status & Reproducible Build
 
-- **Phase:** Prompt 8 — Human Mobility Intelligence Engine, Pre-Implementation Integrity Corrections & Spatial Coverage Complete.
+- **Phase:** Prompt 8 mobility backend remains present; Prompt 9 explorer work is partial. No four-mode terrain/panorama explorer is claimed complete.
 - **Pre-Implementation Scientific Corrections (Part A):**
   1. **Zero-Measurement Semantics (`app/science/composition/value_semantics.py`):** Numerical zero values (`0.0`) across APXS, ChemCam MOC, and CheMin RDR5 are never automatically classified as below-detection-limit (`BELOW_DETECTION_LIMIT`). They are preserved with `value_semantics = "reported_numerical_zero_unresolved_semantics"` and `source_interpretation_note` unless the source PDS3/PDS4 label explicitly declares a detection-limit constant (`source_defined_below_detection_limit`) or missing constant (`source_defined_missing`).
   2. **No Silent DEM Footprint Expansion (`app/terrain/processor.py`, `app/geospatial/alignment.py`):** `DEMProcessingService` (`PROCESSING_VERSION = "2.0.0"`, `FOOTPRINT_POLICY = "no_expansion_v1"`) never enlarges a requested study region when it contains fewer than `3x3` whole source pixels on a coarse DEM; it raises `InsufficientDEMCoverageError` with a structured `InsufficientCoverageReport` (`requested_bounds_modified = False`).
@@ -183,3 +183,12 @@ MARSCOPE strictly enforces an anti-fabrication standard:
   PYTHONPATH=backend python3 backend/scripts/rebuild_composition_index.py [--strict] [--acquire]
   ```
 - **Automated Verification:** Verified backend unit/integration test suite (`pytest`, 71 tests) and clean Next.js TypeScript/ESLint production build. Route optimization and pathfinding remain intentionally outside this milestone's scope.
+
+### Explorer status and limitations (2026-11-14)
+
+- Cesium starts at a global Mars view, supports its 3D/2D/Columbus scene modes, and uses the existing dynamically discovered layer catalog. Clicking the globe still selects a destination.
+- Idle scene rendering is disabled through Cesium request-render mode. Camera telemetry is sampled at most every 250 ms while moving and refreshed on move end. The displayed scale is measured from two globe intersections 40 canvas pixels apart; it is unavailable when those rays do not intersect the globe.
+- Candidate, destination, and manually configured position markers are diffed by stable IDs in a named `CustomDataSource`; unrelated entities are no longer cleared on every state change.
+- No verified local Navcam panorama products or DEM terrain-mesh service are present in this workspace. The current explorer does **not** provide a real panorama viewer, panorama discovery API, synchronized four-mode workflow, or DEM-derived ground 3D. The globe still uses an ellipsoid terrain provider. These are remaining milestone requirements.
+- Resolution suitability thresholds now live in `backend/app/mobility/policies/resolution_v1.json` (`1.0.0`). Their provenance and classification are returned with each assessment. They are engineering screens or unvalidated heuristics and do not establish detection capability, source accuracy, or route safety.
+- No performance benchmark or NASA panorama acquisition was performed; the interaction claims above describe code changes, not measured FPS improvements.

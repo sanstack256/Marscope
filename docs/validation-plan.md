@@ -95,3 +95,13 @@ MARSCOPE implements a multi-tier testing and validation framework ensuring scien
 - **No Default 25° Safety Threshold (`test_no_default_25_deg_safety_threshold_and_explicit_planning_threshold`):** Confirms `critical_slope_threshold` is removed from `PARAMETER_REGISTRY`, `TerrainSummary.planning_threshold` defaults to `None`, and optional `PlanningSlopeThreshold` is tagged `is_validated_safety_limit = False`.
 - **Reader Lease Protection (`test_generation_reader_lease_prevents_pruning_of_in_flight_generation`):** Confirms a reader holding `acquire_generation_lease()` prevents active generation deletion across 3 consecutive `publish_generation()` rebuilds until the lease is released.
 - **Human Mobility Intelligence Engine (`test_resolution_suitability_distinguishes_regional_and_local_regimes`, `test_coverage_5_states_and_elevation_profile_with_nodata_gaps`, `test_mobility_scenario_and_traversal_model_no_defaults_and_no_extrapolation`, `test_mobility_api_endpoints_live_contracts`):** Verifies resolution suitability across all 4 analysis scales, 5-state coverage intelligence, elevation gain/loss profiles with contiguous `nodata_gap_segments`, `MobilityScenario` & `TraversalModel` domain/extrapolation/null-cost invariants, and all 9 `/api/mobility/*` endpoints.
+# Prompt 9 partial explorer verification (2026-11-14)
+
+- `npm run lint` in `frontend`: passed.
+- `npm run build` in `frontend`: passed (Next.js 16.4.6, webpack production build).
+- `pytest -q` in `backend`: 71 passed, 28 deprecation/pending-deprecation warnings.
+- `python3 -m compileall -q app` in `backend`: passed.
+- `git diff --check`: passed at the time of the initial check; rerun after documentation edits before committing.
+- No browser-based gesture testing or before/after FPS, frame-time, CPU, memory, rerender, switch-time, panorama-load, or terrain-load measurement was performed.
+- No real Navcam product integration test or NASA product acquisition was performed. No live archive search result is counted as a discovered or acquired MARSCOPE panorama.
+- Acceptance items requiring four synchronized modes, dynamic panorama discovery/viewing, DEM-derived terrain geometry, route-sketch synchronization, or actual NASA image verification remain unimplemented.

@@ -1,0 +1,44 @@
+{
+  "policy_id": "marscope-dem-resolution-suitability",
+  "version": "1.0.0",
+  "status": "engineering-guidance",
+  "effective_date": "2026-11-14",
+  "provenance": "MARSCOPE engineering recommendations for screening analysis scale only. These values are not instrument specifications, scientific laws, validated detection limits, or safety constraints. No source dataset accuracy or observation geometry is implied.",
+  "parameters": {
+    "regional_elevation_analysis": {
+      "maximum_effective_spacing_m": 20000.0,
+      "units": "m/pixel",
+      "classification": "engineering_recommendation",
+      "rationale": "Coarse screening scale for regional elevation context; does not certify that specific landforms are resolved.",
+      "valid_domain": "MARSCOPE regional elevation screening only"
+    },
+    "regional_roughness_analysis": {
+      "maximum_effective_spacing_m": 10000.0,
+      "mesoscale_spacing_m": 100.0,
+      "units": "m/pixel",
+      "classification": "unvalidated_heuristic",
+      "rationale": "MARSCOPE heuristic branches between mesoscale and macro-scale TRI descriptions; roughness interpretation depends on kernel, source accuracy, terrain, and processing.",
+      "valid_domain": "MARSCOPE regional TRI screening only"
+    },
+    "local_slope_analysis": {
+      "maximum_effective_spacing_m": 20.0,
+      "regional_approximation_spacing_m": 500.0,
+      "units": "m/pixel",
+      "classification": "engineering_recommendation",
+      "rationale": "MARSCOPE screen for local versus regional gradient scale using the current 3x3 Horn derivative; does not establish feature detectability.",
+      "valid_domain": "3x3 Horn slope screening only"
+    },
+    "small_scale_obstacle_detection": {
+      "maximum_effective_spacing_m": 1.0,
+      "units": "m/pixel",
+      "classification": "unvalidated_heuristic",
+      "rationale": "Resolution-only screening heuristic. Pixel spacing alone cannot guarantee obstacle detection; source accuracy, feature contrast and scale, observation geometry, and processing are unavailable to this policy.",
+      "valid_domain": "Resolution compatibility screen only; must not be interpreted as detection capability"
+    }
+  },
+  "limitations": [
+    "Native and effective spacing are considered when supplied; source vertical/horizontal accuracy is not currently modeled by this policy.",
+    "Terrain feature scale, observation geometry, and product-specific processing are not available in the current suitability API.",
+    "A suitable classification means only that effective spacing passes an engineering screen. It does not guarantee detection or fitness for operational navigation."
+  ]
+}

@@ -160,3 +160,6 @@ All endpoints are served under the `/api` prefix by the FastAPI backend. Standar
 
 ### `GET /api/mobility/cost-surface/metadata`
 - **Description:** Computes and returns a spatially explicit `CostSurfaceSummary` over `[min_lat, max_lat, min_lon, max_lon]` for a given `dataset_id` and `scenario_id`, preserving `null` cost on unknown/no-data terrain and distinguishing `explicit_scenario_exclusion` without emitting `"safe"` or `"unsafe"` labels.
+# Resolution suitability response provenance
+
+Each `ResolutionSuitabilityAssessment` now includes `policy_id`, `policy_version`, `threshold_classification`, and `threshold_rationale`, sourced from `backend/app/mobility/policies/resolution_v1.json`. These fields annotate the existing mobility responses; they do not change route or raster processing. A passing resolution screen is not a feature-detection guarantee. There is no `/api/imagery/*` or panorama product API in this build.

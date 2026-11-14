@@ -12,18 +12,26 @@ A 4 pixel/degree global MOLA product (~6.6–14.8 km/pixel) is never treated as
 suitable for local human-scale slope or foot-level obstacle detection.
 """
 
+import json
+from pathlib import Path
 from typing import Dict, Optional
 
 from app.mobility.models import AnalysisScaleType, ResolutionSuitabilityLevel
 from app.mobility.schemas import ResolutionSuitabilityAssessment
 
 
-# Documented engineering resolution thresholds for planetary surface analysis (meters/pixel)
+RESOLUTION_POLICY = json.loads(
+    (Path(__file__).parent / "policies" / "resolution_v1.json").read_text(encoding="utf-8")
+)
+RESOLUTION_POLICY_VERSION = RESOLUTION_POLICY["version"]
+_PARAMETERS = RESOLUTION_POLICY["parameters"]
+
+# These are versioned planning screens, not scientific detection limits.
 RECOMMENDED_MAX_RESOLUTION_METERS: Dict[AnalysisScaleType, float] = {
-    AnalysisScaleType.REGIONAL_ELEVATION_ANALYSIS: 20000.0,   # <= 20 km/px supports regional topography
-    AnalysisScaleType.REGIONAL_ROUGHNESS_ANALYSIS: 10000.0,   # <= 10 km/px supports macro-scale TRI
-    AnalysisScaleType.LOCAL_SLOPE_ANALYSIS: 20.0,             # <= 20 m/px (e.g., CTX/HiRISE DEM) needed for local EVA slope
-    AnalysisScaleType.SMALL_SCALE_OBSTACLE_DETECTION: 1.0,    # <= 1 m/px (e.g., HiRISE/Navcam stereo) needed for boulders/ledges
+    AnalysisScaleType.REGIONAL_ELEVATION_ANALYSIS: _PARAMETERS["regional_elevation_analysis"]["maximum_effective_spacing_m"],
+    AnalysisScaleType.REGIONAL_ROUGHNESS_ANALYSIS: _PARAMETERS["regional_roughness_analysis"]["maximum_effective_spacing_m"],
+    AnalysisScaleType.LOCAL_SLOPE_ANALYSIS: _PARAMETERS["local_slope_analysis"]["maximum_effective_spacing_m"],
+    AnalysisScaleType.SMALL_SCALE_OBSTACLE_DETECTION: _PARAMETERS["small_scale_obstacle_detection"]["maximum_effective_spacing_m"],
 }
 
 
@@ -42,6 +50,13 @@ def evaluate_dem_resolution_suitability(
     results: Dict[str, ResolutionSuitabilityAssessment] = {}
 
     for analysis_type, min_rec_m in RECOMMENDED_MAX_RESOLUTION_METERS.items():
+        policy_key = {
+            AnalysisScaleType.REGIONAL_ELEVATION_ANALYSIS: "regional_elevation_analysis",
+            AnalysisScaleType.REGIONAL_ROUGHNESS_ANALYSIS: "regional_roughness_analysis",
+            AnalysisScaleType.LOCAL_SLOPE_ANALYSIS: "local_slope_analysis",
+            AnalysisScaleType.SMALL_SCALE_OBSTACLE_DETECTION: "small_scale_obstacle_detection",
+        }[analysis_type]
+        policy_parameter = _PARAMETERS[policy_key]
         if not dem_available or eff_m is None or eff_m <= 0.0:
             results[analysis_type.value] = ResolutionSuitabilityAssessment(
                 analysis_type=analysis_type,
@@ -50,6 +65,10 @@ def evaluate_dem_resolution_suitability(
                 native_resolution_m=nat_m,
                 effective_resolution_m=eff_m,
                 minimum_recommended_resolution_m=min_rec_m,
+                policy_id=RESOLUTION_POLICY["policy_id"],
+                policy_version=RESOLUTION_POLICY_VERSION,
+                threshold_classification=policy_parameter["classification"],
+                threshold_rationale=policy_parameter["rationale"],
                 explanation="DEM raster is not locally available or resolution metadata is unknown.",
                 scientific_caveat="Cannot evaluate terrain at this scale without a verified local DEM.",
             )
@@ -75,18 +94,17 @@ def evaluate_dem_resolution_suitability(
             )
 
         elif analysis_type == AnalysisScaleType.REGIONAL_ROUGHNESS_ANALYSIS:
-            if eff_m <= 100.0:
+            mesoscale_spacing_m = _PARAMETERS["regional_roughness_analysis"]["mesoscale_spacing_m"]
+            if eff_m <= mesoscale_spacing_m:
                 suitability = ResolutionSuitabilityLevel.SUITABLE
                 supported = True
-                explanation = (
-                    f"Effective grid spacing ({eff_m:.1f} m/pixel) resolves mesoscale terrain ruggedness."
-                )
+                explanation = f"Effective grid spacing ({eff_m:.1f} m/pixel) passes the MARSCOPE mesoscale TRI screen (<= {mesoscale_spacing_m:.0f} m/pixel); this is an unvalidated engineering heuristic."
             elif eff_m <= min_rec_m:
                 suitability = ResolutionSuitabilityLevel.REGIONAL_APPROXIMATION_ONLY
                 supported = True
                 explanation = (
-                    f"Effective grid spacing ({eff_m:.1f} m/pixel) supports macro-scale regional TRI "
-                    f"over a 3x3 (~{eff_m * 3.0:.0f} m) window only."
+                    f"Effective grid spacing ({eff_m:.1f} m/pixel) passes the MARSCOPE macro-scale TRI screen "
+                    f"over a 3x3 (~{eff_m * 3.0:.0f} m) window only; this is an unvalidated engineering heuristic."
                 )
             else:
                 suitability = ResolutionSuitabilityLevel.INSUFFICIENT_RESOLUTION
@@ -96,8 +114,8 @@ def evaluate_dem_resolution_suitability(
                     f"(recommended <= {min_rec_m:.0f} m/pixel)."
                 )
             caveat = (
-                f"TRI at {eff_m:.1f} m/pixel measures multi-kilometer elevation relief, NOT meter-scale "
-                "surface rockiness or foot-level roughness."
+                f"TRI at {eff_m:.1f} m/pixel summarizes relief over its processing window. It does not establish "
+                "meter-scale surface rockiness or foot-level roughness; policy screens are unvalidated heuristics."
             )
 
         elif analysis_type == AnalysisScaleType.LOCAL_SLOPE_ANALYSIS:
@@ -105,15 +123,15 @@ def evaluate_dem_resolution_suitability(
                 suitability = ResolutionSuitabilityLevel.SUITABLE
                 supported = True
                 explanation = (
-                    f"Effective grid spacing ({eff_m:.1f} m/pixel) resolves local human-scale slopes "
-                    f"(recommended <= {min_rec_m:.0f} m/pixel)."
+                    f"Effective grid spacing ({eff_m:.1f} m/pixel) passes the MARSCOPE local-slope scale screen "
+                    f"(<= {min_rec_m:.0f} m/pixel); this does not certify the accuracy of a slope measurement."
                 )
-                caveat = "Horn 3x3 finite-difference slope averages gradient over a 3x3 pixel kernel."
-            elif eff_m <= 500.0:
+                caveat = "Horn 3x3 finite-difference slope averages gradient over a 3x3 pixel kernel. Resolution suitability is engineering guidance only and does not establish feature detectability or source accuracy."
+            elif eff_m <= _PARAMETERS["local_slope_analysis"]["regional_approximation_spacing_m"]:
                 suitability = ResolutionSuitabilityLevel.REGIONAL_APPROXIMATION_ONLY
                 supported = False
                 explanation = (
-                    f"Effective grid spacing ({eff_m:.1f} m/pixel) resolves landform-scale gradients "
+                    f"Effective grid spacing ({eff_m:.1f} m/pixel) is within the regional-approximation screen "
                     f"but cannot resolve local EVA slopes (<={min_rec_m:.0f} m/pixel required)."
                 )
                 caveat = "Sub-grid scarps and steep local slopes are strongly attenuated at this resolution."
@@ -122,7 +140,7 @@ def evaluate_dem_resolution_suitability(
                 supported = False
                 explanation = (
                     f"Coarse DEM ({eff_m:.1f} m/pixel; 3x3 Horn kernel spans ~{eff_m * 3.0:.0f} m) "
-                    f"cannot resolve local human-scale slopes (requires <= {min_rec_m:.0f} m/pixel, e.g., HiRISE/CTX DEM)."
+                    f"is outside the local-slope screen (<= {min_rec_m:.0f} m/pixel)."
                 )
                 caveat = (
                     "Reported slope values represent regional multi-kilometer gradients only and must "
@@ -134,8 +152,8 @@ def evaluate_dem_resolution_suitability(
                 suitability = ResolutionSuitabilityLevel.SUITABLE
                 supported = True
                 explanation = (
-                    f"Effective grid spacing ({eff_m:.2f} m/pixel) can resolve meter-scale obstacles "
-                    f"(recommended <= {min_rec_m:.1f} m/pixel)."
+                    f"Effective grid spacing ({eff_m:.2f} m/pixel) passes the MARSCOPE resolution-only obstacle screen "
+                    f"(<= {min_rec_m:.1f} m/pixel). This does not establish obstacle detection capability."
                 )
             else:
                 suitability = ResolutionSuitabilityLevel.INSUFFICIENT_RESOLUTION
@@ -145,8 +163,7 @@ def evaluate_dem_resolution_suitability(
                     f"<= {min_rec_m:.1f} m/pixel resolution required for small-scale obstacle/boulder detection."
                 )
             caveat = (
-                "Boulders, meter-scale craters, boxwork fractures, and regolith hazards are completely "
-                "unresolved unless sub-meter stereo DEM products are ingested."
+                "Resolution-only heuristic. Feature scale and contrast, source accuracy, observation geometry, and processing affect detectability and are unavailable here; a passing value is not a detection guarantee."
             )
 
         results[analysis_type.value] = ResolutionSuitabilityAssessment(
@@ -156,6 +173,10 @@ def evaluate_dem_resolution_suitability(
             native_resolution_m=round(nat_m, 3) if nat_m is not None else None,
             effective_resolution_m=round(eff_m, 3) if eff_m is not None else None,
             minimum_recommended_resolution_m=min_rec_m,
+            policy_id=RESOLUTION_POLICY["policy_id"],
+            policy_version=RESOLUTION_POLICY_VERSION,
+            threshold_classification=policy_parameter["classification"],
+            threshold_rationale=policy_parameter["rationale"],
             explanation=explanation,
             scientific_caveat=caveat,
         )

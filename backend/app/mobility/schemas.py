@@ -50,6 +50,10 @@ class ResolutionSuitabilityAssessment(BaseModel):
     native_resolution_m: Optional[float] = None
     effective_resolution_m: Optional[float] = None
     minimum_recommended_resolution_m: float
+    policy_id: Optional[str] = None
+    policy_version: Optional[str] = None
+    threshold_classification: Optional[str] = None
+    threshold_rationale: Optional[str] = None
     explanation: str
     scientific_caveat: str
 

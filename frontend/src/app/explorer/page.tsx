@@ -41,8 +41,8 @@ type ExplorerTab = "layers" | "inspect" | "minerals";
 
 export default function SurfaceExplorerPage() {
   const [activeTab, setActiveTab] = useState<ExplorerTab>("layers");
-  const [searchLat, setSearchLat] = useState<string>("-4.65");
-  const [searchLon, setSearchLon] = useState<string>("137.42");
+  const [searchLat, setSearchLat] = useState<string>("");
+  const [searchLon, setSearchLon] = useState<string>("");
   const [searchLabel, setSearchLabel] = useState<string>("");
   const [manualLat, setManualLat] = useState<string>("");
   const [manualLon, setManualLon] = useState<string>("");
@@ -799,7 +799,7 @@ export default function SurfaceExplorerPage() {
                         <input
                           type="number"
                           step="any"
-                          placeholder="Lat (-4.65)"
+                          placeholder="Latitude"
                           value={manualLat}
                           onChange={(e) => setManualLat(e.target.value)}
                           className="px-2 py-1 text-[10px] font-mono rounded bg-[#121622] border border-[#252f44] text-slate-200"
@@ -807,7 +807,7 @@ export default function SurfaceExplorerPage() {
                         <input
                           type="number"
                           step="any"
-                          placeholder="Lon (137.42)"
+                          placeholder="Longitude east"
                           value={manualLon}
                           onChange={(e) => setManualLon(e.target.value)}
                           className="px-2 py-1 text-[10px] font-mono rounded bg-[#121622] border border-[#252f44] text-slate-200"

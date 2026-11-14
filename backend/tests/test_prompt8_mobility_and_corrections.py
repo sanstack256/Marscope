@@ -32,7 +32,7 @@ from app.mobility.models import (
     ResolutionSuitabilityLevel,
     TerrainCoverageState,
 )
-from app.mobility.resolution import evaluate_dem_resolution_suitability
+from app.mobility.resolution import RESOLUTION_POLICY_VERSION, evaluate_dem_resolution_suitability
 from app.mobility.schemas import (
     GeoPoint,
     MobilityScenarioCreateRequest,
@@ -449,6 +449,13 @@ def test_resolution_suitability_distinguishes_regional_and_local_regimes():
         == ResolutionSuitabilityLevel.SUITABLE
     )
     assert mola_suit[AnalysisScaleType.REGIONAL_ELEVATION_ANALYSIS.value].supported is True
+    regional = mola_suit[AnalysisScaleType.REGIONAL_ELEVATION_ANALYSIS.value]
+    obstacle = mola_suit[AnalysisScaleType.SMALL_SCALE_OBSTACLE_DETECTION.value]
+    assert RESOLUTION_POLICY_VERSION == "1.0.0"
+    assert regional.policy_id == "marscope-dem-resolution-suitability"
+    assert regional.threshold_classification == "engineering_recommendation"
+    assert obstacle.threshold_classification == "unvalidated_heuristic"
+    assert "cannot guarantee" in obstacle.threshold_rationale
 
     assert (
         mola_suit[AnalysisScaleType.REGIONAL_ROUGHNESS_ANALYSIS.value].suitability

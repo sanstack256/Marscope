@@ -829,6 +829,10 @@ export interface ScaleSuitabilityRecord {
   native_resolution_m?: number | null;
   effective_resolution_m?: number | null;
   minimum_recommended_resolution_m: number;
+  policy_id?: string | null;
+  policy_version?: string | null;
+  threshold_classification?: string | null;
+  threshold_rationale?: string | null;
   supported: boolean;
   explanation: string;
   scientific_limitation: string;
