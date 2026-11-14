@@ -384,8 +384,16 @@ export function MarsGlobeViewer() {
           evaluateDestination(lat, lon, undefined, controller.signal);
         }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
-        viewer.scene.screenSpaceCameraController.minimumZoomDistance = 150;
-        viewer.scene.screenSpaceCameraController.maximumZoomDistance = 30000000;
+        const scc = viewer.scene.screenSpaceCameraController;
+        scc.minimumZoomDistance = 80;
+        scc.maximumZoomDistance = 25000000;
+        scc.inertiaSpin = 0.45;
+        scc.inertiaTranslate = 0.45;
+        scc.inertiaZoom = 0.35;
+        scc.zoomFactor = 3.5;
+        scc.enableCollisionDetection = true;
+        scc.enableTilt = true;
+        scc.enableLook = true;
         viewer.scene.requestRender();
 
         viewerRef.current = viewer;
@@ -781,16 +789,71 @@ export function MarsGlobeViewer() {
     viewer.scene.requestRender();
   }, [viewerReady, activeRoute, startPoint, destinationPoint, selectedWaypointSeq]);
 
-  // Camera control handlers
+  // Camera control handlers (proportional distance-aware zoom + Mars ellipsoid bounds)
   const handleZoom = (factor: number) => {
     const viewer = viewerRef.current;
     const marsEllipsoid = ellipsoidRef.current;
     if (!viewer || !marsEllipsoid) return;
     const carto = marsEllipsoid.cartesianToCartographic(viewer.camera.position);
     if (!carto) return;
-    const dist = Math.max(2000, carto.height * factor);
-    if (factor < 1) viewer.camera.zoomIn(dist);
-    else viewer.camera.zoomOut(dist);
+    const height = Math.max(80, carto.height);
+    if (factor < 1) {
+      const step = Math.min(height - 80, Math.max(25, height * (1.0 - factor)));
+      if (step > 0) viewer.camera.zoomIn(step);
+    } else {
+      const step = Math.min(25000000 - height, Math.max(50, height * (factor - 1.0)));
+      if (step > 0) viewer.camera.zoomOut(step);
+    }
+    viewer.scene.requestRender();
+  };
+
+  type GlobeCameraPreset = "global" | "regional" | "approach" | "local";
+  const handleGlobeCameraPreset = (preset: GlobeCameraPreset) => {
+    const viewer = viewerRef.current;
+    const Cesium = cesiumRef.current;
+    const marsEllipsoid = ellipsoidRef.current;
+    if (!viewer || !Cesium || !marsEllipsoid) return;
+    const baseLat = selectedDestination?.latitude ?? activeRoute?.vertices[0]?.lat ?? startPoint?.lat ?? -4.749;
+    const baseLonRaw = selectedDestination?.normalized_longitude_180 ?? activeRoute?.vertices[0]?.lon_east ?? startPoint?.lon_east ?? 137.397;
+    const baseLon = baseLonRaw > 180 ? baseLonRaw - 360 : baseLonRaw;
+
+    if (preset === "global") {
+      viewer.camera.flyTo({
+        destination: marsEllipsoid.cartographicToCartesian(
+          Cesium.Cartographic.fromDegrees(0, 0, GLOBAL_VIEW_CAMERA_HEIGHT_M)
+        ),
+        orientation: { heading: 0, pitch: -Cesium.Math.PI_OVER_TWO, roll: 0 },
+        duration: 0.9,
+        complete: () => viewer.scene.requestRender(),
+      });
+    } else if (preset === "regional") {
+      viewer.camera.flyTo({
+        destination: marsEllipsoid.cartographicToCartesian(
+          Cesium.Cartographic.fromDegrees(baseLon, baseLat, 160000)
+        ),
+        orientation: { heading: 0, pitch: -Cesium.Math.PI_OVER_TWO, roll: 0 },
+        duration: 0.9,
+        complete: () => viewer.scene.requestRender(),
+      });
+    } else if (preset === "approach") {
+      viewer.camera.flyTo({
+        destination: marsEllipsoid.cartographicToCartesian(
+          Cesium.Cartographic.fromDegrees(baseLon, baseLat, 18000)
+        ),
+        orientation: { heading: 0, pitch: Cesium.Math.toRadians(-55), roll: 0 },
+        duration: 0.9,
+        complete: () => viewer.scene.requestRender(),
+      });
+    } else {
+      viewer.camera.flyTo({
+        destination: marsEllipsoid.cartographicToCartesian(
+          Cesium.Cartographic.fromDegrees(baseLon, baseLat, 3500)
+        ),
+        orientation: { heading: 0, pitch: Cesium.Math.toRadians(-42), roll: 0 },
+        duration: 0.9,
+        complete: () => viewer.scene.requestRender(),
+      });
+    }
   };
 
   const handleResetNorth = () => {
@@ -921,14 +984,16 @@ export function MarsGlobeViewer() {
       <div className="absolute top-3 right-3 z-10 flex flex-col items-end gap-2">
         <div className="flex items-center gap-1 bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] rounded-lg p-1">
           <button
-            onClick={() => handleZoom(0.4)}
+            onClick={() => handleZoom(0.6)}
+            data-testid="globe-zoom-in"
             className="p-1.5 rounded text-slate-300 hover:bg-[#161c2b]"
             title="Zoom in"
           >
             <Plus className="w-3.5 h-3.5" />
           </button>
           <button
-            onClick={() => handleZoom(0.65)}
+            onClick={() => handleZoom(1.6)}
+            data-testid="globe-zoom-out"
             className="p-1.5 rounded text-slate-300 hover:bg-[#161c2b]"
             title="Zoom out"
           >
@@ -937,30 +1002,48 @@ export function MarsGlobeViewer() {
           <button
             onClick={handleResetNorth}
             className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono text-slate-300 hover:bg-[#161c2b]"
-            title="Reset camera North-up"
+            title="Reset camera North-up (Camera heading, distinct from route bearing)"
           >
             <Compass
               className="w-3.5 h-3.5 text-[#e25b38]"
               style={{ transform: `rotate(${-cameraTelemetry.headingDeg}deg)` }}
             />
-            <span>{Math.round(cameraTelemetry.headingDeg)}° N</span>
+            <span>CAM {Math.round(cameraTelemetry.headingDeg)}° N</span>
           </button>
           <button
-            onClick={() => {
-              if (!viewerRef.current || !cesiumRef.current || !ellipsoidRef.current) return;
-              viewerRef.current.camera.flyTo({
-                destination: ellipsoidRef.current.cartographicToCartesian(
-                  cesiumRef.current.Cartographic.fromDegrees(0, 0, GLOBAL_VIEW_CAMERA_HEIGHT_M)
-                ),
-                orientation: { heading: 0, pitch: -cesiumRef.current.Math.PI_OVER_TWO, roll: 0 },
-                duration: 0.9,
-                complete: () => viewerRef.current?.scene.requestRender(),
-              });
-            }}
+            onClick={() => handleGlobeCameraPreset("global")}
+            data-testid="globe-reset"
             className="p-1.5 rounded text-slate-300 hover:bg-[#161c2b]"
             title="Return to global Mars view"
           >
             <RotateCcw className="w-3.5 h-3.5" />
+          </button>
+        </div>
+
+        <div className="flex items-center gap-1 bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] rounded-lg p-1 text-[10px] font-mono">
+          <button
+            onClick={() => handleGlobeCameraPreset("global")}
+            className="px-2 py-0.5 rounded text-slate-300 hover:bg-[#161c2b]"
+          >
+            Global
+          </button>
+          <button
+            onClick={() => handleGlobeCameraPreset("regional")}
+            className="px-2 py-0.5 rounded text-slate-300 hover:bg-[#161c2b]"
+          >
+            Regional
+          </button>
+          <button
+            onClick={() => handleGlobeCameraPreset("approach")}
+            className="px-2 py-0.5 rounded text-slate-300 hover:bg-[#161c2b]"
+          >
+            Approach
+          </button>
+          <button
+            onClick={() => handleGlobeCameraPreset("local")}
+            className="px-2 py-0.5 rounded text-cyan-300 hover:bg-[#161c2b]"
+          >
+            Local DEM
           </button>
         </div>
       </div>

@@ -28,6 +28,8 @@ def calculate_roughness_tri_with_metadata(
     nodata_mask: Optional[np.ndarray] = None,
     neighborhood_radius_meters: Optional[float] = None,
     vertical_units: str = "meters",
+    source_product_id: Optional[str] = None,
+    native_resolution_m: Optional[float] = None,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """
     Calculate physical Terrain Ruggedness Index (TRI) over a resolution-aware metric window.
@@ -40,6 +42,8 @@ def calculate_roughness_tri_with_metadata(
         neighborhood_radius_meters: Physical search radius in meters. If None, uses 1-pixel half-window
             corresponding to physical radius max(dx_meters, dy_meters).
         vertical_units: Must be verified metric units ('meters').
+        source_product_id: Optional authoritative source DEM product identifier.
+        native_resolution_m: Optional native DEM pixel spacing in meters.
     """
     validate_terrain_inputs(elevation_grid, dx_meters, dy_meters, vertical_units)
     if neighborhood_radius_meters is not None and (
@@ -49,6 +53,13 @@ def calculate_roughness_tri_with_metadata(
 
     nrows, ncols = elevation_grid.shape
     if neighborhood_radius_meters is not None:
+        max_spacing = max(dx_meters, dy_meters)
+        if neighborhood_radius_meters < 0.5 * max_spacing:
+            raise ValueError(
+                f"Requested TRI physical neighborhood radius ({neighborhood_radius_meters} m) "
+                f"is resolution-limited by DEM spacing ({dx_meters:.3f} m x {dy_meters:.3f} m); "
+                f"minimum resolvable radius is {0.5 * max_spacing:.3f} m."
+            )
         rx = max(1, int(round(neighborhood_radius_meters / dx_meters)))
         ry = max(1, int(round(neighborhood_radius_meters / dy_meters)))
     else:
@@ -96,14 +107,26 @@ def calculate_roughness_tri_with_metadata(
 
     metadata = {
         "metric": "Terrain Ruggedness Index (RMS elevation difference)",
+        "formula_id": "riley_1999_rms_elevation_difference_v1",
+        "neighborhood_shape": "rectangular_metric_window",
         "units": "meters",
         "window_half_pixels_x": rx,
         "window_half_pixels_y": ry,
         "window_shape_pixels": [2 * ry + 1, 2 * rx + 1],
         "neighbor_count_required": neighbor_total,
-        "physical_half_width_m": round(rx * dx_meters, 2),
-        "physical_half_height_m": round(ry * dy_meters, 2),
+        "physical_radius_m": round(float(neighborhood_radius_meters), 3)
+        if neighborhood_radius_meters is not None
+        else round(max(rx * dx_meters, ry * dy_meters), 3),
+        "physical_half_width_m": round(rx * dx_meters, 3),
+        "physical_half_height_m": round(ry * dy_meters, 3),
+        "actual_window_width_m": round((2 * rx + 1) * dx_meters, 3),
+        "actual_window_height_m": round((2 * ry + 1) * dy_meters, 3),
         "requested_radius_meters": neighborhood_radius_meters,
+        "source_product_id": source_product_id,
+        "native_resolution_m": native_resolution_m,
+        "processing_resolution_m": round(0.5 * (dx_meters + dy_meters), 3),
+        "nodata_policy": "strict_all_neighbors_valid",
+        "processing_version": "tri_v2_fixed_physical_window",
     }
     return tri, metadata
 

@@ -133,6 +133,9 @@ export function LocalTerrain3DViewer({
   } | null>(null);
   const tileCacheRef = useRef<Map<string, TerrainMeshTile>>(new Map());
   const textureCacheRef = useRef<Map<string, THREE.Texture>>(new Map());
+  const zoomAdaptiveMarkersRef = useRef<Array<{ obj: THREE.Object3D; weight: number }>>([]);
+  const [overviewClusterMode, setOverviewClusterMode] = useState(false);
+  const overviewClusterRef = useRef(false);
 
   const [tilesLoading, setTilesLoading] = useState(false);
   const [tilesLoadedCount, setTilesLoadedCount] = useState(0);
@@ -160,6 +163,8 @@ export function LocalTerrain3DViewer({
   const customWaypoints = useRoutingStore((s) => s.customWaypoints);
   const selectedTargetIds = useRoutingStore((s) => s.selectedTargetIds);
   const activeRoute = useRoutingStore((s) => s.activeRoute);
+  const staleRoute = useRoutingStore((s) => s.staleRoute);
+  const staleReason = useRoutingStore((s) => s.staleReason);
   const selectedWaypointSeq = useRoutingStore((s) => s.selectedWaypointSeq);
   const selectedInstructionStep = useRoutingStore((s) => s.selectedInstructionStep);
   const cameraFocusRequest = useRoutingStore((s) => s.cameraFocusRequest);
@@ -417,6 +422,23 @@ export function LocalTerrain3DViewer({
         if (t >= 1) anim.active = false;
       }
       controls.update();
+
+      // Zoom-adaptive marker scaling: preserve exact geographic anchor while keeping
+      // apparent screen size controlled across close-up and overview camera distances.
+      const camDistTarget = camera.position.distanceTo(controls.target);
+      const shouldCluster = camDistTarget > 2400;
+      if (shouldCluster !== overviewClusterRef.current) {
+        overviewClusterRef.current = shouldCluster;
+        setOverviewClusterMode(shouldCluster);
+      }
+      const markers = zoomAdaptiveMarkersRef.current;
+      for (let i = 0; i < markers.length; i += 1) {
+        const m = markers[i];
+        const d = camera.position.distanceTo(m.obj.position);
+        const s = Math.max(1.2, Math.min(65.0, d * 0.015)) * m.weight;
+        m.obj.scale.setScalar(s);
+      }
+
       renderer.render(scene, camera);
     };
     animate();
@@ -849,6 +871,7 @@ export function LocalTerrain3DViewer({
     terrainGroup.position.set(0, -refElev * exag, 0);
 
     // Clear old overlay objects cleanly
+    zoomAdaptiveMarkersRef.current = [];
     while (overlayGroup.children.length > 0) {
       const obj = overlayGroup.children[overlayGroup.children.length - 1];
       overlayGroup.remove(obj);
@@ -910,48 +933,69 @@ export function LocalTerrain3DViewer({
       pos: THREE.Vector3,
       colorHex: string,
       radiusScale = 1,
-      userData: Record<string, unknown> = {}
+      userData: Record<string, unknown> = {},
+      shape: "start" | "destination" | "waypoint" | "target" = "target"
     ) => {
-      const poleHeight = pinScale * 2.2 * radiusScale;
-      const stemGeom = new THREE.CylinderGeometry(
-        pinScale * 0.14 * radiusScale,
-        pinScale * 0.14 * radiusScale,
-        poleHeight,
-        8
-      );
+      const markerGroup = new THREE.Group();
+      markerGroup.position.copy(pos);
+
+      const poleHeight = 2.2;
+      const stemGeom = new THREE.CylinderGeometry(0.14, 0.14, poleHeight, 8);
       const stemMat = new THREE.MeshBasicMaterial({ color: colorHex });
       const stem = new THREE.Mesh(stemGeom, stemMat);
-      stem.position.set(pos.x, pos.y + poleHeight * 0.5, pos.z);
+      stem.position.set(0, poleHeight * 0.5, 0);
       stem.userData = userData;
 
-      const headGeom = new THREE.SphereGeometry(pinScale * 0.52 * radiusScale, 14, 14);
+      let headGeom: THREE.BufferGeometry;
+      if (shape === "destination") {
+        headGeom = new THREE.ConeGeometry(0.58, 1.1, 6);
+      } else if (shape === "waypoint") {
+        headGeom = new THREE.BoxGeometry(0.72, 0.72, 0.72);
+      } else if (shape === "target") {
+        headGeom = new THREE.OctahedronGeometry(0.56, 0);
+      } else {
+        headGeom = new THREE.SphereGeometry(0.52, 14, 14);
+      }
       const headMat = new THREE.MeshBasicMaterial({ color: colorHex });
       const head = new THREE.Mesh(headGeom, headMat);
-      head.position.set(pos.x, pos.y + poleHeight, pos.z);
+      head.position.set(0, poleHeight, 0);
       head.userData = userData;
 
-      overlayGroup.add(stem, head);
+      markerGroup.add(stem, head);
+      overlayGroup.add(markerGroup);
+      zoomAdaptiveMarkersRef.current.push({ obj: markerGroup, weight: radiusScale });
     };
 
-    // Render Science Targets inside DEM bounds
+    // Render Science Targets inside DEM bounds (with overview-zoom density clustering)
     if (showTargets && targets.length > 0) {
       const b = meshManifest.requested_bounds;
-      targets.forEach((t) => {
-        if (
-          t.latitude < b.min_lat - 0.01 ||
-          t.latitude > b.max_lat + 0.01 ||
-          t.longitude < b.min_lon - 0.01 ||
-          t.longitude > b.max_lon + 0.01
-        ) {
-          return;
-        }
+      const inBoundsTargets = targets.filter(
+        (t) =>
+          t.latitude >= b.min_lat - 0.01 &&
+          t.latitude <= b.max_lat + 0.01 &&
+          t.longitude >= b.min_lon - 0.01 &&
+          t.longitude <= b.max_lon + 0.01
+      );
+      const placedClusters: Array<{ eastM: number; northM: number }> = [];
+      inBoundsTargets.forEach((t) => {
         const selected = selectedTargetIds.includes(t.id);
+        const { eastM, northM } = latLonToLocalMeters(t.latitude, t.longitude, originLat, originLon);
+        if (overviewClusterMode && !selected) {
+          const tooClose = placedClusters.some(
+            (c) => Math.hypot(c.eastM - eastM, c.northM - northM) < 95
+          );
+          if (tooClose) return;
+          placedClusters.push({ eastM, northM });
+        }
         const elev = t.elevation_m ?? lookupElevNear(t.latitude, t.longitude);
         const pos = toSceneVec(t.latitude, t.longitude, elev, 2);
-        addBeaconPin(pos, selected ? "#fde047" : "#a855f7", selected ? 1.25 : 0.85, {
-          kind: "science_target",
-          targetId: t.id,
-        });
+        addBeaconPin(
+          pos,
+          selected ? "#fde047" : "#a855f7",
+          selected ? 1.25 : 0.85,
+          { kind: "science_target", targetId: t.id },
+          "target"
+        );
       });
     }
 
@@ -959,17 +1003,29 @@ export function LocalTerrain3DViewer({
     customWaypoints.forEach((wp) => {
       const elev = lookupElevNear(wp.lat, wp.lon_east);
       const pos = toSceneVec(wp.lat, wp.lon_east, elev, 2);
-      addBeaconPin(pos, "#f59e0b", 0.95);
+      addBeaconPin(pos, "#f59e0b", 0.95, { kind: "custom_waypoint" }, "waypoint");
     });
 
     // Render explicit Start & Destination markers
     if (startPoint) {
       const elev = activeRoute?.vertices[0]?.elevation_m ?? lookupElevNear(startPoint.lat, startPoint.lon_east);
-      addBeaconPin(toSceneVec(startPoint.lat, startPoint.lon_east, elev, 2), "#10b981", 1.3);
+      addBeaconPin(
+        toSceneVec(startPoint.lat, startPoint.lon_east, elev, 2),
+        "#10b981",
+        1.3,
+        { kind: "start" },
+        "start"
+      );
     }
     if (destinationPoint) {
       const elev = lookupElevNear(destinationPoint.lat, destinationPoint.lon_east);
-      addBeaconPin(toSceneVec(destinationPoint.lat, destinationPoint.lon_east, elev, 1.3), "#f43f5e", 1.3);
+      addBeaconPin(
+        toSceneVec(destinationPoint.lat, destinationPoint.lon_east, elev, 1.3),
+        "#f43f5e",
+        1.3,
+        { kind: "destination" },
+        "destination"
+      );
     }
 
     // Render Active Route exact piecewise polyline (NO CatmullRomCurve3 smoothing) + Return Leg + Cones + Selected Segment
@@ -1064,32 +1120,36 @@ export function LocalTerrain3DViewer({
         overlayGroup.add(cone);
       }
 
-      // Clickable route stop spheres + selected waypoint halo ring
+      // Clickable route stop spheres + selected waypoint halo ring (zoom-adaptive)
       activeRoute.vertices
         .filter((v) => v.is_stop || selectedWaypointSeq === v.seq)
         .forEach((v) => {
           const isSel = selectedWaypointSeq === v.seq;
           const pos = toSceneVec(v.lat, v.lon_east, v.elevation_m, 5.5);
-          const orbGeom = new THREE.SphereGeometry(pinScale * (isSel ? 0.65 : 0.4), 14, 14);
+          const stopGroup = new THREE.Group();
+          stopGroup.position.copy(pos);
+
+          const orbGeom = new THREE.SphereGeometry(isSel ? 0.65 : 0.42, 14, 14);
           const orbMat = new THREE.MeshBasicMaterial({
             color: isSel ? "#fde047" : "#38bdf8",
           });
           const orb = new THREE.Mesh(orbGeom, orbMat);
-          orb.position.copy(pos);
           orb.userData = { kind: "route_waypoint", waypointSeq: v.seq };
-          overlayGroup.add(orb);
+          stopGroup.add(orb);
 
           if (isSel) {
-            const ringGeom = new THREE.RingGeometry(pinScale * 0.9, pinScale * 1.35, 24);
+            const ringGeom = new THREE.RingGeometry(0.9, 1.35, 24);
             const ringMat = new THREE.MeshBasicMaterial({
               color: "#fde047",
               side: THREE.DoubleSide,
             });
             const ring = new THREE.Mesh(ringGeom, ringMat);
             ring.rotation.x = -Math.PI / 2;
-            ring.position.set(pos.x, pos.y + 1, pos.z);
-            overlayGroup.add(ring);
+            ring.position.set(0, 0.25, 0);
+            stopGroup.add(ring);
           }
+          overlayGroup.add(stopGroup);
+          zoomAdaptiveMarkersRef.current.push({ obj: stopGroup, weight: isSel ? 1.15 : 0.85 });
         });
 
       // Moving EVA astronaut position beacon (synchronized with /simulation timeline scrubber)
@@ -1115,15 +1175,19 @@ export function LocalTerrain3DViewer({
             astroPos = toSceneVec(b.lat, b.lon_east, b.elevation_m, 8);
           }
         }
-        const roverGeom = new THREE.OctahedronGeometry(pinScale * 0.85, 0);
+        const roverGroup = new THREE.Group();
+        roverGroup.position.copy(astroPos);
+        const roverGeom = new THREE.OctahedronGeometry(0.85, 0);
         const roverMat = new THREE.MeshStandardMaterial({
           color: "#22d3ee",
           emissive: "#06b6d4",
           emissiveIntensity: 0.75,
+          wireframe: true,
         });
         const roverMesh = new THREE.Mesh(roverGeom, roverMat);
-        roverMesh.position.copy(astroPos);
-        overlayGroup.add(roverMesh);
+        roverGroup.add(roverMesh);
+        overlayGroup.add(roverGroup);
+        zoomAdaptiveMarkersRef.current.push({ obj: roverGroup, weight: 1.0 });
       }
     }
 
@@ -1134,26 +1198,30 @@ export function LocalTerrain3DViewer({
         lookupElevNear(livePositionMarker.lat, livePositionMarker.lon_east);
       const livePos = toSceneVec(livePositionMarker.lat, livePositionMarker.lon_east, liveElev, 7);
       const beaconColor = livePositionMarker.off_route ? "#ef4444" : "#10b981";
-      const liveRingGeom = new THREE.RingGeometry(pinScale * 1.15, pinScale * 1.65, 24);
+      const liveGroup = new THREE.Group();
+      liveGroup.position.copy(livePos);
+
+      const liveRingGeom = new THREE.RingGeometry(1.15, 1.65, 24);
       const liveRingMat = new THREE.MeshBasicMaterial({
         color: beaconColor,
         side: THREE.DoubleSide,
       });
       const liveRing = new THREE.Mesh(liveRingGeom, liveRingMat);
       liveRing.rotation.x = -Math.PI / 2;
-      liveRing.position.copy(livePos).add(new THREE.Vector3(0, -3, 0));
-      overlayGroup.add(liveRing);
+      liveRing.position.set(0, -0.5, 0);
+      liveGroup.add(liveRing);
 
       const liveCore = new THREE.Mesh(
-        new THREE.SphereGeometry(pinScale * 0.72, 14, 14),
+        new THREE.SphereGeometry(0.72, 14, 14),
         new THREE.MeshStandardMaterial({
           color: beaconColor,
           emissive: beaconColor,
           emissiveIntensity: 0.9,
         })
       );
-      liveCore.position.copy(livePos);
-      overlayGroup.add(liveCore);
+      liveGroup.add(liveCore);
+      overlayGroup.add(liveGroup);
+      zoomAdaptiveMarkersRef.current.push({ obj: liveGroup, weight: 1.0 });
     }
   }, [
     meshManifest,
@@ -1168,6 +1236,7 @@ export function LocalTerrain3DViewer({
     selectedWaypointSeq,
     selectedInstructionStep,
     showRoute,
+    overviewClusterMode,
     simulationProgressM,
     livePositionMarker,
     tilesLoadedCount,
@@ -1565,31 +1634,167 @@ export function LocalTerrain3DViewer({
         </div>
       )}
 
-      {/* Bottom Live Telemetry & DEM Metadata HUD */}
-      <div className="absolute bottom-2.5 left-2.5 right-2.5 z-10 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
-        <div
-          ref={hoverHudRef}
-          className="bg-[#0b101b]/92 backdrop-blur border border-[#243047] rounded-lg px-2.5 py-1 text-[11px] font-mono text-slate-200 pointer-events-auto"
-        >
-          Hover valid DEM surface for telemetry · Drag to orbit · Right-drag to pan · Wheel to zoom
+      {/* Bottom Live Telemetry, Route Summary & Context-Aware Legend */}
+      <div className="absolute bottom-2.5 left-2.5 right-2.5 z-10 flex flex-wrap items-end justify-between gap-2 pointer-events-none">
+        <div className="flex flex-col gap-1.5 items-start max-w-full">
+          {activeRoute && (
+            <div
+              data-testid="viewport-route-summary"
+              className={`flex flex-wrap items-center gap-2 backdrop-blur border rounded-lg px-2.5 py-1 text-[10px] font-mono pointer-events-auto ${
+                staleRoute
+                  ? "bg-amber-950/90 border-amber-500/50 text-amber-200"
+                  : "bg-[#0b101b]/92 border-cyan-500/40 text-slate-200"
+              }`}
+            >
+              <span className="font-semibold text-cyan-300">
+                {activeRoute.mode_label}
+              </span>
+              <span>
+                Horiz:{" "}
+                <strong className={staleRoute ? "line-through opacity-60" : "text-white"}>
+                  {activeRoute.total_horizontal_distance_m >= 1000
+                    ? `${(activeRoute.total_horizontal_distance_m / 1000).toFixed(2)} km`
+                    : `${activeRoute.total_horizontal_distance_m.toFixed(1)} m`}
+                </strong>
+              </span>
+              <span>
+                3D:{" "}
+                <strong className={staleRoute ? "line-through opacity-60" : "text-white"}>
+                  {activeRoute.total_surface_distance_m >= 1000
+                    ? `${(activeRoute.total_surface_distance_m / 1000).toFixed(2)} km`
+                    : `${activeRoute.total_surface_distance_m.toFixed(1)} m`}
+                </strong>
+              </span>
+              <span>
+                +{activeRoute.total_elevation_gain_m.toFixed(0)}m / -{activeRoute.total_elevation_loss_m.toFixed(0)}m
+              </span>
+              <span>Max {activeRoute.max_slope_deg.toFixed(1)}°</span>
+              {staleRoute && (
+                <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-semibold">
+                  STALE ({staleReason || "Inputs changed"})
+                </span>
+              )}
+            </div>
+          )}
+
+          <div
+            ref={hoverHudRef}
+            className="bg-[#0b101b]/92 backdrop-blur border border-[#243047] rounded-lg px-2.5 py-1 text-[11px] font-mono text-slate-200 pointer-events-auto"
+          >
+            Hover valid DEM surface for telemetry · Drag to orbit · Right-drag to pan · Wheel to zoom
+          </div>
         </div>
 
-        <div className="flex items-center gap-2 bg-[#0b101b]/92 backdrop-blur border border-[#243047] rounded-lg px-2.5 py-1 text-[10px] font-mono text-slate-400 pointer-events-auto">
-          <span className="text-slate-200">
-            {meshManifest?.product_id || selectedDemDatasetId}
-          </span>
-          <span>|</span>
-          <span>
-            {meshManifest?.native_resolution_m
-              ? `${meshManifest.native_resolution_m.toFixed(2)} m/px`
-              : "DEM"}
-          </span>
-          <span>|</span>
-          <span>{tilesLoadedCount} tiles / {renderedVertexTotal.toLocaleString()} valid pts</span>
-          <span>|</span>
-          <span className={verticalExaggeration === 1 ? "text-emerald-300" : "text-amber-300"}>
-            {verticalExaggeration === 1 ? "1x True Scale" : `${verticalExaggeration}x Exag (Visual)`}
-          </span>
+        <div className="flex flex-col items-end gap-1.5">
+          {/* Context-Aware Bottom-Right Terrain Legend */}
+          {(() => {
+            const effectiveOverlay =
+              activeOverlayMode === "ortho" && !meshManifest?.ortho_dataset_id
+                ? "elevation"
+                : activeOverlayMode;
+            const normSpec = meshManifest?.color_normalizations?.[effectiveOverlay];
+            const stops = normSpec?.palette_stops || [];
+            const gradientCss =
+              stops.length >= 2
+                ? `linear-gradient(to right, ${stops
+                    .map((s) => `${s.color} ${(s.t * 100).toFixed(0)}%`)
+                    .join(", ")})`
+                : undefined;
+
+            return (
+              <div
+                data-testid="terrain-overlay-legend"
+                className="w-60 bg-[#0b101b]/94 backdrop-blur border border-[#243047] rounded-lg p-2 text-[10px] font-mono text-slate-300 pointer-events-auto shadow-lg space-y-1.5"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-slate-100">
+                    {effectiveOverlay === "ortho"
+                      ? "HiRISE Orthorectified"
+                      : effectiveOverlay === "elevation"
+                      ? "Elevation (m)"
+                      : effectiveOverlay === "slope"
+                      ? "Physical Slope (°)"
+                      : "TRI Ruggedness (m)"}
+                  </span>
+                  <span className="text-[9px] text-slate-400">
+                    {meshManifest?.native_resolution_m
+                      ? `${meshManifest.native_resolution_m.toFixed(2)} m/px`
+                      : "DEM"}
+                  </span>
+                </div>
+
+                {effectiveOverlay === "ortho" ? (
+                  <div className="text-[9px] text-slate-400 leading-relaxed">
+                    <div>Product: {normSpec?.dataset_id || meshManifest?.ortho_dataset_id || meshManifest?.product_id}</div>
+                    <div>Source reflectance only — RGB values are not physical elevation or slope measurements.</div>
+                  </div>
+                ) : (
+                  <>
+                    {gradientCss && (
+                      <div
+                        className="h-2.5 w-full rounded border border-slate-700/80"
+                        style={{ background: gradientCss }}
+                      />
+                    )}
+                    <div className="flex items-center justify-between text-[9px] text-slate-200">
+                      <span>
+                        {normSpec?.vmin != null ? normSpec.vmin.toFixed(effectiveOverlay === "roughness" ? 2 : 1) : "—"}
+                        {effectiveOverlay === "slope" ? "°" : " m"}
+                      </span>
+                      {effectiveOverlay === "roughness" && (
+                        <span className="text-slate-400">
+                          r={normSpec?.physical_radius_m ?? 5.0}m
+                        </span>
+                      )}
+                      <span>
+                        {normSpec?.vmax != null ? normSpec.vmax.toFixed(effectiveOverlay === "roughness" ? 2 : 1) : "—"}
+                        {effectiveOverlay === "slope" ? "°" : " m"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-[9px] text-slate-400">
+                      <span>
+                        {effectiveOverlay === "roughness"
+                          ? "Lower local variation"
+                          : effectiveOverlay === "elevation"
+                          ? "MOLA Areoid"
+                          : "True surface angle"}
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <span className="inline-block w-2 h-2 rounded-sm border border-slate-500 bg-transparent" />
+                        No-Data
+                      </span>
+                    </div>
+                    {effectiveOverlay === "roughness" && (
+                      <div className="text-[9px] text-slate-400">
+                        Higher local variation at right · Window{" "}
+                        {normSpec?.window_dimensions_m
+                          ? `${normSpec.window_dimensions_m.width_m.toFixed(1)}×${normSpec.window_dimensions_m.height_m.toFixed(1)} m`
+                          : "fixed metric"}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            );
+          })()}
+
+          <div className="flex items-center gap-2 bg-[#0b101b]/92 backdrop-blur border border-[#243047] rounded-lg px-2.5 py-1 text-[10px] font-mono text-slate-400 pointer-events-auto">
+            <span className="text-slate-200">
+              {meshManifest?.product_id || selectedDemDatasetId}
+            </span>
+            <span>|</span>
+            <span>
+              {meshManifest?.native_resolution_m
+                ? `${meshManifest.native_resolution_m.toFixed(2)} m/px`
+                : "DEM"}
+            </span>
+            <span>|</span>
+            <span>{tilesLoadedCount} tiles / {renderedVertexTotal.toLocaleString()} valid pts</span>
+            <span>|</span>
+            <span className={verticalExaggeration === 1 ? "text-emerald-300" : "text-amber-300"}>
+              {verticalExaggeration === 1 ? "1x True Scale" : `${verticalExaggeration}x Exag (Visual)`}
+            </span>
+          </div>
         </div>
       </div>
     </div>

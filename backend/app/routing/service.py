@@ -26,6 +26,11 @@ from app.routing.graph import RoutePlanningError, TerrainGrid, build_terrain_gri
 from app.routing.instructions import generate_turn_by_turn_instructions
 from app.routing.models import MODE_POLICIES, PathAlgorithm, RoutingMode
 from app.routing.pathfinder import optimize_intermediate_stop_order, simplify_leg_safely, solve_grid_leg
+from app.science.provenance_graph import (
+    ProvenanceDependencyGraph,
+    ProvenanceStep,
+    ScientificDataClassification,
+)
 from app.routing.schemas import (
     BudgetDiagnostic,
     RouteCompareEntry,
@@ -708,6 +713,65 @@ class ScienceAwareRoutingService:
             "safety_certification": "None — terrain optimization reflects DEM geometry & planning constraints only",
         }
 
+        route_prov_graph = ProvenanceDependencyGraph(
+            output_id=route_id,
+            classification=ScientificDataClassification.MARSCOPE_DERIVED,
+            input_datasets=[ds_id],
+            input_product_ids=[prod_id],
+            input_variables=["elevation_m", "slope_deg", "roughness_tri_m"],
+            input_units=["meters", "degrees", "meters"],
+            input_crs="IAU2000:49900",
+            input_resolution_m=round(grid.native_resolution_m, 3),
+            method=f"{req.algorithm} on weighted 8-connected terrain cost grid ({policy.label})",
+            algorithm_version="routing_v2_science_aware",
+            parameters={
+                "mode": req.mode.value,
+                "algorithm": req.algorithm,
+                "effective_slope_limit_deg": round(grid.effective_slope_limit_deg, 2),
+                "solver_grid_spacing_m": round(0.5 * (grid.dx_m + grid.dy_m), 3),
+                "return_to_start": req.constraints.return_to_start,
+            },
+            assumptions=list(limitations),
+            intermediate_steps=[
+                ProvenanceStep(
+                    step_id="step_dem",
+                    label="Load verified NASA DEM elevation raster",
+                    classification=ScientificDataClassification.ARCHIVE_DERIVED,
+                    input_ids=[prod_id],
+                    method="PDS3/GeoTIFF raster read",
+                    algorithm_version="rasterio_v1",
+                    output_variable="elevation_m",
+                    output_units="meters",
+                    output_resolution_m=round(grid.native_resolution_m, 3),
+                ),
+                ProvenanceStep(
+                    step_id="step_derivatives",
+                    label="Derive cell slope and TRI",
+                    classification=ScientificDataClassification.MARSCOPE_DERIVED,
+                    input_ids=["step_dem"],
+                    method="Horn slope + Riley RMS TRI",
+                    algorithm_version="terrain_derivatives_v2",
+                    output_variable="slope_deg, roughness_tri_m",
+                    output_units="degrees, meters",
+                    output_resolution_m=round(0.5 * (grid.dx_m + grid.dy_m), 3),
+                ),
+                ProvenanceStep(
+                    step_id="step_cost_path",
+                    label="Evaluate terrain edge costs and compute path",
+                    classification=ScientificDataClassification.MARSCOPE_DERIVED,
+                    input_ids=["step_derivatives"],
+                    method=f"{req.algorithm} pathfinder with line-of-sight obstacle/nodata checks",
+                    algorithm_version="pathfinder_v2",
+                    output_variable="computed_route_geometry",
+                    output_units="meters",
+                ),
+            ],
+            output_units="meters",
+            output_resolution_m=round(0.5 * (grid.dx_m + grid.dy_m), 3),
+            uncertainty_method="coverage_and_nodata_gating",
+            validation_state="verified_terrain_route_not_safety_certified",
+        )
+
         resp = RouteComputeResponse(
             route_id=route_id,
             route_signature=sig_hash,
@@ -760,6 +824,7 @@ class ScienceAwareRoutingService:
             resolution_suitability=suit_dump,
             limitations=limitations,
             provenance=provenance_block,
+            provenance_graph=route_prov_graph,
         )
         self._store_route(resp)
         return resp

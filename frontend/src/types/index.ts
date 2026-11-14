@@ -1031,6 +1031,140 @@ export interface MeshTileDescriptor {
   approx_vertex_spacing_m: number;
 }
 
+export type ScientificDataClassification =
+  | "DIRECTLY_MEASURED"
+  | "ARCHIVE_DERIVED"
+  | "MARSCOPE_DERIVED"
+  | "MODELLED"
+  | "USER_ASSUMED"
+  | "UNAVAILABLE"
+  | "UNVERIFIED";
+
+export interface ProvenanceStep {
+  step_id: string;
+  label: string;
+  classification: ScientificDataClassification;
+  input_ids: string[];
+  method: string;
+  algorithm_version: string;
+  output_variable: string;
+  output_units?: string | null;
+  output_resolution_m?: number | null;
+  parameters: Record<string, unknown>;
+  assumptions: string[];
+}
+
+export interface ProvenanceDependencyGraph {
+  output_id: string;
+  classification: ScientificDataClassification;
+  input_datasets: string[];
+  input_product_ids: string[];
+  input_variables: string[];
+  input_units: string[];
+  input_crs: string;
+  input_resolution_m?: number | null;
+  input_timestamps: string[];
+  method: string;
+  algorithm_version: string;
+  parameters: Record<string, unknown>;
+  assumptions: string[];
+  intermediate_steps: ProvenanceStep[];
+  output_units?: string | null;
+  output_resolution_m?: number | null;
+  uncertainty_method: string;
+  validation_state: string;
+  processing_timestamp: string;
+  scientific_notes: string[];
+}
+
+export interface MultiScaleMetricEntry {
+  metric_name: string;
+  value?: number | null;
+  units: string;
+  classification: ScientificDataClassification;
+  physical_radius_m?: number | null;
+  actual_window_dimensions_m?: { width_m: number; height_m: number } | null;
+  native_resolution_m: number;
+  processing_resolution_m: number;
+  status: string;
+  reason?: string | null;
+}
+
+export interface MultiScaleTerrainResponse {
+  available: boolean;
+  dataset_id?: string | null;
+  product_id?: string | null;
+  latitude: number;
+  longitude_east: number;
+  crs: string;
+  vertical_datum: string;
+  elevation_m?: number | null;
+  slope_deg?: number | null;
+  aspect_deg?: number | null;
+  profile_curvature_inv_m?: number | null;
+  planform_curvature_inv_m?: number | null;
+  tri_fine_m?: MultiScaleMetricEntry | null;
+  tri_medium_m?: MultiScaleMetricEntry | null;
+  tpi_m?: MultiScaleMetricEntry | null;
+  local_relief_m?: MultiScaleMetricEntry | null;
+  valid_coverage_fraction: number;
+  unavailable_reason?: string | null;
+  provenance_graph?: ProvenanceDependencyGraph | null;
+}
+
+export interface OpticalCandidateFeature {
+  feature_id: string;
+  candidate_type: string;
+  latitude: number;
+  longitude_east: number;
+  score: number;
+  edge_magnitude_dn: number;
+  local_contrast_zscore: number;
+  classification: ScientificDataClassification;
+  validation_state: string;
+  disclaimer: string;
+}
+
+export interface OpticalAnalysisResponse {
+  available: boolean;
+  ortho_dataset_id?: string | null;
+  product_id?: string | null;
+  bounds: Record<string, number>;
+  valid_coverage_fraction: number;
+  mean_dn?: number | null;
+  std_dn?: number | null;
+  mean_sobel_edge_dn?: number | null;
+  texture_variance?: number | null;
+  candidates: OpticalCandidateFeature[];
+  unavailable_reason?: string | null;
+  provenance_graph?: ProvenanceDependencyGraph | null;
+}
+
+export interface ColorNormalizationStop {
+  t: number;
+  color: string;
+  rgb: number[];
+}
+
+export interface ColorNormalizationSpec {
+  overlay: string;
+  dataset_id: string;
+  region_bounds: Record<string, number>;
+  processing_version: string;
+  scale_type: "sequential" | "source_imagery";
+  palette_id: string;
+  palette_stops: ColorNormalizationStop[];
+  vmin?: number | null;
+  vmax?: number | null;
+  units?: string | null;
+  nodata_label: string;
+  nodata_rgba: number[];
+  physical_radius_m?: number | null;
+  source_resolution_m?: number | null;
+  window_dimensions_m?: { width_m: number; height_m: number } | null;
+  note?: string | null;
+}
+
 export interface TerrainMeshManifest {
   dataset_id: string;
   product_id: string;
@@ -1051,6 +1185,8 @@ export interface TerrainMeshManifest {
   resolution_suitability: Record<string, ScaleSuitabilityRecord>;
   elevation_range_m?: { min_m: number; max_m: number } | null;
   roughness_range_m?: { min_m: number; max_m: number } | null;
+  tri_metadata?: Record<string, unknown> | null;
+  color_normalizations?: Record<string, ColorNormalizationSpec>;
 }
 
 export interface TerrainMeshTile {
@@ -1256,6 +1392,7 @@ export interface RouteComputeResponse {
   instructions: NavigationInstruction[];
   resolution_suitability: Record<string, ScaleSuitabilityRecord>;
   provenance?: Record<string, unknown> | null;
+  provenance_graph?: ProvenanceDependencyGraph | null;
   limitations: string[];
 }
 

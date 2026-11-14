@@ -63,6 +63,55 @@ PAIRED_ORTHO_MAP: Dict[str, str] = {
     "hirise_dteec_040770_1755": "hirise_esp_040770_1755_ortho",
 }
 
+DEFAULT_TRI_PHYSICAL_RADIUS_M = 5.0
+COLOR_NORM_PROCESSING_VERSION = "color_norm_v2"
+
+# Perceptually coherent, colorblind-aware sequential palettes shared identically
+# between backend PNG rendering and frontend legend rendering.
+PALETTE_STOPS: Dict[str, Dict[str, Any]] = {
+    "elevation": {
+        "palette_id": "elevation_sequential_v2",
+        "stops": [
+            (0.0, (30, 58, 95), "#1e3a5f"),
+            (0.33, (43, 122, 120), "#2b7a78"),
+            (0.67, (201, 150, 76), "#c9964c"),
+            (1.0, (243, 229, 171), "#f3e5ab"),
+        ],
+    },
+    "slope": {
+        "palette_id": "slope_sequential_v2",
+        "stops": [
+            (0.0, (31, 111, 120), "#1f6f78"),
+            (0.5, (217, 130, 43), "#d9822b"),
+            (1.0, (185, 28, 28), "#b91c1c"),
+        ],
+    },
+    "roughness": {
+        "palette_id": "tri_sequential_v2",
+        "stops": [
+            (0.0, (27, 31, 59), "#1b1f3b"),
+            (0.5, (33, 145, 140), "#21918c"),
+            (1.0, (253, 231, 37), "#fde725"),
+        ],
+    },
+}
+
+
+def _apply_palette_lut(
+    t: np.ndarray,
+    stops: List[Tuple[float, Tuple[int, int, int], str]],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Interpolate [0, 1] normalized values through exact RGB palette stops."""
+    ts = [s[0] for s in stops]
+    rs = [float(s[1][0]) for s in stops]
+    gs = [float(s[1][1]) for s in stops]
+    bs = [float(s[1][2]) for s in stops]
+    tc = np.clip(t, 0.0, 1.0)
+    r_ch = np.interp(tc, ts, rs)
+    g_ch = np.interp(tc, ts, gs)
+    b_ch = np.interp(tc, ts, bs)
+    return r_ch, g_ch, b_ch
+
 MARS_GEOG_CRS = rasterio.crs.CRS.from_proj4(
     f"+proj=longlat +a={MARS_EQUATORIAL_RADIUS_M} +b={MARS_EQUATORIAL_RADIUS_M} +no_defs"
 )
@@ -99,6 +148,25 @@ class MeshTileDescriptor(BaseModel):
     approx_vertex_spacing_m: float
 
 
+class ColorNormalizationSpec(BaseModel):
+    overlay: str
+    dataset_id: str
+    region_bounds: Dict[str, float]
+    processing_version: str = COLOR_NORM_PROCESSING_VERSION
+    scale_type: str = "sequential"
+    palette_id: str
+    palette_stops: List[Dict[str, Any]] = Field(default_factory=list)
+    vmin: Optional[float] = None
+    vmax: Optional[float] = None
+    units: Optional[str] = None
+    nodata_label: str = "No-Data (Transparent)"
+    nodata_rgba: List[int] = Field(default_factory=lambda: [0, 0, 0, 0])
+    physical_radius_m: Optional[float] = None
+    source_resolution_m: Optional[float] = None
+    window_dimensions_m: Optional[Dict[str, float]] = None
+    note: Optional[str] = None
+
+
 class TerrainMeshManifestResponse(BaseModel):
     dataset_id: str
     product_id: str
@@ -119,6 +187,8 @@ class TerrainMeshManifestResponse(BaseModel):
     resolution_suitability: Dict[str, Any] = Field(default_factory=dict)
     elevation_range_m: Optional[Dict[str, float]] = None
     roughness_range_m: Optional[Dict[str, float]] = None
+    tri_metadata: Optional[Dict[str, Any]] = None
+    color_normalizations: Dict[str, ColorNormalizationSpec] = Field(default_factory=dict)
 
 
 class TerrainMeshTileResponse(BaseModel):
@@ -139,6 +209,8 @@ class TerrainMeshTileResponse(BaseModel):
     normals: Optional[List[float]] = None
     slope_deg: Optional[List[Optional[float]]] = None
     roughness_tri_m: Optional[List[Optional[float]]] = None
+    tri_status: str = "valid"
+    tri_metadata: Optional[Dict[str, Any]] = None
     valid_vertex_count: int
     nodata_vertex_count: int
     elevation_min_m: Optional[float] = None
@@ -404,6 +476,14 @@ class TerrainMeshService:
             req_bounds["min_lon"],
             req_bounds["max_lon"],
         )
+        color_normalizations = self._build_color_normalizations(
+            dataset_id=ds.id,
+            product_id=ds.product_id,
+            ortho_dataset_id=ortho_id,
+            native_resolution_m=ds.horizontal_resolution_meters,
+            region_bounds=req_bounds,
+            region_stats=region_stats,
+        )
 
         return TerrainMeshManifestResponse(
             dataset_id=ds.id,
@@ -423,7 +503,92 @@ class TerrainMeshService:
             resolution_suitability=suit_dump,
             elevation_range_m=region_stats.get("elevation_range_m"),
             roughness_range_m=region_stats.get("roughness_range_m"),
+            tri_metadata=region_stats.get("tri_metadata"),
+            color_normalizations=color_normalizations,
         )
+
+    @staticmethod
+    def _build_color_normalizations(
+        *,
+        dataset_id: str,
+        product_id: str,
+        ortho_dataset_id: Optional[str],
+        native_resolution_m: Optional[float],
+        region_bounds: Dict[str, float],
+        region_stats: Dict[str, Any],
+    ) -> Dict[str, ColorNormalizationSpec]:
+        def _stops_payload(key: str) -> List[Dict[str, Any]]:
+            return [
+                {"t": t_val, "color": hex_col, "rgb": list(rgb)}
+                for t_val, rgb, hex_col in PALETTE_STOPS[key]["stops"]
+            ]
+
+        el_r = region_stats.get("elevation_range_m") or {}
+        tri_r = region_stats.get("roughness_range_m") or {}
+        tri_meta = region_stats.get("tri_metadata") or {}
+
+        specs: Dict[str, ColorNormalizationSpec] = {
+            "elevation": ColorNormalizationSpec(
+                overlay="elevation",
+                dataset_id=dataset_id,
+                region_bounds=region_bounds,
+                scale_type="sequential",
+                palette_id=PALETTE_STOPS["elevation"]["palette_id"],
+                palette_stops=_stops_payload("elevation"),
+                vmin=el_r.get("min_m"),
+                vmax=el_r.get("max_m"),
+                units="meters",
+                source_resolution_m=native_resolution_m,
+                note="Height relative to MOLA areoid (IAU2000:49900), normalized across full study region.",
+            ),
+            "slope": ColorNormalizationSpec(
+                overlay="slope",
+                dataset_id=dataset_id,
+                region_bounds=region_bounds,
+                scale_type="sequential",
+                palette_id=PALETTE_STOPS["slope"]["palette_id"],
+                palette_stops=_stops_payload("slope"),
+                vmin=0.0,
+                vmax=35.0,
+                units="degrees",
+                source_resolution_m=native_resolution_m,
+                note="Physical terrain slope in degrees; independent of 3D vertical exaggeration.",
+            ),
+            "roughness": ColorNormalizationSpec(
+                overlay="roughness",
+                dataset_id=dataset_id,
+                region_bounds=region_bounds,
+                scale_type="sequential",
+                palette_id=PALETTE_STOPS["roughness"]["palette_id"],
+                palette_stops=_stops_payload("roughness"),
+                vmin=tri_r.get("min_m", 0.0),
+                vmax=tri_r.get("max_m", 5.0),
+                units="meters",
+                physical_radius_m=tri_meta.get("physical_radius_m", DEFAULT_TRI_PHYSICAL_RADIUS_M),
+                source_resolution_m=native_resolution_m,
+                window_dimensions_m=(
+                    {
+                        "width_m": tri_meta["actual_window_width_m"],
+                        "height_m": tri_meta["actual_window_height_m"],
+                    }
+                    if tri_meta.get("actual_window_width_m") and tri_meta.get("actual_window_height_m")
+                    else None
+                ),
+                note="RMS elevation difference (TRI) over fixed physical window; lower to higher local elevation variation.",
+            ),
+        }
+        if ortho_dataset_id:
+            specs["ortho"] = ColorNormalizationSpec(
+                overlay="ortho",
+                dataset_id=ortho_dataset_id,
+                region_bounds=region_bounds,
+                scale_type="source_imagery",
+                palette_id="hirise_source_reflectance",
+                palette_stops=[],
+                source_resolution_m=native_resolution_m,
+                note=f"Source HiRISE orthorectified reflectance ({product_id}); RGB values are not physical elevation or slope measurements.",
+            )
+        return specs
 
     def _get_region_render_stats(
         self,
@@ -471,10 +636,147 @@ class TerrainMeshService:
         stats = {
             "elevation_range_m": elev_range,
             "roughness_range_m": tri_range,
+            "tri_metadata": tile.tri_metadata,
         }
         self._cache_put(cache_key, stats)
         self._cache_put(f"stats_default:{dataset_id}", stats)
         return stats
+
+    @staticmethod
+    def _sample_physical_tri_grid(
+        reader: Any,
+        nodata_val: float,
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+        grid_rows: int,
+        grid_cols: int,
+        radius_m: float = DEFAULT_TRI_PHYSICAL_RADIUS_M,
+        source_product_id: Optional[str] = None,
+        native_resolution_m: Optional[float] = None,
+    ) -> Tuple[np.ndarray, str, Dict[str, Any]]:
+        """
+        Compute LOD-invariant Terrain Ruggedness Index (TRI) at each tile vertex (lat, lon)
+        by evaluating the exact fixed-radius physical neighborhood on native DEM pixels.
+        """
+        out = np.full((grid_rows, grid_cols), np.nan, dtype=np.float64)
+        rb = reader.bounds
+        q_lons = np.linspace(min_lon, max_lon, grid_cols, dtype=np.float64)
+        if rb.right > 180.0 and min_lon < 0.0:
+            q_lons = q_lons + 360.0
+        lats = np.linspace(max_lat, min_lat, grid_rows, dtype=np.float64)
+
+        center_lat = 0.5 * (min_lat + max_lat)
+        m_per_deg_lat = MARS_EQUATORIAL_RADIUS_M * math.pi / 180.0
+        m_per_deg_lon = MARS_EQUATORIAL_RADIUS_M * math.cos(math.radians(center_lat)) * math.pi / 180.0
+        nat_dx_m = abs(float(reader.transform.a)) * m_per_deg_lon
+        nat_dy_m = abs(float(reader.transform.e)) * m_per_deg_lat
+
+        max_spacing = max(nat_dx_m, nat_dy_m)
+        if radius_m < 0.5 * max_spacing:
+            return (
+                out,
+                "resolution_limited",
+                {
+                    "metric": "Terrain Ruggedness Index (RMS elevation difference)",
+                    "formula_id": "riley_1999_rms_elevation_difference_v1",
+                    "neighborhood_shape": "rectangular_metric_window",
+                    "units": "meters",
+                    "physical_radius_m": round(float(radius_m), 3),
+                    "source_product_id": source_product_id,
+                    "native_resolution_m": native_resolution_m or round(max_spacing, 3),
+                    "processing_resolution_m": round(0.5 * (nat_dx_m + nat_dy_m), 3),
+                    "nodata_policy": "strict_all_neighbors_valid",
+                    "processing_version": "tri_v2_fixed_physical_window",
+                    "status": "resolution_limited",
+                    "reason": (
+                        f"Requested physical radius ({radius_m} m) is smaller than half the native DEM "
+                        f"spacing ({nat_dx_m:.2f} m x {nat_dy_m:.2f} m)."
+                    ),
+                },
+            )
+
+        rx = max(1, int(round(radius_m / nat_dx_m)))
+        ry = max(1, int(round(radius_m / nat_dy_m)))
+        neighbor_total = (2 * ry + 1) * (2 * rx + 1) - 1
+        meta = {
+            "metric": "Terrain Ruggedness Index (RMS elevation difference)",
+            "formula_id": "riley_1999_rms_elevation_difference_v1",
+            "neighborhood_shape": "rectangular_metric_window",
+            "units": "meters",
+            "window_half_pixels_x": rx,
+            "window_half_pixels_y": ry,
+            "window_shape_pixels": [2 * ry + 1, 2 * rx + 1],
+            "neighbor_count_required": neighbor_total,
+            "physical_radius_m": round(float(radius_m), 3),
+            "physical_half_width_m": round(rx * nat_dx_m, 3),
+            "physical_half_height_m": round(ry * nat_dy_m, 3),
+            "actual_window_width_m": round((2 * rx + 1) * nat_dx_m, 3),
+            "actual_window_height_m": round((2 * ry + 1) * nat_dy_m, 3),
+            "source_product_id": source_product_id,
+            "native_resolution_m": native_resolution_m or round(0.5 * (nat_dx_m + nat_dy_m), 3),
+            "processing_resolution_m": round(0.5 * (nat_dx_m + nat_dy_m), 3),
+            "nodata_policy": "strict_all_neighbors_valid",
+            "processing_version": "tri_v2_fixed_physical_window",
+            "status": "valid",
+        }
+
+        inv_t = ~reader.transform
+        col_coords = inv_t.a * q_lons + inv_t.b * center_lat + inv_t.c - 0.5
+        row_coords = inv_t.d * float(q_lons[0]) + inv_t.e * lats + inv_t.f - 0.5
+        c_nat = np.rint(col_coords).astype(np.int64)
+        r_nat = np.rint(row_coords).astype(np.int64)
+
+        valid_c_mask = (c_nat - rx >= 0) & (c_nat + rx < int(reader.width))
+        if not np.any(valid_c_mask):
+            return out, "valid", meta
+        c_min_req = int(np.min(c_nat[valid_c_mask])) - rx
+        c_max_req = int(np.max(c_nat[valid_c_mask])) + rx + 1
+
+        strip_rows = 16
+        for r_start in range(0, grid_rows, strip_rows):
+            r_end = min(grid_rows, r_start + strip_rows)
+            r_sub = r_nat[r_start:r_end]
+            valid_r_mask = (r_sub - ry >= 0) & (r_sub + ry < int(reader.height))
+            if not np.any(valid_r_mask):
+                continue
+
+            r_min_req = int(np.min(r_sub[valid_r_mask])) - ry
+            r_max_req = int(np.max(r_sub[valid_r_mask])) + ry + 1
+            win = rasterio.windows.Window(c_min_req, r_min_req, c_max_req - c_min_req, r_max_req - r_min_req)
+            patch = reader.read(1, window=win).astype(np.float64)
+            valid_patch = np.isfinite(patch) & (patch != float(nodata_val)) & (patch > -32000.0)
+
+            rr, cc = np.meshgrid(r_sub - r_min_req, c_nat - c_min_req, indexing="ij")
+            in_grid = valid_r_mask[:, None] & valid_c_mask[None, :]
+            if not np.any(in_grid):
+                continue
+
+            rr_v = rr[in_grid]
+            cc_v = cc[in_grid]
+            z0 = patch[rr_v, cc_v]
+            all_ok = valid_patch[rr_v, cc_v].copy()
+            sum_sq = np.zeros(z0.shape, dtype=np.float64)
+
+            for dr in range(-ry, ry + 1):
+                for dc in range(-rx, rx + 1):
+                    if dr == 0 and dc == 0:
+                        continue
+                    nr = rr_v + dr
+                    nc = cc_v + dc
+                    n_ok = valid_patch[nr, nc]
+                    all_ok &= n_ok
+                    nz = patch[nr, nc]
+                    diff = np.where(all_ok, z0 - nz, 0.0)
+                    sum_sq += diff * diff
+
+            tri_vals = np.where(all_ok, np.sqrt(sum_sq / float(neighbor_total)), np.nan)
+            strip_out = np.full((r_end - r_start, grid_cols), np.nan, dtype=np.float64)
+            strip_out[in_grid] = tri_vals
+            out[r_start:r_end, :] = strip_out
+
+        return out, "valid", meta
 
     @staticmethod
     def _sample_dem_grid(
@@ -716,6 +1018,20 @@ class TerrainMeshService:
                         grid_size,
                         grid_size,
                     )
+                    if include_derivatives:
+                        tri_core, tri_status, tri_meta = self._sample_physical_tri_grid(
+                            vrt,
+                            nodata_val,
+                            tile_bounds["min_lat"],
+                            tile_bounds["max_lat"],
+                            tile_bounds["min_lon"],
+                            tile_bounds["max_lon"],
+                            grid_size,
+                            grid_size,
+                            radius_m=DEFAULT_TRI_PHYSICAL_RADIUS_M,
+                            source_product_id=ds.product_id,
+                            native_resolution_m=ds.horizontal_resolution_meters,
+                        )
             else:
                 padded_z, dx_m, dy_m = self._sample_dem_grid(
                     src,
@@ -727,6 +1043,20 @@ class TerrainMeshService:
                     grid_size,
                     grid_size,
                 )
+                if include_derivatives:
+                    tri_core, tri_status, tri_meta = self._sample_physical_tri_grid(
+                        src,
+                        nodata_val,
+                        tile_bounds["min_lat"],
+                        tile_bounds["max_lat"],
+                        tile_bounds["min_lon"],
+                        tile_bounds["max_lon"],
+                        grid_size,
+                        grid_size,
+                        radius_m=DEFAULT_TRI_PHYSICAL_RADIUS_M,
+                        source_product_id=ds.product_id,
+                        native_resolution_m=ds.horizontal_resolution_meters,
+                    )
 
         center_z = padded_z[1:-1, 1:-1]
         valid_bool = np.isfinite(center_z)
@@ -739,16 +1069,21 @@ class TerrainMeshService:
         if include_derivatives:
             padded_nodata = ~np.isfinite(padded_z)
             slope_pad, _ = calculate_slope(padded_z, dx_m, dy_m, nodata_mask=padded_nodata)
-            tri_pad, _ = calculate_roughness_tri_with_metadata(padded_z, dx_m, dy_m, nodata_mask=padded_nodata)
             slope_core = slope_pad[1:-1, 1:-1]
-            tri_core = tri_pad[1:-1, 1:-1]
             slope_flat = slope_core.ravel()
             tri_flat = tri_core.ravel()
             slope_list = [round(float(v), 3) if np.isfinite(v) else None for v in slope_flat]
-            tri_list = [round(float(v), 3) if np.isfinite(v) else None for v in tri_flat]
+            tri_list = (
+                [round(float(v), 3) if np.isfinite(v) else None for v in tri_flat]
+                if tri_status == "valid"
+                else None
+            )
             s_fin = slope_flat[np.isfinite(slope_flat)]
             if s_fin.size > 0:
                 slope_max = round(float(np.max(s_fin)), 3)
+        else:
+            tri_status = "not_requested"
+            tri_meta = None
 
         # Local tangent-plane East/North meters relative to region origin (exact Mars sphere radius)
         west_dx, north_dy = angular_displacement_to_metric(
@@ -847,6 +1182,8 @@ class TerrainMeshService:
             normals=normals_list,
             slope_deg=slope_list,
             roughness_tri_m=tri_list,
+            tri_status=tri_status,
+            tri_metadata=tri_meta,
             valid_vertex_count=valid_count,
             nodata_vertex_count=nodata_count,
             elevation_min_m=z_min,
@@ -1049,34 +1386,42 @@ class TerrainMeshService:
             rgba_small = np.zeros((tex_grid, tex_grid, 4), dtype=np.uint8)
             fin = np.isfinite(arr)
             if np.any(fin):
-                default_stats = self._cache_get(f"stats_default:{ds.id}") or {}
+                default_stats = self._cache_get(f"stats_default:{ds.id}")
+                if default_stats is None and (vmin is None or vmax is None):
+                    b_ref = HIRISE_DEFAULT_FOCUS_BOUNDS.get(ds.id) or {
+                        "min_lat": min_lat,
+                        "max_lat": max_lat,
+                        "min_lon": min_lon,
+                        "max_lon": max_lon,
+                    }
+                    default_stats = self._get_region_render_stats(
+                        ds.id,
+                        b_ref["min_lat"],
+                        b_ref["max_lat"],
+                        b_ref["min_lon"],
+                        b_ref["max_lon"],
+                    )
+                default_stats = default_stats or {}
                 if overlay_l == "slope":
-                    # 0 deg = emerald (#22c55e) -> 15 deg = amber (#f59e0b) -> 25+ deg = red (#ef4444)
-                    v = np.clip(np.where(fin, arr, 0.0), 0.0, 35.0)
-                    t1 = np.clip(v / 15.0, 0.0, 1.0)
-                    t2 = np.clip((v - 15.0) / 10.0, 0.0, 1.0)
-                    r_ch = np.where(v <= 15.0, 34 + t1 * (245 - 34), 245 + t2 * (239 - 245))
-                    g_ch = np.where(v <= 15.0, 197 + t1 * (158 - 197), 158 + t2 * (68 - 158))
-                    b_ch = np.where(v <= 15.0, 94 + t1 * (11 - 94), 11 + t2 * (68 - 11))
+                    s_vmin = float(vmin) if vmin is not None else 0.0
+                    s_vmax = float(vmax) if vmax is not None else 35.0
+                    s_vmax = max(s_vmin + 1.0, s_vmax)
+                    t = np.clip((np.where(fin, arr, s_vmin) - s_vmin) / (s_vmax - s_vmin), 0.0, 1.0)
+                    r_ch, g_ch, b_ch = _apply_palette_lut(t, PALETTE_STOPS["slope"]["stops"])
                 elif overlay_l == "roughness":
                     tri_r = default_stats.get("roughness_range_m") or {}
-                    e_vmin = float(vmin) if vmin is not None else float(tri_r.get("min_m", np.nanmin(arr)))
-                    e_vmax = float(vmax) if vmax is not None else max(e_vmin + 0.5, float(tri_r.get("max_m", np.nanpercentile(arr[fin], 98))))
+                    e_vmin = float(vmin) if vmin is not None else float(tri_r.get("min_m", 0.0))
+                    e_vmax = float(vmax) if vmax is not None else float(tri_r.get("max_m", 5.0))
                     e_vmax = max(e_vmin + 0.1, e_vmax)
                     t = np.clip((np.where(fin, arr, e_vmin) - e_vmin) / (e_vmax - e_vmin), 0.0, 1.0)
-                    r_ch = 20 + t * 215
-                    g_ch = 180 - t * 90
-                    b_ch = 210 - t * 40
+                    r_ch, g_ch, b_ch = _apply_palette_lut(t, PALETTE_STOPS["roughness"]["stops"])
                 else:
-                    # Elevation hypsometric tint: global region normalization across tiles
                     el_r = default_stats.get("elevation_range_m") or {}
                     e_vmin = float(vmin) if vmin is not None else float(el_r.get("min_m", np.nanmin(arr)))
-                    e_vmax = float(vmax) if vmax is not None else max(e_vmin + 1.0, float(el_r.get("max_m", np.nanmax(arr))))
+                    e_vmax = float(vmax) if vmax is not None else float(el_r.get("max_m", np.nanmax(arr)))
                     e_vmax = max(e_vmin + 1.0, e_vmax)
                     t = np.clip((np.where(fin, arr, e_vmin) - e_vmin) / (e_vmax - e_vmin), 0.0, 1.0)
-                    r_ch = 45 + t * 195
-                    g_ch = 70 + np.sin(t * math.pi) * 90 + t * 70
-                    b_ch = 140 - t * 65
+                    r_ch, g_ch, b_ch = _apply_palette_lut(t, PALETTE_STOPS["elevation"]["stops"])
                 rgba_small[..., 0] = np.clip(r_ch, 0, 255).astype(np.uint8)
                 rgba_small[..., 1] = np.clip(g_ch, 0, 255).astype(np.uint8)
                 rgba_small[..., 2] = np.clip(b_ch, 0, 255).astype(np.uint8)

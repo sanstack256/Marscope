@@ -7,7 +7,7 @@ Never generates synthetic fallback terrain surfaces.
 """
 
 import json
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query
 from app.schemas.terrain import (
     TerrainLayerMetadata,
@@ -15,7 +15,9 @@ from app.schemas.terrain import (
     TerrainSummary,
     TerrainSummaryResponse,
 )
-from app.services.container import PROCESSED_DIR, destination_service, layer_service
+from app.services.container import PROCESSED_DIR, RAW_DIR, catalog_service, destination_service, layer_service
+from app.terrain.derivatives import MultiScaleTerrainResponse, analyze_multiscale_terrain_point
+from app.terrain.optical_analysis import OpticalAnalysisResponse, analyze_optical_region
 
 router = APIRouter(prefix="/terrain", tags=["Terrain Intelligence"])
 
@@ -114,3 +116,53 @@ async def list_terrain_layers() -> List[TerrainLayerMetadata]:
         except Exception:
             continue
     return results
+
+
+@router.get("/multiscale", response_model=MultiScaleTerrainResponse)
+async def get_multiscale_terrain_derivatives(
+    lat: float = Query(..., ge=-90.0, le=90.0, description="Target latitude (deg)"),
+    lon: float = Query(..., ge=-180.0, le=360.0, description="Target longitude East (deg)"),
+    dataset_id: Optional[str] = Query(None, description="Optional DEM dataset_id"),
+    fine_radius_m: float = Query(5.0, gt=0.0, le=500.0),
+    medium_radius_m: float = Query(15.0, gt=0.0, le=1000.0),
+    relief_radius_m: float = Query(10.0, gt=0.0, le=1000.0),
+) -> MultiScaleTerrainResponse:
+    """
+    Compute traceable multi-scale terrain derivatives (slope, curvature, fine/medium TRI,
+    TPI, local relief) at a coordinate with full provenance dependency graph.
+    """
+    return analyze_multiscale_terrain_point(
+        catalog_service=catalog_service,
+        raw_dir=RAW_DIR,
+        lat=lat,
+        lon_east=lon,
+        dataset_id=dataset_id,
+        fine_radius_m=fine_radius_m,
+        medium_radius_m=medium_radius_m,
+        relief_radius_m=relief_radius_m,
+    )
+
+
+@router.get("/optical-features", response_model=OpticalAnalysisResponse)
+async def get_optical_feature_analysis(
+    dataset_id: str = Query("hirise_dteec_009149_1750", description="DEM or paired ortho dataset_id"),
+    min_lat: float = Query(..., ge=-90.0, le=90.0),
+    max_lat: float = Query(..., ge=-90.0, le=90.0),
+    min_lon: float = Query(..., ge=-180.0, le=360.0),
+    max_lon: float = Query(..., ge=-180.0, le=360.0),
+    max_candidates: int = Query(12, ge=1, le=50),
+) -> OpticalAnalysisResponse:
+    """
+    Extract Sobel edge texture and candidate optical ridges / dark hollows from
+    real HiRISE orthorectified imagery. All detections are labelled candidate-only.
+    """
+    return analyze_optical_region(
+        catalog_service=catalog_service,
+        raw_dir=RAW_DIR,
+        dataset_id=dataset_id,
+        min_lat=min_lat,
+        max_lat=max_lat,
+        min_lon=min_lon,
+        max_lon=max_lon,
+        max_candidates=max_candidates,
+    )

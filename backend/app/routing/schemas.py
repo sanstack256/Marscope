@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
+from app.science.provenance_graph import ProvenanceDependencyGraph
+
 from app.routing.models import PathAlgorithm, RoutingMode
 
 
@@ -244,6 +246,7 @@ class RouteComputeResponse(BaseModel):
     resolution_suitability: Dict[str, Any] = Field(default_factory=dict)
     limitations: List[str] = Field(default_factory=list)
     provenance: Dict[str, Any] = Field(default_factory=dict)
+    provenance_graph: Optional[ProvenanceDependencyGraph] = None
 
 
 class RouteCompareEntry(BaseModel):

@@ -1159,6 +1159,25 @@ export default function PlannerPage() {
               </div>
 
               {/* Strictly 4 Labeled Metric Groups */}
+              {activeRoute.provenance_graph && (
+                <div className="bg-[#0d111a] border border-[#1e2638] rounded-xl px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono">
+                  <div className="flex flex-wrap items-center gap-1.5 text-slate-300">
+                    <span className="px-1.5 py-0.5 rounded bg-cyan-950/60 border border-cyan-500/30 text-cyan-300 font-semibold">
+                      {activeRoute.provenance_graph.classification}
+                    </span>
+                    {activeRoute.provenance_graph.intermediate_steps.map((st, idx) => (
+                      <span key={st.step_id} className="inline-flex items-center gap-1">
+                        {idx > 0 && <span className="text-slate-600">→</span>}
+                        <span className="text-slate-200">{st.label}</span>
+                      </span>
+                    ))}
+                  </div>
+                  <span className="text-slate-400">
+                    {activeRoute.provenance_graph.input_product_ids.join(", ")} · {activeRoute.provenance_graph.input_crs}
+                  </span>
+                </div>
+              )}
+
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2.5">
                 {/* 1. Terrain Metrics */}
                 <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-3 space-y-1.5">

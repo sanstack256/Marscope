@@ -33,6 +33,8 @@ import { useLayerStore } from "../../stores/useLayerStore";
 import { useMissionStore } from "../../stores/useMissionStore";
 import { useRoutingStore } from "../../stores/useRoutingStore";
 import {
+  type MultiScaleTerrainResponse,
+  type OpticalAnalysisResponse,
   CandidateDiscoveryLocation,
   CompositionEvidence,
   CompositionIndexStatus,
@@ -70,6 +72,31 @@ export default function SurfaceExplorerPage() {
   const [rebuildingIndex, setRebuildingIndex] = useState<boolean>(false);
   const [speciesVocab, setSpeciesVocab] = useState<SpeciesRecord[]>([]);
   const [inspectedEvidence, setInspectedEvidence] = useState<CompositionEvidence | null>(null);
+  const [multiscaleData, setMultiscaleData] = useState<MultiScaleTerrainResponse | null>(null);
+  const [opticalData, setOpticalData] = useState<OpticalAnalysisResponse | null>(null);
+  const [derivedLoading, setDerivedLoading] = useState(false);
+
+  const runDerivedAnalysis = async (lat: number, lonEast: number) => {
+    setDerivedLoading(true);
+    try {
+      const dsId = useRoutingStore.getState().selectedDemDatasetId || "hirise_dteec_009149_1750";
+      const d = 0.008;
+      const [msRes, optRes] = await Promise.all([
+        fetch(
+          `${API_BASE_URL}/terrain/multiscale?lat=${lat}&lon=${lonEast}&dataset_id=${encodeURIComponent(dsId)}`,
+          { cache: "no-store" }
+        ),
+        fetch(
+          `${API_BASE_URL}/terrain/optical-features?dataset_id=${encodeURIComponent(dsId)}&min_lat=${lat - d}&max_lat=${lat + d}&min_lon=${lonEast - d}&max_lon=${lonEast + d}`,
+          { cache: "no-store" }
+        ),
+      ]);
+      if (msRes.ok) setMultiscaleData(await msRes.json());
+      if (optRes.ok) setOpticalData(await optRes.json());
+    } finally {
+      setDerivedLoading(false);
+    }
+  };
   const [evidenceLoading, setEvidenceLoading] = useState<boolean>(false);
   const [savedTargetMessage, setSavedTargetMessage] = useState<string | null>(null);
   const [sourcesAudit, setSourcesAudit] = useState<SourcesAuditResponse | null>(null);
@@ -856,6 +883,85 @@ export default function SurfaceExplorerPage() {
                           </div>
                         )}
                     </div>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void runDerivedAnalysis(
+                          selectedDestination.latitude,
+                          selectedDestination.longitude
+                        )
+                      }
+                      disabled={derivedLoading}
+                      className="w-full py-1.5 rounded bg-cyan-950/60 hover:bg-cyan-900/60 border border-cyan-500/40 text-[11px] font-medium text-cyan-200 transition-colors"
+                    >
+                      {derivedLoading
+                        ? "Deriving Multi-Scale & Optical Metrics..."
+                        : "Derive Multi-Scale Terrain & Optical Features"}
+                    </button>
+
+                    {multiscaleData && multiscaleData.available && (
+                      <div className="p-2.5 rounded-lg bg-[#090d16] border border-cyan-500/30 space-y-1.5 text-[10px] font-mono">
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold text-cyan-300">Multi-Scale Terrain</span>
+                          <span className="px-1.5 py-0.5 rounded bg-cyan-950/80 text-cyan-300 text-[9px]">
+                            MARSCOPE_DERIVED
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-1 text-slate-300">
+                          <span>TRI (r=5m):</span>
+                          <span className="text-right">
+                            {multiscaleData.tri_fine_m?.value != null
+                              ? `${multiscaleData.tri_fine_m.value.toFixed(3)} m`
+                              : multiscaleData.tri_fine_m?.status || "N/A"}
+                          </span>
+                          <span>TRI (r=15m):</span>
+                          <span className="text-right">
+                            {multiscaleData.tri_medium_m?.value != null
+                              ? `${multiscaleData.tri_medium_m.value.toFixed(3)} m`
+                              : multiscaleData.tri_medium_m?.status || "N/A"}
+                          </span>
+                          <span>Local Relief (10m):</span>
+                          <span className="text-right">
+                            {multiscaleData.local_relief_m?.value != null
+                              ? `${multiscaleData.local_relief_m.value.toFixed(2)} m`
+                              : "N/A"}
+                          </span>
+                          <span>TPI (10m):</span>
+                          <span className="text-right">
+                            {multiscaleData.tpi_m?.value != null
+                              ? `${multiscaleData.tpi_m.value.toFixed(2)} m`
+                              : "N/A"}
+                          </span>
+                          <span>Profile Curv:</span>
+                          <span className="text-right">
+                            {multiscaleData.profile_curvature_inv_m != null
+                              ? `${multiscaleData.profile_curvature_inv_m.toExponential(2)} 1/m`
+                              : "N/A"}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
+                    {opticalData && opticalData.available && (
+                      <div className="p-2.5 rounded-lg bg-[#090d16] border border-purple-500/30 space-y-1.5 text-[10px] font-mono">
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold text-purple-300">HiRISE Optical Analysis</span>
+                          <span className="px-1.5 py-0.5 rounded bg-purple-950/80 text-purple-300 text-[9px]">
+                            CANDIDATE_ONLY
+                          </span>
+                        </div>
+                        <div className="text-slate-400">
+                          Mean Sobel Edge: {opticalData.mean_sobel_edge_dn?.toFixed(2) ?? "N/A"} DN · Candidates: {opticalData.candidates.length}
+                        </div>
+                        {opticalData.candidates.slice(0, 3).map((c) => (
+                          <div key={c.feature_id} className="text-[9px] text-slate-300 flex justify-between gap-2">
+                            <span className="truncate">{c.candidate_type}</span>
+                            <span className="text-purple-300 shrink-0">z={c.local_contrast_zscore.toFixed(2)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
 
                     <button
                       type="button"
