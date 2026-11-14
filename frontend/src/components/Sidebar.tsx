@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard,
@@ -46,15 +47,25 @@ export function Sidebar() {
   return (
     <aside className="w-64 bg-[#0d111a] border-r border-[#1e2638] flex flex-col shrink-0 select-none">
       {/* Brand Header */}
-      <div className="h-16 flex items-center px-5 border-b border-[#1e2638] gap-3">
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#e25b38] to-[#992208] flex items-center justify-center font-bold text-white text-sm shadow-[0_0_15px_rgba(226,91,56,0.4)]">
-          M
+      <Link
+        href="/"
+        className="h-16 flex items-center px-5 border-b border-[#1e2638] gap-3 hover:bg-[#121723] transition-colors"
+      >
+        <div className="w-10 h-9 rounded-lg bg-[#0b0d13] border border-[#e25b38]/35 flex items-end justify-center overflow-hidden shadow-[0_0_15px_rgba(226,91,56,0.25)] shrink-0 px-0.5 pt-1.5">
+          <Image
+            src="/marscope-logo.png"
+            alt="MARSCOPE Mars Horizon Logo"
+            width={887}
+            height={329}
+            priority
+            className="w-full h-auto object-contain"
+          />
         </div>
         <div>
           <div className="text-base font-bold tracking-wider text-slate-100">{APP_NAME}</div>
           <div className="text-[10px] uppercase font-mono tracking-widest text-[#e25b38]">NASA Space Apps</div>
         </div>
-      </div>
+      </Link>
 
       {/* Navigation List */}
       <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">

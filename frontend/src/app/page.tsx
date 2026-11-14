@@ -1,4 +1,5 @@
 import Link from "next/link";
+import Image from "next/image";
 import { PageHeader } from "../components/PageHeader";
 import { StatusCard } from "../components/StatusCard";
 import { EmptyState } from "../components/EmptyState";
@@ -77,8 +78,8 @@ export default function MissionOverviewPage() {
 
       {/* Exploration Region Dossier */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 bg-[#121622] border border-[#1e2638] rounded-xl p-6">
-          <div className="flex items-center justify-between pb-4 border-b border-[#1e2638]">
+        <div className="lg:col-span-2 bg-[#121622] border border-[#1e2638] rounded-xl p-6 relative overflow-hidden">
+          <div className="relative z-10 flex items-center justify-between pb-4 border-b border-[#1e2638]">
             <div>
               <div className="text-[11px] font-mono text-[#e25b38] uppercase tracking-wider">Target Exploration Zone</div>
               <h2 className="text-lg font-bold text-slate-100 mt-0.5">{STUDY_AREA_NAME}</h2>
@@ -88,11 +89,11 @@ export default function MissionOverviewPage() {
             </span>
           </div>
 
-          <p className="text-xs text-slate-300 mt-4 leading-relaxed">
+          <p className="relative z-10 text-xs text-slate-300 mt-4 leading-relaxed">
             The boxwork structures on Mount Sharp (Aeolis Mons) represent mineralized fracture networks formed by ancient subsurface groundwater circulation. As wind erosion removed the surrounding softer bedrock over billions of years, these cemented veins were left standing in positive relief. MARSCOPE calculates traversability across these ridges while maximizing scientific target acquisition.
           </p>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-6 pt-4 border-t border-[#1a2130]">
+          <div className="relative z-10 grid grid-cols-2 sm:grid-cols-4 gap-4 mt-6 pt-4 border-t border-[#1a2130]">
             <div>
               <div className="text-[10px] font-mono uppercase text-slate-500">Min Latitude</div>
               <div className="text-sm font-mono font-bold text-slate-200 mt-0.5">-5.5° S</div>
@@ -110,6 +111,15 @@ export default function MissionOverviewPage() {
               <div className="text-sm font-mono font-bold text-slate-200 mt-0.5">138.0° E</div>
             </div>
           </div>
+
+          <Image
+            src="/marscope-logo.png"
+            alt=""
+            aria-hidden="true"
+            width={887}
+            height={329}
+            className="absolute bottom-0 right-4 w-64 h-auto opacity-15 pointer-events-none select-none"
+          />
         </div>
 
         {/* Quick System Navigation */}
