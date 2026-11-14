@@ -40,3 +40,12 @@ To preserve absolute scientific authenticity:
   2. *Empirical Derived Products* (e.g., DEM-calculated slope angles).
   3. *Engineering & Mission Assumptions* (e.g., astronaut walking pace, suit mass, safety reserve multipliers).
 - **Graceful Missing Data Handling:** Where high-resolution coverage is absent (e.g., HiRISE DTM gap), the system must explicitly present an informative "Coarse Resolution / Data Gap" state rather than silently interpolating or hallucinating terrain.
+
+---
+
+## 4. Prompt 4 Zero-Fabrication Enforcement in Composition Discovery
+
+1. **No Synthetic Coordinate Fallback:** Products without verified coordinates (e.g., REMS telemetry, unlinked ChemCam PSVs, or CheMin drill RMCs missing from JPL `MSL_waypoints.json`) are never assigned Gale Crater defaults (`-4.65°, 137.42°`). Unlocated composition evidence is labeled `EvidenceStatus.UNLOCATED` and counted in `unlocated_matches_count` without entering spatial candidate maps.
+2. **12-Stage Validation & Rejection Audit Log:** Every ingested row passes through 12 sequential gates (`validate_composition_evidence`): dataset identity, non-composition instrument exclusion, calibration/passive-DN exclusion, LIBS vs XRD methodology check, controlled vocabulary check, null/NaN/negative/`<LOD` rejection, physical `[0, 100] wt%` bounds, unit normalization, uncertainty integrity, IAU2000 CRS + provenance check, quality flagging, and final admissibility. Failed records emit permanent `RejectionRecord` entries queryable via `GET /api/composition/rejected`.
+3. **Strict Target Provenance Demarcation:** Targets created from verified index hits carry `target_status = "evidence_backed"` with immutable `evidence_ids`, whereas manual coordinates without backing composition evidence carry `target_status = "manual_unverified_administrative"`.
+4. **Honest Orbital Spectral Status:** When no localized MRO CRISM mineral cube is present, the composition index reports `crism_status = "unavailable_no_validated_mineral_cube"` rather than implying orbital mineral coverage.

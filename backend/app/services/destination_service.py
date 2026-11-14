@@ -9,7 +9,7 @@ processed terrain GeoTIFFs without ever inventing elevation or fake mineral occu
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 import numpy as np
 import rasterio
 from app.geospatial.crs import (
@@ -22,6 +22,8 @@ from app.geospatial.crs import (
 from app.ingestion.catalog import DatasetCatalogService
 from app.schemas.dataset import VerificationState
 from app.schemas.destination import (
+    CompositionOccurrence,
+    CompositionSearchRequest,
     CompositionSearchResponse,
     DatasetCoverageMatch,
     DestinationEvaluationResponse,
@@ -29,27 +31,65 @@ from app.schemas.destination import (
     TerrainPointAssessment,
 )
 from app.schemas.terrain import TerrainPointResponse
+from app.science.composition.search import (
+    CompositionSearchService,
+    StructuredCompositionQuery,
+)
 from app.terrain.aspect import calculate_aspect
 from app.terrain.roughness import calculate_roughness_tri
 from app.terrain.slope import calculate_slope
 
 
 class DestinationEvaluationService:
-    def __init__(self, catalog_service: DatasetCatalogService, processed_dir: Path):
+    def __init__(
+        self,
+        catalog_service: DatasetCatalogService,
+        processed_dir: Path,
+        composition_search_service: Optional[CompositionSearchService] = None,
+        localization_service: Optional[Any] = None,
+    ):
         self.catalog_service = catalog_service
         self.processed_dir = processed_dir
+        self.composition_search_service = composition_search_service
+        self.localization_service = localization_service
 
-    def _point_covers_coverage(self, lat: float, lon_east: float, min_lat: float, max_lat: float, min_lon: float, max_lon: float) -> bool:
+    def _point_covers_coverage(
+        self,
+        lat: float,
+        lon_east: float,
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+        longitude_range: str = "unknown",
+    ) -> bool:
         if not (min_lat <= lat <= max_lat):
             return False
-        # Normalize both ranges cleanly for 0..360 vs -180..180
-        lon_180 = normalize_longitude_180(lon_east)
+
+        # Normalize query & bounds cleanly with antimeridian wrap awareness
+        if abs(max_lon - min_lon) >= 360.0 - 1e-6:
+            return True
+
         lon_360 = normalize_longitude_360(lon_east)
-        if max_lon > 180.0:
-            return min_lon <= lon_360 <= max_lon
-        if min_lon < 0.0:
-            return min_lon <= lon_180 <= max_lon
-        return (min_lon <= lon_360 <= max_lon) or (min_lon <= lon_180 <= max_lon)
+        lon_180 = normalize_longitude_180(lon_east)
+
+        if longitude_range == "[0, 360]" or max_lon > 180.0:
+            b_min = normalize_longitude_360(min_lon)
+            b_max = 360.0 if abs(max_lon - 360.0) < 1e-6 else normalize_longitude_360(max_lon)
+            if b_min <= b_max:
+                return b_min <= lon_360 <= b_max
+            # Antimeridian wrap in [0, 360)
+            return lon_360 >= b_min or lon_360 <= b_max
+
+        if longitude_range == "[-180, 180]" or min_lon < 0.0:
+            if min_lon <= max_lon:
+                return min_lon <= lon_180 <= max_lon
+            # Antimeridian crossing in [-180, 180], e.g. [170, -170]
+            return lon_180 >= min_lon or lon_180 <= max_lon
+
+        if min_lon <= max_lon:
+            return (min_lon <= lon_360 <= max_lon) or (min_lon <= lon_180 <= max_lon)
+        return (lon_360 >= min_lon or lon_360 <= max_lon) or (lon_180 >= min_lon or lon_180 <= max_lon)
 
     def sample_processed_terrain_point(
         self,
@@ -189,25 +229,48 @@ class DestinationEvaluationService:
             longitude_direction=req.longitude_direction,
         )
 
-        matches: List[DatasetCoverageMatch] = []
+        verified_matches: List[DatasetCoverageMatch] = []
+        unverified_candidates: List[DatasetCoverageMatch] = []
         for ds in self.catalog_service.list_datasets():
             cov = ds.coverage
-            if self._point_covers_coverage(lat, lon_east, cov.min_latitude, cov.max_latitude, cov.min_longitude, cov.max_longitude):
-                is_eval_ready = ds.status.value in {"processed", "available", "downloaded", "validated"}
-                matches.append(
-                    DatasetCoverageMatch(
-                        dataset_id=ds.id,
-                        product_id=ds.product_id,
-                        product_title=ds.product_title,
-                        product_type=ds.product_type,
-                        horizontal_resolution_meters=ds.horizontal_resolution_meters,
-                        available_for_evaluation=is_eval_ready,
-                        verification_state=ds.verification.processing_verification
-                        if "DEM" in ds.product_type.upper()
-                        else ds.verification.archive_availability,
-                        notes=f"Lifecycle status: {ds.status.value}",
-                    )
+            if self._point_covers_coverage(
+                lat,
+                lon_east,
+                cov.min_latitude,
+                cov.max_latitude,
+                cov.min_longitude,
+                cov.max_longitude,
+                longitude_range=cov.longitude_range,
+            ):
+                cov_verified = (
+                    ds.verification.coverage_verification == VerificationState.VERIFIED
+                    and validate_mars_crs(ds.coordinate_reference_system)
                 )
+                provenance_str = (
+                    f"{ds.source_archive} | CRS={ds.coordinate_reference_system} | {ds.map_projection}"
+                )
+                entry = DatasetCoverageMatch(
+                    dataset_id=ds.id,
+                    product_id=ds.product_id,
+                    product_title=ds.product_title,
+                    product_type=ds.product_type,
+                    horizontal_resolution_meters=ds.horizontal_resolution_meters,
+                    available_for_evaluation=cov_verified and ds.status.value in {"processed", "available", "downloaded", "validated"},
+                    coverage_verified=cov_verified,
+                    verification_state=ds.verification.coverage_verification,
+                    footprint_provenance=provenance_str if cov_verified else None,
+                    crs=ds.coordinate_reference_system,
+                    longitude_range=cov.longitude_range,
+                    notes=(
+                        f"Verified spatial footprint (status: {ds.status.value})"
+                        if cov_verified
+                        else f"UNVERIFIED catalog envelope only (coverage_verification={ds.verification.coverage_verification.value}); verify .LBL/product before relying on coverage."
+                    ),
+                )
+                if cov_verified:
+                    verified_matches.append(entry)
+                else:
+                    unverified_candidates.append(entry)
 
         point_terrain = self.sample_processed_terrain_point(
             lat,
@@ -235,12 +298,17 @@ class DestinationEvaluationService:
         warnings: List[str] = list(point_terrain.warnings)
         if point_terrain.available:
             eval_status = "terrain_evaluable"
-        elif matches:
-            eval_status = "catalog_coverage_only_dem_unavailable"
-            warnings.append("Catalog products cover this coordinate, but no validated local DEM raster is processed yet.")
+        elif verified_matches:
+            eval_status = "verified_coverage_dem_unavailable"
+            warnings.append("Verified dataset coverage overlaps this coordinate, but no validated local DEM raster is processed yet.")
+        elif unverified_candidates:
+            eval_status = "unverified_catalog_candidates_only"
+            warnings.append(
+                "Only unverified catalog placeholders overlap this coordinate (coverage_verification != VERIFIED). Download & inspect .LBL/product to confirm real coverage."
+            )
         else:
             eval_status = "insufficient_data_coverage"
-            warnings.append("No catalog dataset or processed raster covers this coordinate.")
+            warnings.append("No verified dataset or processed raster covers this coordinate.")
 
         return DestinationEvaluationResponse(
             valid=True,
@@ -254,24 +322,101 @@ class DestinationEvaluationService:
             label=req.label,
             can_evaluate=point_terrain.available,
             evaluation_status=eval_status,
-            covering_datasets=matches,
+            covering_datasets=verified_matches,
+            unverified_catalog_candidates=unverified_candidates,
             terrain=terrain_assessment,
             warnings=warnings,
             selected_at_utc=datetime.now(timezone.utc),
         )
 
-    def search_composition(self, query: str) -> CompositionSearchResponse:
+    def search_composition(self, request: Union[str, CompositionSearchRequest]) -> CompositionSearchResponse:
         """
-        Contract for later element/mineral composition search (CRISM / ChemCam / CheMin index).
-        Returns explicit unavailable index state and zero fabricated results.
+        Execute verified geochemical & mineralogical spatial discovery against the persistent
+        SQLite composition index. Never fabricates results when the index is unbuilt or empty.
         """
+        req = (
+            CompositionSearchRequest(query=request.strip())
+            if isinstance(request, str)
+            else request
+        )
+        if self.composition_search_service is None:
+            return CompositionSearchResponse(
+                query=req.query,
+                index_available=False,
+                total_matches=0,
+                results=[],
+                unavailable_reason=(
+                    "Geochemical & mineralogical spatial search index is not yet built. "
+                    "Requires verified APXS/ChemCam MOC/CheMin/CRISM catalog ingestion."
+                ),
+            )
+
+        astro_lat = req.astronaut_latitude
+        astro_lon = req.astronaut_longitude
+        if (astro_lat is None or astro_lon is None) and req.use_active_astronaut_position and self.localization_service is not None:
+            loc_status = self.localization_service.get_status()
+            pos = loc_status.current_position
+            if pos and pos.latitude is not None and pos.longitude is not None:
+                astro_lat = pos.latitude
+                astro_lon = pos.longitude
+
+        structured = self.composition_search_service.search(
+            StructuredCompositionQuery(
+                query=req.query,
+                search_mode=req.search_mode,
+                include_element_bearing_minerals=req.include_element_bearing_minerals,
+                astronaut_latitude=astro_lat,
+                astronaut_longitude=astro_lon,
+                max_distance_m=req.max_distance_m,
+                instruments=req.instruments,
+                sol_min=req.sol_min,
+                sol_max=req.sol_max,
+                min_value=req.min_value,
+                exclude_low_quality=req.exclude_low_quality,
+                sort_by=req.sort_by,
+                limit=req.limit,
+                offset=req.offset,
+            )
+        )
+
+        occurrences = [
+            CompositionOccurrence(
+                evidence_id=h.evidence.evidence_id,
+                observation_id=h.evidence.source_record_ref,
+                dataset_id=h.evidence.source_dataset_id,
+                product_id=h.evidence.product_id,
+                instrument_id=h.evidence.instrument_id,
+                target_name=h.evidence.target_name,
+                sol=h.evidence.sol,
+                latitude=h.evidence.latitude,
+                longitude=h.evidence.longitude_east,
+                elevation_m=h.evidence.elevation_m,
+                crs=h.evidence.crs,
+                measured_species=h.evidence.canonical_species_id,
+                evidence_type=h.evidence.evidence_type.value,
+                match_type=h.match_type.value,
+                value=h.evidence.normalized_value,
+                units=h.evidence.normalized_unit,
+                uncertainty=h.evidence.uncertainty_value,
+                distance_from_astronaut_m=h.distance_from_astronaut_m,
+                composite_rank_score=h.ranking.composite_rank_score,
+                coordinate_source=h.evidence.coordinate_source,
+                source_reference=h.evidence.source_reference,
+            )
+            for h in structured.hits
+        ]
+
         return CompositionSearchResponse(
-            query=query.strip(),
-            index_available=False,
-            total_matches=0,
-            results=[],
-            unavailable_reason=(
-                "Geochemical & mineralogical spatial search index is not yet built. "
-                "Requires verified ChemCam/CheMin/CRISM mineral occurrence catalog ingestion."
-            ),
+            query=req.query,
+            index_available=structured.index_available,
+            total_matches=structured.total_located_matches,
+            unlocated_matches_count=structured.unlocated_matches_count,
+            results=occurrences,
+            hits=structured.hits,
+            candidate_locations=structured.candidate_locations,
+            resolution=structured.resolution,
+            index_status=structured.index_status,
+            astronaut_position_used=structured.astronaut_position_used,
+            unavailable_reason=structured.unavailable_reason,
+            scientific_warnings=structured.scientific_warnings,
         )

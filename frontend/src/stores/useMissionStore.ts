@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { API_BASE_URL } from "../lib/constants";
 import {
+  CandidateDiscoveryLocation,
+  CompositionSearchResponse,
   DestinationEvaluationResponse,
   LocalizationStatusResponse,
   PlanningMode,
@@ -23,12 +25,20 @@ interface MissionStoreState {
   localizationStatus: LocalizationStatusResponse | null;
   localizationError: string | null;
 
+  // Composition discovery markers synchronized with MarsGlobeViewer
+  compositionSearchResponse: CompositionSearchResponse | null;
+  compositionCandidates: CandidateDiscoveryLocation[];
+  selectedCandidateId: string | null;
+
   setPlanningMode: (mode: PlanningMode) => void;
   setDuration: (hours: number) => void;
   setSafetyReserve: (factor: number) => void;
   addTarget: (target: ScienceTarget) => void;
   removeTarget: (targetId: string) => void;
   clearTargets: () => void;
+
+  setCompositionResults: (response: CompositionSearchResponse | null) => void;
+  selectCompositionCandidate: (candidateId: string | null) => void;
 
   evaluateDestination: (lat: number, lon: number, label?: string, signal?: AbortSignal) => Promise<void>;
   clearDestination: () => void;
@@ -52,6 +62,10 @@ export const useMissionStore = create<MissionStoreState>((set) => ({
   localizationStatus: null,
   localizationError: null,
 
+  compositionSearchResponse: null,
+  compositionCandidates: [],
+  selectedCandidateId: null,
+
   setPlanningMode: (mode) => set({ planningMode: mode }),
   setDuration: (hours) => set({ maxDurationHours: hours }),
   setSafetyReserve: (factor) => set({ safetyReserveFactor: factor }),
@@ -66,6 +80,14 @@ export const useMissionStore = create<MissionStoreState>((set) => ({
       selectedTargets: state.selectedTargets.filter((t) => t.id !== targetId),
     })),
   clearTargets: () => set({ selectedTargets: [] }),
+
+  setCompositionResults: (response) =>
+    set({
+      compositionSearchResponse: response,
+      compositionCandidates: response?.candidate_locations ?? [],
+      selectedCandidateId: response?.candidate_locations?.[0]?.candidate_id ?? null,
+    }),
+  selectCompositionCandidate: (candidateId) => set({ selectedCandidateId: candidateId }),
 
   evaluateDestination: async (lat, lon, label, signal) => {
     set({ destinationLoading: true, destinationError: null });

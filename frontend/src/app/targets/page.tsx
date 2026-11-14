@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Database, RefreshCw, Telescope } from "lucide-react";
+import { Database, RefreshCw, ShieldAlert, ShieldCheck, Sparkles, Telescope } from "lucide-react";
 import { EmptyState } from "../../components/EmptyState";
 import { PageHeader } from "../../components/PageHeader";
 import { API_BASE_URL } from "../../lib/constants";
@@ -12,6 +12,10 @@ export default function TargetExplorerPage() {
   const [targets, setTargets] = useState<ScienceTarget[]>([]);
   const [observations, setObservations] = useState<Observation[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [generating, setGenerating] = useState<boolean>(false);
+  const [genQuery, setGenQuery] = useState<string>("Fe");
+  const [includeHostMinerals, setIncludeHostMinerals] = useState<boolean>(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function loadData() {
@@ -54,12 +58,44 @@ export default function TargetExplorerPage() {
     };
   }, []);
 
+  async function handleGenerateTargets(e: React.FormEvent) {
+    e.preventDefault();
+    if (!genQuery.trim()) return;
+    setGenerating(true);
+    setError(null);
+    setStatusMessage(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/targets/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          query: genQuery.trim(),
+          max_targets: 8,
+          include_element_bearing_minerals: includeHostMinerals,
+        }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `HTTP ${res.status} generating targets`);
+      }
+      const created: ScienceTarget[] = await res.json();
+      setStatusMessage(
+        `Generated ${created.length} evidence-backed target(s) for "${genQuery.trim()}".`
+      );
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to generate evidence-backed targets");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="Scientific Targets & Observations"
         badge={`${targets.length} Targets · ${observations.length} Observations`}
-        description="Parsed NASA in-situ rover measurements and verified science targets. Displays zero synthetic records when no observation product is acquired locally."
+        description="Evidence-backed targets generated from the verified Composition Spatial Index alongside parsed NASA in-situ rover measurements. Manual unverified registrations are strictly separated."
         actions={
           <button
             type="button"
@@ -73,9 +109,104 @@ export default function TargetExplorerPage() {
         }
       />
 
+      {/* Generate Targets from Composition Index */}
+      <form
+        onSubmit={handleGenerateTargets}
+        className="bg-[#121622] border border-[#1e2638] rounded-xl p-4 flex flex-wrap items-center gap-3"
+      >
+        <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+          <Sparkles className="w-4 h-4 text-[#e25b38]" />
+          <span>Generate Evidence-Backed Targets:</span>
+        </div>
+        <input
+          type="text"
+          value={genQuery}
+          onChange={(e) => setGenQuery(e.target.value)}
+          placeholder="e.g., Fe, SO3, gypsum, hematite"
+          className="px-2.5 py-1.5 text-xs rounded bg-[#0d111a] border border-[#252f44] text-slate-100 w-48"
+        />
+        <label className="flex items-center gap-1.5 text-[11px] text-slate-300 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={includeHostMinerals}
+            onChange={(e) => setIncludeHostMinerals(e.target.checked)}
+          />
+          <span>+Host minerals</span>
+        </label>
+        <button
+          type="submit"
+          disabled={generating}
+          className="px-3 py-1.5 rounded-lg bg-[#e25b38] hover:bg-[#cf4f2e] text-xs font-semibold text-white disabled:opacity-50"
+        >
+          {generating ? "Generating..." : "Generate from Index"}
+        </button>
+      </form>
+
+      {statusMessage && (
+        <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-700/50 text-xs text-emerald-200">
+          {statusMessage}
+        </div>
+      )}
+
       {error && (
         <div className="p-4 rounded-xl bg-red-950/40 border border-red-800/50 text-xs text-red-200">
           {error}
+        </div>
+      )}
+
+      {targets.length > 0 && (
+        <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-5 space-y-3">
+          <div className="text-sm font-bold text-slate-100">
+            Registered Scientific Targets ({targets.length})
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {targets.map((tgt) => {
+              const isEvidenceBacked = tgt.target_status === "evidence_backed";
+              return (
+                <div
+                  key={tgt.id}
+                  className="p-3.5 rounded-lg bg-[#0d111a] border border-[#1d2536] space-y-2"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="text-xs font-bold text-slate-100">{tgt.name}</div>
+                      <div className="text-[10px] font-mono text-slate-400">
+                        {tgt.latitude.toFixed(4)}°, {tgt.longitude.toFixed(4)}°E · {tgt.crs || "IAU2000:49900"}
+                      </div>
+                    </div>
+                    <span
+                      className={`inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded border shrink-0 ${
+                        isEvidenceBacked
+                          ? "bg-emerald-950/50 border-emerald-700/60 text-emerald-300"
+                          : "bg-amber-950/50 border-amber-700/60 text-amber-300"
+                      }`}
+                    >
+                      {isEvidenceBacked ? (
+                        <ShieldCheck className="w-3 h-3" />
+                      ) : (
+                        <ShieldAlert className="w-3 h-3" />
+                      )}
+                      <span>
+                        {isEvidenceBacked ? "evidence_backed" : "manual_unverified_administrative"}
+                      </span>
+                    </span>
+                  </div>
+                  <div className="text-[11px] font-mono text-slate-300">
+                    Species: {tgt.matched_species || tgt.geology_type} · Rank Score:{" "}
+                    {tgt.scientific_value.toFixed(3)} · Instr: {tgt.instrument_source}
+                    {tgt.distance_from_astronaut_m != null &&
+                      ` · Dist: ${(tgt.distance_from_astronaut_m / 1000).toFixed(2)} km`}
+                  </div>
+                  {tgt.explanation && (
+                    <div className="text-[10px] text-slate-400 leading-relaxed">{tgt.explanation}</div>
+                  )}
+                  <div className="text-[10px] font-mono text-slate-500">
+                    Evidence IDs: {tgt.evidence_ids?.length ? tgt.evidence_ids.slice(0, 4).join(", ") : "None (administrative)"}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 

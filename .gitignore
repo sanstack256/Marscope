@@ -79,6 +79,12 @@ datasets/processed/*
 !datasets/processed/.gitkeep
 datasets/manifests/*
 !datasets/manifests/.gitkeep
+datasets/index/*
+!datasets/index/.gitkeep
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
 *.tif
 *.tiff
 *.TIF

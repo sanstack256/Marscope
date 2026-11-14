@@ -1,0 +1,584 @@
+"""
+MARSCOPE Persistent SQLite Spatial Composition Index
+Martian Surface Intelligence & Exploration System
+
+Stores validated geochemical and mineralogical CompositionEvidence in SQLite with:
+  - R*Tree spatial MBR indexing (plus B-tree fallback) in IAU2000 [0, 360) East longitude
+  - Atomic generation cutover (failed builds never corrupt active index)
+  - SHA-256 source-file checksum tracking and drift detection
+  - Persisted validation audits and rejected-record logs
+  - Automatic full or incremental discovery across raw NASA PDS artifacts
+"""
+
+from datetime import datetime, timezone
+import hashlib
+import json
+from pathlib import Path
+import sqlite3
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+from app.geospatial.crs import normalize_longitude_360
+from app.science.composition.adapters import (
+    ApxsEvidenceAdapter,
+    CheMinEvidenceAdapter,
+    ChemCamEvidenceAdapter,
+    CrismEvidenceAdapter,
+    EnvironmentalExclusionAdapter,
+)
+from app.science.composition.models import (
+    CompositionEvidence,
+    CompositionIndexStatus,
+    RejectionRecord,
+)
+from app.science.coordinate_association import CoordinateAssociationService
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+class CompositionSpatialIndex:
+    """Persistent, transaction-safe SQLite spatial index for verified planetary composition."""
+
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.rtree_enabled = self._init_schema()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA foreign_keys=ON;")
+        return conn
+
+    def _init_schema(self) -> bool:
+        with self._connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS index_generations (
+                    generation_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL,
+                    source_manifest_checksum TEXT NOT NULL,
+                    evidence_count INTEGER NOT NULL DEFAULT 0,
+                    located_count INTEGER NOT NULL DEFAULT 0,
+                    unlocated_count INTEGER NOT NULL DEFAULT 0,
+                    rejected_count INTEGER NOT NULL DEFAULT 0,
+                    crism_status TEXT NOT NULL DEFAULT 'unavailable_no_validated_mineral_cube',
+                    notes_json TEXT NOT NULL DEFAULT '[]'
+                );
+
+                CREATE TABLE IF NOT EXISTS ingested_products (
+                    generation_id TEXT NOT NULL,
+                    dataset_id TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    sha256_checksum TEXT NOT NULL,
+                    record_count INTEGER NOT NULL DEFAULT 0,
+                    rejected_count INTEGER NOT NULL DEFAULT 0,
+                    ingested_at_utc TEXT NOT NULL,
+                    PRIMARY KEY (generation_id, product_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS composition_evidence (
+                    row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    generation_id TEXT NOT NULL,
+                    evidence_id TEXT NOT NULL,
+                    source_dataset_id TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    instrument_id TEXT NOT NULL,
+                    target_name TEXT,
+                    sol INTEGER,
+                    canonical_species_id TEXT NOT NULL,
+                    species_category TEXT NOT NULL,
+                    evidence_type TEXT NOT NULL,
+                    evidence_status TEXT NOT NULL,
+                    raw_value REAL,
+                    raw_unit TEXT,
+                    normalized_value REAL,
+                    normalized_unit TEXT,
+                    uncertainty_value REAL,
+                    quality_flag TEXT,
+                    location_verified INTEGER NOT NULL DEFAULT 0,
+                    latitude REAL,
+                    longitude_east REAL,
+                    min_lat REAL,
+                    max_lat REAL,
+                    min_lon_east REAL,
+                    max_lon_east REAL,
+                    payload_json TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_ev_gen_species_loc
+                    ON composition_evidence (generation_id, canonical_species_id, location_verified);
+                CREATE INDEX IF NOT EXISTS idx_ev_gen_inst
+                    ON composition_evidence (generation_id, instrument_id);
+                CREATE INDEX IF NOT EXISTS idx_ev_gen_target
+                    ON composition_evidence (generation_id, target_name);
+                CREATE INDEX IF NOT EXISTS idx_ev_gen_bbox
+                    ON composition_evidence (generation_id, location_verified, min_lat, max_lat, min_lon_east, max_lon_east);
+
+                CREATE TABLE IF NOT EXISTS rejected_records (
+                    row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    generation_id TEXT NOT NULL,
+                    rejection_id TEXT NOT NULL,
+                    source_dataset_id TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    instrument_id TEXT NOT NULL,
+                    rejection_stage INTEGER NOT NULL,
+                    rejection_code TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_rej_gen
+                    ON rejected_records (generation_id, rejection_code);
+                """
+            )
+            rtree_ok = False
+            try:
+                conn.execute(
+                    """
+                    CREATE VIRTUAL TABLE IF NOT EXISTS evidence_rtree USING rtree(
+                        row_id,
+                        min_lon, max_lon,
+                        min_lat, max_lat
+                    );
+                    """
+                )
+                rtree_ok = True
+            except sqlite3.OperationalError:
+                rtree_ok = False
+            conn.commit()
+            return rtree_ok
+
+    def get_active_generation(self) -> Optional[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM index_generations WHERE status = 'active' ORDER BY created_at_utc DESC LIMIT 1"
+            ).fetchone()
+
+    def publish_generation(
+        self,
+        evidence_records: List[CompositionEvidence],
+        rejected_records: List[RejectionRecord],
+        product_manifests: Optional[List[Dict[str, Any]]] = None,
+        crism_status: str = "unavailable_no_validated_mineral_cube",
+        notes: Optional[List[str]] = None,
+        generation_id: Optional[str] = None,
+    ) -> CompositionIndexStatus:
+        """
+        Atomically publish a validated composition index generation in a single transaction.
+        If any insertion error occurs, rolls back completely leaving the previous generation active.
+        """
+        now_utc = datetime.now(timezone.utc).isoformat()
+        gen_id = generation_id or f"gen_{hashlib.sha256(f'{now_utc}|{len(evidence_records)}'.encode()).hexdigest()[:12]}"
+        manifests = product_manifests or []
+        manifest_digest = hashlib.sha256(
+            json.dumps(
+                sorted(
+                    [(m.get("product_id", ""), m.get("sha256_checksum", "")) for m in manifests]
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+
+        located_count = sum(1 for e in evidence_records if e.location_verified)
+        unlocated_count = len(evidence_records) - located_count
+
+        with self._connect() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE;")
+                conn.execute(
+                    """
+                    INSERT INTO index_generations (
+                        generation_id, status, created_at_utc, source_manifest_checksum,
+                        evidence_count, located_count, unlocated_count, rejected_count,
+                        crism_status, notes_json
+                    ) VALUES (?, 'building', ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        gen_id,
+                        now_utc,
+                        manifest_digest,
+                        len(evidence_records),
+                        located_count,
+                        unlocated_count,
+                        len(rejected_records),
+                        crism_status,
+                        json.dumps(notes or []),
+                    ),
+                )
+
+                for m in manifests:
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO ingested_products (
+                            generation_id, dataset_id, product_id, file_path,
+                            sha256_checksum, record_count, rejected_count, ingested_at_utc
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            gen_id,
+                            m["dataset_id"],
+                            m["product_id"],
+                            m["file_path"],
+                            m["sha256_checksum"],
+                            int(m.get("record_count", 0)),
+                            int(m.get("rejected_count", 0)),
+                            now_utc,
+                        ),
+                    )
+
+                for ev in evidence_records:
+                    ev_copy = ev.model_copy(update={"generation_id": gen_id})
+                    lon_360 = normalize_longitude_360(ev_copy.longitude_east) if ev_copy.longitude_east is not None else None
+                    min_lon = normalize_longitude_360(ev_copy.min_lon_east) if ev_copy.min_lon_east is not None else lon_360
+                    max_lon = normalize_longitude_360(ev_copy.max_lon_east) if ev_copy.max_lon_east is not None else lon_360
+                    cur = conn.execute(
+                        """
+                        INSERT INTO composition_evidence (
+                            generation_id, evidence_id, source_dataset_id, product_id,
+                            instrument_id, target_name, sol, canonical_species_id,
+                            species_category, evidence_type, evidence_status,
+                            raw_value, raw_unit, normalized_value, normalized_unit,
+                            uncertainty_value, quality_flag, location_verified,
+                            latitude, longitude_east, min_lat, max_lat,
+                            min_lon_east, max_lon_east, payload_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            gen_id,
+                            ev_copy.evidence_id,
+                            ev_copy.source_dataset_id,
+                            ev_copy.product_id,
+                            ev_copy.instrument_id,
+                            ev_copy.target_name,
+                            ev_copy.sol,
+                            ev_copy.canonical_species_id,
+                            ev_copy.species_category.value,
+                            ev_copy.evidence_type.value,
+                            ev_copy.evidence_status.value,
+                            ev_copy.raw_value,
+                            ev_copy.raw_unit,
+                            ev_copy.normalized_value,
+                            ev_copy.normalized_unit,
+                            ev_copy.uncertainty_value,
+                            ev_copy.quality_flag,
+                            1 if ev_copy.location_verified else 0,
+                            ev_copy.latitude,
+                            lon_360,
+                            ev_copy.min_lat if ev_copy.min_lat is not None else ev_copy.latitude,
+                            ev_copy.max_lat if ev_copy.max_lat is not None else ev_copy.latitude,
+                            min_lon,
+                            max_lon,
+                            ev_copy.model_dump_json(),
+                        ),
+                    )
+                    row_id = cur.lastrowid
+                    if (
+                        self.rtree_enabled
+                        and ev_copy.location_verified
+                        and ev_copy.latitude is not None
+                        and min_lon is not None
+                        and max_lon is not None
+                    ):
+                        mn_lat = ev_copy.min_lat if ev_copy.min_lat is not None else ev_copy.latitude
+                        mx_lat = ev_copy.max_lat if ev_copy.max_lat is not None else ev_copy.latitude
+                        if min_lon <= max_lon:
+                            conn.execute(
+                                "INSERT INTO evidence_rtree (row_id, min_lon, max_lon, min_lat, max_lat) VALUES (?, ?, ?, ?, ?)",
+                                (row_id, min_lon, max_lon, mn_lat, mx_lat),
+                            )
+
+                for rej in rejected_records:
+                    conn.execute(
+                        """
+                        INSERT INTO rejected_records (
+                            generation_id, rejection_id, source_dataset_id, product_id,
+                            instrument_id, rejection_stage, rejection_code, reason, payload_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            gen_id,
+                            rej.rejection_id,
+                            rej.source_dataset_id,
+                            rej.product_id,
+                            rej.instrument_id,
+                            rej.rejection_stage,
+                            rej.rejection_code,
+                            rej.reason,
+                            rej.model_dump_json(),
+                        ),
+                    )
+
+                # Atomic cutover: supersede prior active generations and activate new one
+                conn.execute("UPDATE index_generations SET status = 'superseded' WHERE status = 'active'")
+                conn.execute("UPDATE index_generations SET status = 'active' WHERE generation_id = ?", (gen_id,))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+        return self.get_status()
+
+    def rebuild_from_raw_directory(
+        self,
+        raw_dir: Path,
+        processed_dir: Path,
+    ) -> CompositionIndexStatus:
+        """
+        Discover and parse all verified NASA PDS raw artifacts inside raw_dir, associate
+        documented coordinates via JPL MSL_waypoints.json when present, run the 12-stage
+        validation pipeline on every candidate, and atomically publish a fresh SQLite index.
+        """
+        coord_svc = CoordinateAssociationService()
+        wp_candidates = sorted(raw_dir.glob("*waypoints*.json"))
+        notes: List[str] = []
+        if wp_candidates:
+            wp_count = coord_svc.load_waypoints_geojson(wp_candidates[0])
+            notes.append(f"Loaded {wp_count} JPL MSL traverse waypoints from {wp_candidates[0].name}.")
+        else:
+            notes.append("No JPL MSL_waypoints.json file in raw_dir; RMC coordinate joins will mark records unlocated.")
+
+        evidence_all: List[CompositionEvidence] = []
+        rejected_all: List[RejectionRecord] = []
+        manifests: List[Dict[str, Any]] = []
+
+        if raw_dir.exists():
+            # 1. APXS Supplement CSVs
+            for csv_path in sorted(raw_dir.glob("*2021je007171r*.csv")) + sorted(raw_dir.glob("*apxs*.csv")):
+                acc, rej = ApxsEvidenceAdapter.adapt_csv(
+                    csv_path,
+                    source_dataset_id="msl_apxs_supplement_sols_0_3076",
+                    product_id=csv_path.stem.upper(),
+                    provenance_url="https://pds-geosciences.wustl.edu/msl/urn-nasa-pds-msl_apxs_supplement_sols_0_3076/data/ds01_2021je007171r.csv",
+                )
+                evidence_all.extend(acc)
+                rejected_all.extend(rej)
+                manifests.append(
+                    {
+                        "dataset_id": "msl_apxs_supplement_sols_0_3076",
+                        "product_id": csv_path.stem.upper(),
+                        "file_path": str(csv_path),
+                        "sha256_checksum": _sha256_file(csv_path),
+                        "record_count": len(acc),
+                        "rejected_count": len(rej),
+                    }
+                )
+
+            # 2. ChemCam MOC Tables
+            for moc_csv in sorted(raw_dir.glob("moc_*.csv")):
+                lbl = moc_csv.with_suffix(".lbl")
+                if not lbl.exists():
+                    lbl = moc_csv.with_suffix(".LBL")
+                acc, rej = ChemCamEvidenceAdapter.adapt_moc_csv(
+                    moc_csv,
+                    label_path=lbl if lbl.exists() else None,
+                    source_dataset_id=f"msl_chemcam_{moc_csv.stem.lower()}",
+                    coord_service=coord_svc,
+                    provenance_url=f"https://pds-geosciences.wustl.edu/msl/msl-m-chemcam-libs-4_5-rdr-v1/mslccm_1xxx/data/moc/{moc_csv.name}",
+                )
+                evidence_all.extend(acc)
+                rejected_all.extend(rej)
+                manifests.append(
+                    {
+                        "dataset_id": f"msl_chemcam_{moc_csv.stem.lower()}",
+                        "product_id": moc_csv.stem.upper(),
+                        "file_path": str(moc_csv),
+                        "sha256_checksum": _sha256_file(moc_csv),
+                        "record_count": len(acc),
+                        "rejected_count": len(rej),
+                    }
+                )
+
+            # 3. CheMin Mineral RDR5 Tables
+            for cm_csv in sorted(raw_dir.glob("cm*min*.csv")):
+                lbl = cm_csv.with_suffix(".lbl")
+                if not lbl.exists():
+                    lbl = cm_csv.with_suffix(".LBL")
+                acc, rej = CheMinEvidenceAdapter.adapt_rdr5_csv(
+                    cm_csv,
+                    label_path=lbl if lbl.exists() else None,
+                    source_dataset_id=f"msl_chemin_{cm_csv.stem.lower()}",
+                    coord_service=coord_svc,
+                    extra_structure_dirs=[raw_dir],
+                    provenance_url=f"https://pds-geosciences.wustl.edu/msl/msl-m-chemin-4-rdr-v1/mslcmn_1xxx/data/rdr5/{cm_csv.name}",
+                )
+                evidence_all.extend(acc)
+                rejected_all.extend(rej)
+                manifests.append(
+                    {
+                        "dataset_id": f"msl_chemin_{cm_csv.stem.lower()}",
+                        "product_id": cm_csv.stem.upper(),
+                        "file_path": str(cm_csv),
+                        "sha256_checksum": _sha256_file(cm_csv),
+                        "record_count": len(acc),
+                        "rejected_count": len(rej),
+                    }
+                )
+
+            # 4. Audit non-compositional raw ChemCam PSV & REMS files into rejected_records
+            for psv_tab in sorted(raw_dir.glob("*psv*.tab")):
+                lbl = psv_tab.with_suffix(".lbl")
+                rej = ChemCamEvidenceAdapter.audit_raw_psv_as_non_compositional(
+                    psv_tab,
+                    label_path=lbl if lbl.exists() else None,
+                )
+                rejected_all.extend(rej)
+
+            for rems_tab in sorted(raw_dir.glob("rme_*.tab")):
+                rej = EnvironmentalExclusionAdapter.audit_non_composition_file(rems_tab)
+                rejected_all.extend(rej)
+
+        crism_status, _ = CrismEvidenceAdapter.check_availability(raw_dir, processed_dir)
+        return self.publish_generation(
+            evidence_records=evidence_all,
+            rejected_records=rejected_all,
+            product_manifests=manifests,
+            crism_status=crism_status,
+            notes=notes,
+        )
+
+    def get_status(self) -> CompositionIndexStatus:
+        gen = self.get_active_generation()
+        if gen is None:
+            return CompositionIndexStatus(
+                index_available=False,
+                rtree_enabled=self.rtree_enabled,
+                sqlite_path=str(self.db_path),
+                notes=["No active composition index generation has been built yet."],
+            )
+        gen_id = gen["generation_id"]
+        with self._connect() as conn:
+            species_cnt = conn.execute(
+                "SELECT COUNT(DISTINCT canonical_species_id) FROM composition_evidence WHERE generation_id = ?",
+                (gen_id,),
+            ).fetchone()[0]
+            inst_rows = conn.execute(
+                "SELECT DISTINCT instrument_id FROM composition_evidence WHERE generation_id = ? ORDER BY instrument_id",
+                (gen_id,),
+            ).fetchall()
+            prod_rows = conn.execute(
+                "SELECT product_id, file_path, sha256_checksum FROM ingested_products WHERE generation_id = ?",
+                (gen_id,),
+            ).fetchall()
+
+        notes = list(json.loads(gen["notes_json"] or "[]"))
+        checksum_valid = True
+        for pr in prod_rows:
+            fp = Path(pr["file_path"])
+            if fp.exists():
+                if _sha256_file(fp) != pr["sha256_checksum"]:
+                    checksum_valid = False
+                    notes.append(f"Checksum drift detected for source file {fp.name}; index rebuild recommended.")
+
+        return CompositionIndexStatus(
+            index_available=int(gen["evidence_count"]) > 0,
+            active_generation_id=gen_id,
+            built_at_utc=gen["created_at_utc"],
+            total_validated_evidence=int(gen["evidence_count"]),
+            located_evidence_count=int(gen["located_count"]),
+            unlocated_evidence_count=int(gen["unlocated_count"]),
+            rejected_record_count=int(gen["rejected_count"]),
+            species_count=int(species_cnt),
+            ingested_products_count=len(prod_rows),
+            instruments_indexed=[r[0] for r in inst_rows],
+            checksum_valid=checksum_valid,
+            rtree_enabled=self.rtree_enabled,
+            crism_status=gen["crism_status"],
+            sqlite_path=str(self.db_path),
+            notes=notes,
+        )
+
+    def query_evidence(
+        self,
+        species_ids: Iterable[str],
+        located_only: bool = True,
+        instruments: Optional[List[str]] = None,
+        sol_min: Optional[int] = None,
+        sol_max: Optional[int] = None,
+        bbox: Optional[Tuple[float, float, float, float]] = None,
+    ) -> List[CompositionEvidence]:
+        """
+        Query validated evidence for one or more canonical species IDs from the active generation.
+        bbox = (min_lat, max_lat, min_lon_east, max_lon_east), supporting [0, 360) antimeridian wrap.
+        """
+        gen = self.get_active_generation()
+        if gen is None:
+            return []
+        gen_id = gen["generation_id"]
+        sp_list = list(species_ids)
+        if not sp_list:
+            return []
+
+        placeholders = ",".join("?" for _ in sp_list)
+        clauses = [
+            "ce.generation_id = ?",
+            f"ce.canonical_species_id IN ({placeholders})",
+        ]
+        params: List[Any] = [gen_id, *sp_list]
+
+        if located_only:
+            clauses.append("ce.location_verified = 1")
+        if instruments:
+            ip = ",".join("?" for _ in instruments)
+            clauses.append(f"ce.instrument_id IN ({ip})")
+            params.extend(instruments)
+        if sol_min is not None:
+            clauses.append("ce.sol >= ?")
+            params.append(sol_min)
+        if sol_max is not None:
+            clauses.append("ce.sol <= ?")
+            params.append(sol_max)
+
+        join_sql = ""
+        if bbox is not None:
+            min_lat, max_lat, min_lon_raw, max_lon_raw = bbox
+            mn_lon = normalize_longitude_360(min_lon_raw)
+            mx_lon = normalize_longitude_360(max_lon_raw)
+            if self.rtree_enabled and mn_lon <= mx_lon:
+                join_sql = "JOIN evidence_rtree rt ON ce.row_id = rt.row_id"
+                clauses.append("rt.min_lat <= ? AND rt.max_lat >= ? AND rt.min_lon <= ? AND rt.max_lon >= ?")
+                params.extend([max_lat, min_lat, mx_lon, mn_lon])
+            elif mn_lon <= mx_lon:
+                clauses.append("ce.min_lat <= ? AND ce.max_lat >= ? AND ce.min_lon_east <= ? AND ce.max_lon_east >= ?")
+                params.extend([max_lat, min_lat, mx_lon, mn_lon])
+            else:
+                # Antimeridian crossing in [0, 360): [mn_lon, 360] OR [0, mx_lon]
+                clauses.append("ce.min_lat <= ? AND ce.max_lat >= ? AND (ce.max_lon_east >= ? OR ce.min_lon_east <= ?)")
+                params.extend([max_lat, min_lat, mn_lon, mx_lon])
+
+        sql = f"SELECT ce.payload_json FROM composition_evidence ce {join_sql} WHERE {' AND '.join(clauses)}"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [CompositionEvidence.model_validate_json(r[0]) for r in rows]
+
+    def get_evidence_by_id(self, evidence_id: str) -> Optional[CompositionEvidence]:
+        gen = self.get_active_generation()
+        if gen is None:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM composition_evidence WHERE generation_id = ? AND evidence_id = ? LIMIT 1",
+                (gen["generation_id"], evidence_id),
+            ).fetchone()
+        return CompositionEvidence.model_validate_json(row[0]) if row else None
+
+    def list_rejected_records(self, limit: int = 100, offset: int = 0) -> Tuple[int, List[RejectionRecord]]:
+        gen = self.get_active_generation()
+        if gen is None:
+            return 0, []
+        gen_id = gen["generation_id"]
+        with self._connect() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM rejected_records WHERE generation_id = ?", (gen_id,)
+            ).fetchone()[0]
+            rows = conn.execute(
+                "SELECT payload_json FROM rejected_records WHERE generation_id = ? ORDER BY row_id DESC LIMIT ? OFFSET ?",
+                (gen_id, limit, offset),
+            ).fetchall()
+        return int(total), [RejectionRecord.model_validate_json(r[0]) for r in rows]

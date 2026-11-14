@@ -303,7 +303,11 @@ export interface DatasetCoverageMatch {
   product_type: string;
   horizontal_resolution_meters?: number | null;
   available_for_evaluation: boolean;
+  coverage_verified?: boolean;
   verification_state: VerificationState;
+  footprint_provenance?: string | null;
+  crs?: string | null;
+  longitude_range?: string | null;
   notes?: string | null;
 }
 
@@ -320,6 +324,7 @@ export interface DestinationEvaluationResponse {
   can_evaluate: boolean;
   evaluation_status: string;
   covering_datasets: DatasetCoverageMatch[];
+  unverified_catalog_candidates?: DatasetCoverageMatch[];
   terrain: {
     available: boolean;
     elevation_m?: number | null;
@@ -338,15 +343,194 @@ export interface DestinationEvaluationResponse {
   selected_at_utc: string;
 }
 
+export type SpeciesCategory = "element" | "oxide" | "mineral" | "mineral_group";
+
+export type CompositionSearchMode =
+  | "auto"
+  | "element"
+  | "mineral"
+  | "element_bearing_mineral";
+
+export interface SpeciesRecord {
+  canonical_id: string;
+  symbol_or_formula: string;
+  canonical_name: string;
+  category: SpeciesCategory;
+  aliases: string[];
+  associated_elements: string[];
+  parent_group?: string | null;
+  child_species: string[];
+  atomic_or_molar_mass?: number | null;
+  stoichiometric_element?: string | null;
+  stoichiometric_mass_fraction?: number | null;
+  supported_instruments: string[];
+  notes?: string | null;
+}
+
+export interface SpeciesResolutionResult {
+  raw_query: string;
+  normalized_query: string;
+  resolved: boolean;
+  ambiguous: boolean;
+  species?: SpeciesRecord | null;
+  candidates: SpeciesRecord[];
+  explanation: string;
+}
+
+export interface ValidationStageResult {
+  stage_number: number;
+  stage_name: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface CompositionEvidence {
+  evidence_id: string;
+  source_dataset_id: string;
+  product_id: string;
+  source_record_ref: string;
+  instrument_id: string;
+  instrument_name: string;
+  mission: string;
+  processing_level: string;
+  calibration_status: string;
+  target_name?: string | null;
+  sol?: number | null;
+  observation_timestamp_utc?: string | null;
+  rmc?: string | null;
+  canonical_species_id: string;
+  canonical_species_name: string;
+  species_category: SpeciesCategory;
+  raw_species_name: string;
+  evidence_type: string;
+  evidence_status: string;
+  raw_value?: number | null;
+  raw_unit?: string | null;
+  normalized_value?: number | null;
+  normalized_unit?: string | null;
+  normalization_formula?: string | null;
+  uncertainty_value?: number | null;
+  uncertainty_unit?: string | null;
+  uncertainty_type?: string | null;
+  detection_limit_value?: number | null;
+  detection_limit_unit?: string | null;
+  quality_flag?: string | null;
+  methodology: string;
+  provenance_url?: string | null;
+  source_reference: string;
+  citation?: string | null;
+  location_verified: boolean;
+  latitude?: number | null;
+  longitude_east?: number | null;
+  elevation_m?: number | null;
+  crs?: string | null;
+  latitude_convention?: string | null;
+  longitude_direction?: string | null;
+  coordinate_source?: string | null;
+  coordinate_provenance?: string | null;
+  coordinate_uncertainty_m?: number | null;
+  validation_stages: ValidationStageResult[];
+  validated_at_utc?: string;
+  generation_id?: string | null;
+}
+
+export interface RankingDimensions {
+  evidence_tier_score: number;
+  abundance_component: number;
+  quality_component: number;
+  corroboration_component: number;
+  spatial_proximity_component?: number | null;
+  composite_rank_score: number;
+  score_formula: string;
+  rationale: string;
+}
+
+export interface RankedCompositionHit {
+  evidence: CompositionEvidence;
+  match_type: string;
+  match_explanation: string;
+  distance_from_astronaut_m?: number | null;
+  bearing_deg?: number | null;
+  supporting_instruments_nearby: string[];
+  nearby_observation_count: number;
+  ranking: RankingDimensions;
+}
+
+export interface CandidateDiscoveryLocation {
+  candidate_id: string;
+  cluster_label: string;
+  latitude: number;
+  longitude_east: number;
+  elevation_m?: number | null;
+  crs: string;
+  coordinate_source: string;
+  coordinate_uncertainty_m?: number | null;
+  distance_from_astronaut_m?: number | null;
+  bearing_deg?: number | null;
+  matched_evidence_count: number;
+  distinct_instruments: string[];
+  best_evidence_type: string;
+  best_species_id: string;
+  best_normalized_value?: number | null;
+  best_normalized_unit?: string | null;
+  ranking: RankingDimensions;
+  evidence_ids: string[];
+  target_names: string[];
+  sol_range?: string | null;
+}
+
+export interface CompositionIndexStatus {
+  index_available: boolean;
+  active_generation_id?: string | null;
+  built_at_utc?: string | null;
+  total_validated_evidence: number;
+  located_evidence_count: number;
+  unlocated_evidence_count: number;
+  rejected_record_count: number;
+  species_count: number;
+  ingested_products_count: number;
+  instruments_indexed: string[];
+  checksum_valid: boolean;
+  rtree_enabled: boolean;
+  crism_status: string;
+  sqlite_path?: string | null;
+  notes: string[];
+}
+
+export interface RejectionRecord {
+  rejection_id: string;
+  source_dataset_id: string;
+  product_id: string;
+  source_record_ref: string;
+  instrument_id: string;
+  raw_species?: string | null;
+  rejection_stage: number;
+  rejection_code: string;
+  reason: string;
+  raw_payload: Record<string, unknown>;
+  rejected_at_utc: string;
+}
+
 export interface CompositionSearchResponse {
   query: string;
   index_available: boolean;
   total_matches: number;
-  results: unknown[];
+  unlocated_matches_count: number;
+  results: Record<string, unknown>[];
+  hits: RankedCompositionHit[];
+  candidate_locations: CandidateDiscoveryLocation[];
+  resolution?: SpeciesResolutionResult | null;
+  index_status?: CompositionIndexStatus | null;
+  astronaut_position_used?: Record<string, unknown> | null;
   unavailable_reason?: string | null;
+  scientific_warnings: string[];
 }
 
 export type PlanningMode = "conservative" | "balanced" | "science_priority";
+
+export type TargetProvenanceStatus =
+  | "evidence_backed"
+  | "manual_unverified_administrative";
 
 export interface ScienceTarget {
   id: string;
@@ -354,8 +538,15 @@ export interface ScienceTarget {
   latitude: number;
   longitude: number;
   elevation_m?: number | null;
+  crs?: string;
   geology_type: string;
   scientific_value: number;
   instrument_source: string;
   provenance_product_id: string;
+  target_status?: TargetProvenanceStatus;
+  evidence_ids?: string[];
+  matched_species?: string | null;
+  distance_from_astronaut_m?: number | null;
+  explanation?: string | null;
+  created_at_utc?: string;
 }

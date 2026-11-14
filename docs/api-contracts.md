@@ -98,6 +98,31 @@ All endpoints are served under the `/api` prefix by the FastAPI backend. Standar
 ### `POST /api/missions`
 - **Description:** Creates and saves a new mission planning scenario.
 
+---
+
+## 5. Prompt 4 Composition Discovery, Spatial Index & Target Provenance Endpoints
+
+### `GET /api/composition/species`
+- **Description:** Queries the controlled geochemical vocabulary (`element`, `oxide`, `mineral`, `mineral_group`). Supports optional `?q=` substring/alias filter.
+
+### `GET /api/composition/index/status`
+- **Description:** Returns live SQLite R*Tree spatial index generation metadata (`active_generation_id`, `located_evidence_count`, `unlocated_evidence_count`, `rejected_record_count`, `instruments_indexed`, `checksum_valid`, `rtree_enabled`, `crism_status`).
+
+### `POST /api/composition/index/rebuild`
+- **Description:** Scans `datasets/raw/`, runs PDS3/PDS4 adapters + coordinate association + 12-stage validation, and atomically publishes a new generation in `datasets/index/composition_index.sqlite`.
+
+### `POST /api/composition/search` (and `POST /api/destinations/search-composition`)
+- **Description:** Resolves an element/oxide/mineral query (`search_mode`: `auto | element | mineral | element_bearing_mineral`), applies R*Tree spatial bounding boxes & filters, computes Mars IAU2000 geodesic distance/bearing from astronaut coordinates, and returns ranked `hits`, clustered `candidate_locations`, `unlocated_matches_count`, and `scientific_warnings`.
+
+### `GET /api/composition/evidence/{evidence_id}`
+- **Description:** Returns full `CompositionEvidence` provenance, raw vs stoichiometric conversion formula, coordinate derivation source, and all 12 `validation_stages`.
+
+### `GET /api/composition/rejected`
+- **Description:** Returns paginated `RejectionRecord` audit log (`?limit=50&offset=0`) showing why passive PSVs, REMS tables, `<LOD` measurements, or invalid records were excluded.
+
+### `POST /api/targets/generate`
+- **Description:** Deterministically generates `evidence_backed` `ScienceTarget` records from top-ranked composition discovery clusters, storing immutable `evidence_ids` and distance/rationale metadata. Also `GET /api/sources/msl/archive-query` exposes live NASA PDS/ODE archive product discovery.
+
 ### `POST /api/missions/{mission_id}/replan`
 - **Description:** Triggers real-time replanning for an active mission given mid-traverse contingency inputs (e.g. reduced oxygen reserve).
 

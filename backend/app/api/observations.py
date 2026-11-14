@@ -3,13 +3,14 @@ MARSCOPE Scientific Observations Endpoints
 Martian Surface Intelligence & Exploration System
 
 Loads verified observations strictly from downloaded and parsed NASA PDS files.
-Never returns hardcoded fake observations.
+Uses documented .LBL/.FMT schemas and RMC coordinate association when available.
 """
 
 from typing import List
 from fastapi import APIRouter, HTTPException, status
 from app.schemas.dataset import DatasetLifecycleStatus
 from app.schemas.observation import Observation
+from app.science.coordinate_association import CoordinateAssociationService
 from app.science.curiosity_parser import CuriosityDataParser, MalformedObservationError
 from app.services.container import RAW_DIR, catalog_service
 
@@ -23,6 +24,11 @@ def _load_verified_observations() -> List[Observation]:
     """
     loaded: List[Observation] = []
     raw_root = RAW_DIR.parent
+
+    coord_svc = CoordinateAssociationService()
+    wp_file = next(iter(sorted(RAW_DIR.glob("*waypoints*.json"))), None)
+    if wp_file and wp_file.exists():
+        coord_svc.load_waypoints_geojson(wp_file)
 
     for ds in catalog_service.list_datasets():
         if not ds.local_file_path:
@@ -41,20 +47,24 @@ def _load_verified_observations() -> List[Observation]:
 
         lbl_path = (raw_root / ds.local_label_path) if ds.local_label_path else None
         try:
-            if "chemcam" in ds.id.lower() or "spectrum" in ds.product_type.lower():
+            if "chemcam" in ds.id.lower() or "spectrum" in ds.product_type.lower() or "spectral" in ds.product_type.lower():
+                if fpath.suffix.lower() == ".csv" and "moc" in fpath.stem.lower():
+                    continue  # MOC tables are bulk geochemical tables surfaced via /api/composition
                 obs = CuriosityDataParser.parse_chemcam_psv_file(
                     fpath,
                     sol=ds.observation_sol,
                     label_path=lbl_path,
                     dataset_id=ds.id,
+                    coord_service=coord_svc if coord_svc.is_waypoints_loaded else None,
                 )
                 loaded.append(obs)
-            elif "rems" in ds.id.lower() or "atmospheric" in ds.product_type.lower():
+            elif "rems" in ds.id.lower() or "atmospheric" in ds.product_type.lower() or "ancillary" in ds.product_type.lower():
                 obs = CuriosityDataParser.parse_rems_adr_summary(
                     fpath,
                     sol=ds.observation_sol,
                     label_path=lbl_path,
                     dataset_id=ds.id,
+                    extra_structure_dirs=[RAW_DIR],
                 )
                 loaded.append(obs)
         except (MalformedObservationError, FileNotFoundError, ValueError):

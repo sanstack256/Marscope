@@ -53,3 +53,10 @@ MARSCOPE implements a multi-tier testing and validation framework ensuring scien
 1. **Static Analysis:** TypeScript strict mode checking with zero errors; Python `flake8` or `ruff` linting.
 2. **Automated Unit Testing:** Full `pytest` execution across the backend suite with minimum 90% branch coverage on physics and routing modules.
 3. **Reproducibility Guarantee:** Clean installation and startup from repository root must succeed using standard setup commands.
+
+---
+
+## 4. Prompt 4 Scientific Discovery & Validation Suite (`backend/tests/`)
+
+- **`test_pds_parsing_and_coords.py`:** Offline verification of PDS3 ODL pointer/`^STRUCTURE` resolution, ChemCam PSV (`DIGITAL_NUMBER`, full channel read) vs LIBS CCS differentiation, REMS schema-driven parsing without heuristic guesses, Gale Crater Equirectangular metric conversion, and guarantee that unlocated products never receive synthetic Gale coordinates.
+- **`test_composition_discovery.py`:** Offline verification of controlled species alias/ambiguity resolution, IUPAC oxide-to-element stoichiometry, all critical failure modes of the 12-stage validation pipeline (`REMS`, `CHEMCAM-PSV`, invalid LIBS mineralogy, negative/`<LOD`/`>100 wt%`, Earth CRS rejection), SQLite R*Tree rebuild & antimeridian bbox wrap, SHA-256 checksum drift detection, `unlocated` spatial exclusion, strict `coverage_verification == VERIFIED` checks in destination evaluation, and `evidence_backed` vs `manual_unverified_administrative` target provenance separation.

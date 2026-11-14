@@ -79,3 +79,12 @@ graph TD
 
 - **Local Storage Strategy:** Raw datasets are stored in `datasets/raw/` (git-ignored), processed into Cloud-Optimized GeoTIFFs (COGs) with overviews in `datasets/processed/`, and referenced through JSON catalogs in `datasets/catalog/`.
 - **Coordinate Reference System Uniformity:** All incoming datasets are normalized to the standard Mars reference frame (`IAU2000:49900` or local projected equidistant frame centered at Gale Crater: $137.4^\circ\text{ E}, 4.6^\circ\text{ S}$) prior to analysis.
+
+---
+
+## 5. Prompt 4 Scientific Discovery Engine & Spatial Indexing Subsystem
+
+- **PDS3 / PDS4 Schema-Driven Parsing & Coordinate Association (`app/ingestion/pds_label.py`, `app/science/coordinate_association.py`, `app/science/curiosity_parser.py`):** Full ODL nested structure parser (`^STRUCTURE` `.FMT` includes, byte-offset pointers, `ROVER_MOTION_COUNTER`), Gale Equirectangular metric transformation (`R=3,396,190 m`), and JPL `MSL_waypoints.json` RMC joiner.
+- **Validation & Normalization Engine (`app/science/composition/`):** Controlled IUPAC species registry (`species.py`), `wt%`/`ppm` and oxide-to-element stoichiometry (`normalization.py`), 12-stage validation pipeline + `RejectionRecord` emitter (`validation.py`), and instrument adapters for APXS, ChemCam MOC/PSV, CheMin RDR5, CRISM honesty guard, and REMS exclusion (`adapters.py`).
+- **SQLite R*Tree Persistent Spatial Index (`app/science/composition/index.py`):** Atomic multi-generation WAL SQLite database (`datasets/index/composition_index.sqlite`, git-ignored) with `evidence_rtree` 2D spatial indexing on `[0, 360)` IAU2000 longitude, antimeridian wrap handling, SHA-256 source-file drift verification, and zero-corruption transaction rollback.
+- **Mars Geodesic Discovery & Interactive Globe Sync:** `CompositionSearchService` clusters spatially verified hits into `CandidateDiscoveryLocation`s using `pyproj.Geod` (`IAU2000`), synchronized with CesiumJS clickable markers in `MarsGlobeViewer.tsx`, Minerals Explorer workbench, Target Explorer (`target_status` provenance badge), and Evidence Audit UI.

@@ -33,23 +33,35 @@ from app.schemas.dataset import (
 from app.services.destination_service import DestinationEvaluationService
 from app.services.layer_service import LayerCatalogService
 from app.services.localization_service import LocalizationService
+from app.science.composition.index import CompositionSpatialIndex
+from app.science.composition.search import CompositionSearchService
+from app.science.target_registry import TargetRegistryService
 
 
 @pytest.fixture(autouse=True)
 def isolated_services(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Isolate catalog, raw, processed, localization, layer, and destination state per test."""
+    """Isolate catalog, raw, processed, index, localization, layer, target, and destination state per test."""
     catalog_dir = tmp_path / "catalog"
     manifests_dir = tmp_path / "manifests"
     raw_dir = tmp_path / "raw"
     processed_dir = tmp_path / "processed"
-    for d in (catalog_dir, manifests_dir, raw_dir, processed_dir):
+    index_dir = tmp_path / "index"
+    for d in (catalog_dir, manifests_dir, raw_dir, processed_dir, index_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     cat_svc = DatasetCatalogService(catalog_storage_dir=catalog_dir, raw_data_dir=raw_dir)
     acq_svc = AcquisitionService(raw_data_dir=raw_dir, manifests_dir=manifests_dir)
+    comp_idx = CompositionSpatialIndex(db_path=index_dir / "composition_index.sqlite")
+    comp_search = CompositionSearchService(index=comp_idx)
+    tgt_reg = TargetRegistryService(composition_index=comp_idx)
     lay_svc = LayerCatalogService(catalog_service=cat_svc, processed_dir=processed_dir, raw_dir=raw_dir)
     loc_svc = LocalizationService()
-    dest_svc = DestinationEvaluationService(catalog_service=cat_svc, processed_dir=processed_dir)
+    dest_svc = DestinationEvaluationService(
+        catalog_service=cat_svc,
+        processed_dir=processed_dir,
+        composition_search_service=comp_search,
+        localization_service=loc_svc,
+    )
 
     for mod in (container, api_datasets, api_terrain, api_observations):
         if hasattr(mod, "RAW_DIR"):
@@ -66,23 +78,42 @@ def isolated_services(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             monkeypatch.setattr(mod, "localization_service", loc_svc)
         if hasattr(mod, "destination_service"):
             monkeypatch.setattr(mod, "destination_service", dest_svc)
+        if hasattr(mod, "composition_index"):
+            monkeypatch.setattr(mod, "composition_index", comp_idx)
+        if hasattr(mod, "composition_search_service"):
+            monkeypatch.setattr(mod, "composition_search_service", comp_search)
+        if hasattr(mod, "target_registry"):
+            monkeypatch.setattr(mod, "target_registry", tgt_reg)
 
     import app.api.layers as api_layers
     import app.api.sources as api_sources
     import app.api.localization as api_localization
     import app.api.destinations as api_destinations
+    import app.api.composition as api_composition
+    import app.api.targets as api_targets
 
     monkeypatch.setattr(api_layers, "layer_service", lay_svc)
     monkeypatch.setattr(api_sources, "catalog_service", cat_svc)
     monkeypatch.setattr(api_localization, "localization_service", loc_svc)
     monkeypatch.setattr(api_destinations, "destination_service", dest_svc)
+    monkeypatch.setattr(api_composition, "RAW_DIR", raw_dir)
+    monkeypatch.setattr(api_composition, "PROCESSED_DIR", processed_dir)
+    monkeypatch.setattr(api_composition, "composition_index", comp_idx)
+    monkeypatch.setattr(api_composition, "composition_search_service", comp_search)
+    monkeypatch.setattr(api_composition, "localization_service", loc_svc)
+    monkeypatch.setattr(api_targets, "target_registry", tgt_reg)
+    monkeypatch.setattr(api_targets, "composition_search_service", comp_search)
+    monkeypatch.setattr(api_targets, "localization_service", loc_svc)
 
     yield {
         "catalog_dir": catalog_dir,
         "raw_dir": raw_dir,
         "processed_dir": processed_dir,
+        "index_dir": index_dir,
         "catalog_service": cat_svc,
         "localization_service": loc_svc,
+        "composition_index": comp_idx,
+        "target_registry": tgt_reg,
     }
 
 
@@ -263,8 +294,12 @@ async def test_localization_manual_and_clear_and_validation():
 
 
 @pytest.mark.asyncio
-async def test_destination_evaluate_and_composition_search_honesty():
-    """Destination evaluate checks real coverage & returns unavailable terrain when no local DEM exists."""
+async def test_destination_evaluate_and_composition_search_honesty(isolated_services):
+    """
+    Destination evaluate strictly enforces coverage_verification == VERIFIED before reporting
+    verified coverage, and search-composition returns empty honest state when index is unbuilt.
+    """
+    cat_svc: DatasetCatalogService = isolated_services["catalog_service"]
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         await client.post("/api/datasets/discover")
@@ -277,7 +312,26 @@ async def test_destination_evaluate_and_composition_search_honesty():
         assert data["crs"] == "IAU2000:49900"
         assert data["terrain"]["available"] is False
         assert data["terrain"]["elevation_m"] is None
-        assert len(data["covering_datasets"]) >= 1
+        # Unverified catalog placeholders must NEVER enter covering_datasets as verified overlap
+        assert data["covering_datasets"] == []
+        assert len(data["unverified_catalog_candidates"]) >= 1
+        assert data["evaluation_status"] == "unverified_catalog_candidates_only"
+
+        # Once a dataset has VERIFIED coverage_verification, it becomes verified coverage with provenance
+        ds = cat_svc.get_dataset("mola_megt00n090hb")
+        assert ds is not None
+        ds.verification.coverage_verification = VerificationState.VERIFIED
+        cat_svc.register_dataset(ds)
+
+        res_ver = await client.post(
+            "/api/destinations/evaluate",
+            json={"latitude": -4.65, "longitude": 137.42, "label": "Gale Verified Check"},
+        )
+        assert res_ver.status_code == 200
+        d_ver = res_ver.json()
+        assert len(d_ver["covering_datasets"]) == 1
+        assert d_ver["covering_datasets"][0]["coverage_verified"] is True
+        assert d_ver["covering_datasets"][0]["footprint_provenance"] is not None
 
         comp = await client.post("/api/destinations/search-composition", json={"query": "smectite"})
         assert comp.status_code == 200

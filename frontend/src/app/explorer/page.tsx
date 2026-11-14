@@ -6,25 +6,35 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
-  CheckCircle2,
   Compass,
   Crosshair,
   Database,
   Eye,
   EyeOff,
   FlaskConical,
+  Info,
   Layers,
   MapPin,
   RefreshCw,
   Search,
+  ShieldCheck,
   Sliders,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 import { MarsGlobeViewer } from "../../components/MarsGlobeViewer";
 import { API_BASE_URL } from "../../lib/constants";
 import { useLayerStore } from "../../stores/useLayerStore";
 import { useMissionStore } from "../../stores/useMissionStore";
-import { CompositionSearchResponse } from "../../types";
+import {
+  CandidateDiscoveryLocation,
+  CompositionEvidence,
+  CompositionIndexStatus,
+  CompositionSearchMode,
+  CompositionSearchResponse,
+  ScienceTarget,
+  SpeciesRecord,
+} from "../../types";
 
 type ExplorerTab = "layers" | "inspect" | "minerals";
 
@@ -38,10 +48,21 @@ export default function SurfaceExplorerPage() {
   const [verifyingId, setVerifyingId] = useState<string | null>(null);
   const [verifyFeedback, setVerifyFeedback] = useState<string | null>(null);
 
-  const [compositionQuery, setCompositionQuery] = useState<string>("smectite");
+  const [compositionQuery, setCompositionQuery] = useState<string>("Fe");
+  const [compositionMode, setCompositionMode] = useState<CompositionSearchMode>("auto");
+  const [includeBearingMinerals, setIncludeBearingMinerals] = useState<boolean>(false);
+  const [excludeLowQuality, setExcludeLowQuality] = useState<boolean>(false);
+  const [sortBy, setSortBy] = useState<string>("rank");
+  const [selectedInstruments, setSelectedInstruments] = useState<string[]>([]);
   const [compositionLoading, setCompositionLoading] = useState<boolean>(false);
   const [compositionResult, setCompositionResult] = useState<CompositionSearchResponse | null>(null);
   const [compositionError, setCompositionError] = useState<string | null>(null);
+  const [indexStatus, setIndexStatus] = useState<CompositionIndexStatus | null>(null);
+  const [rebuildingIndex, setRebuildingIndex] = useState<boolean>(false);
+  const [speciesVocab, setSpeciesVocab] = useState<SpeciesRecord[]>([]);
+  const [inspectedEvidence, setInspectedEvidence] = useState<CompositionEvidence | null>(null);
+  const [evidenceLoading, setEvidenceLoading] = useState<boolean>(false);
+  const [savedTargetMessage, setSavedTargetMessage] = useState<string | null>(null);
 
   const {
     availableLayers,
@@ -63,16 +84,32 @@ export default function SurfaceExplorerPage() {
     destinationError,
     localizationStatus,
     localizationError,
+    selectedCandidateId,
     evaluateDestination,
     clearDestination,
     fetchLocalizationStatus,
     setManualPosition,
     clearManualPosition,
+    setCompositionResults,
+    selectCompositionCandidate,
+    addTarget,
   } = useMissionStore();
 
   useEffect(() => {
     void fetchLayers();
     void fetchLocalizationStatus();
+    fetch(`${API_BASE_URL}/composition/index/status`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data) setIndexStatus(data);
+      })
+      .catch(() => undefined);
+    fetch(`${API_BASE_URL}/composition/species`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((data) => {
+        if (Array.isArray(data)) setSpeciesVocab(data);
+      })
+      .catch(() => undefined);
   }, [fetchLayers, fetchLocalizationStatus]);
 
   const orderedAvailableLayers = layerOrder
@@ -117,27 +154,116 @@ export default function SurfaceExplorerPage() {
     await setManualPosition(lat, lon);
   }
 
-  async function handleCompositionSearch(e: React.FormEvent) {
-    e.preventDefault();
-    if (!compositionQuery.trim()) return;
+  async function runCompositionQuery(overrideQuery?: string) {
+    const q = (overrideQuery ?? compositionQuery).trim();
+    if (!q) return;
     setCompositionLoading(true);
     setCompositionError(null);
+    setInspectedEvidence(null);
+    setSavedTargetMessage(null);
     try {
       const res = await fetch(`${API_BASE_URL}/destinations/search-composition`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: compositionQuery.trim() }),
+        body: JSON.stringify({
+          query: q,
+          search_mode: compositionMode,
+          include_element_bearing_minerals: includeBearingMinerals,
+          use_active_astronaut_position: true,
+          instruments: selectedInstruments.length > 0 ? selectedInstruments : null,
+          exclude_low_quality: excludeLowQuality,
+          sort_by: sortBy,
+          limit: 50,
+        }),
       });
       if (!res.ok) {
         throw new Error(`HTTP ${res.status} searching composition index`);
       }
       const data: CompositionSearchResponse = await res.json();
       setCompositionResult(data);
+      setCompositionResults(data);
+      if (data.index_status) setIndexStatus(data.index_status);
     } catch (err) {
       setCompositionError(err instanceof Error ? err.message : "Search failed");
     } finally {
       setCompositionLoading(false);
     }
+  }
+
+  async function handleCompositionSearch(e: React.FormEvent) {
+    e.preventDefault();
+    await runCompositionQuery();
+  }
+
+  async function handleRebuildIndex() {
+    setRebuildingIndex(true);
+    setCompositionError(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/composition/index/rebuild`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status} rebuilding index`);
+      const st: CompositionIndexStatus = await res.json();
+      setIndexStatus(st);
+    } catch (err) {
+      setCompositionError(err instanceof Error ? err.message : "Rebuild failed");
+    } finally {
+      setRebuildingIndex(false);
+    }
+  }
+
+  async function handleInspectEvidence(evidenceId: string) {
+    setEvidenceLoading(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/composition/evidence/${encodeURIComponent(evidenceId)}`, {
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status} fetching evidence detail`);
+      const detail: CompositionEvidence = await res.json();
+      setInspectedEvidence(detail);
+    } catch (err) {
+      setCompositionError(err instanceof Error ? err.message : "Failed to inspect evidence");
+    } finally {
+      setEvidenceLoading(false);
+    }
+  }
+
+  async function handleRegisterCandidateTarget(cand: CandidateDiscoveryLocation) {
+    setSavedTargetMessage(null);
+    try {
+      const targetPayload: ScienceTarget = {
+        id: `target-${cand.candidate_id}`,
+        name: `${cand.cluster_label} (${cand.best_species_id})`,
+        latitude: cand.latitude,
+        longitude: cand.longitude_east,
+        elevation_m: cand.elevation_m ?? null,
+        crs: cand.crs,
+        geology_type: cand.best_species_id,
+        scientific_value: Number(Math.min(1, Math.max(0, cand.ranking.composite_rank_score)).toFixed(4)),
+        instrument_source: cand.distinct_instruments.join(", "),
+        provenance_product_id: cand.evidence_ids[0] || cand.candidate_id,
+        target_status: "evidence_backed",
+        evidence_ids: cand.evidence_ids,
+        matched_species: cand.best_species_id,
+        distance_from_astronaut_m: cand.distance_from_astronaut_m ?? null,
+        explanation: cand.ranking.rationale,
+      };
+      const res = await fetch(`${API_BASE_URL}/targets`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(targetPayload),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status} saving target`);
+      const saved: ScienceTarget = await res.json();
+      addTarget(saved);
+      setSavedTargetMessage(`Registered verified target "${saved.name}".`);
+    } catch (err) {
+      setCompositionError(err instanceof Error ? err.message : "Failed to register target");
+    }
+  }
+
+  function toggleInstrumentFilter(inst: string) {
+    setSelectedInstruments((prev) =>
+      prev.includes(inst) ? prev.filter((i) => i !== inst) : [...prev, inst]
+    );
   }
 
   return (
@@ -561,17 +687,44 @@ export default function SurfaceExplorerPage() {
                     {/* Covering Datasets */}
                     <div className="space-y-1">
                       <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                        Catalog Overlap ({selectedDestination.covering_datasets.length})
+                        Verified Coverage ({selectedDestination.covering_datasets.length})
                       </div>
-                      {selectedDestination.covering_datasets.map((ds) => (
-                        <div
-                          key={ds.dataset_id}
-                          className="text-[10px] p-1.5 rounded bg-[#0d111a] border border-[#1d2536] flex items-center justify-between gap-2"
-                        >
-                          <span className="truncate text-slate-300">{ds.product_id}</span>
-                          <span className="font-mono text-slate-500 shrink-0">{ds.verification_state}</span>
+                      {selectedDestination.covering_datasets.length === 0 ? (
+                        <div className="text-[10px] text-slate-500 p-1.5 rounded bg-[#0d111a] border border-[#1d2536]">
+                          No verified local/remote product footprints match this point.
                         </div>
-                      ))}
+                      ) : (
+                        selectedDestination.covering_datasets.map((ds) => (
+                          <div
+                            key={ds.dataset_id}
+                            className="text-[10px] p-1.5 rounded bg-[#0d111a] border border-[#1d2536] flex items-center justify-between gap-2"
+                          >
+                            <span className="truncate text-slate-300" title={ds.footprint_provenance || ""}>
+                              {ds.product_id}
+                            </span>
+                            <span className="font-mono text-emerald-400 shrink-0">{ds.verification_state}</span>
+                          </div>
+                        ))
+                      )}
+                      {selectedDestination.unverified_catalog_candidates &&
+                        selectedDestination.unverified_catalog_candidates.length > 0 && (
+                          <div className="pt-1 space-y-1">
+                            <div className="text-[9px] font-bold uppercase tracking-wider text-amber-300/80">
+                              Unverified Catalog Candidates ({selectedDestination.unverified_catalog_candidates.length})
+                            </div>
+                            {selectedDestination.unverified_catalog_candidates.map((ds) => (
+                              <div
+                                key={ds.dataset_id}
+                                className="text-[10px] p-1.5 rounded bg-amber-950/20 border border-amber-900/40 flex items-center justify-between gap-2"
+                              >
+                                <span className="truncate text-amber-200/80">{ds.product_id}</span>
+                                <span className="font-mono text-amber-400/90 shrink-0">
+                                  {ds.verification_state}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                     </div>
 
                     <button
@@ -670,30 +823,161 @@ export default function SurfaceExplorerPage() {
 
             {activeTab === "minerals" && (
               <div className="space-y-3">
+                {/* Index Status Banner */}
+                <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536] space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-200">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Composition Spatial Index</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleRebuildIndex}
+                      disabled={rebuildingIndex}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-[#161c2b] hover:bg-[#1e263b] border border-[#2a3650] text-[10px] text-slate-200 disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${rebuildingIndex ? "animate-spin" : ""}`} />
+                      <span>Rebuild</span>
+                    </button>
+                  </div>
+                  {indexStatus ? (
+                    <div className="text-[10px] font-mono text-slate-400 space-y-0.5">
+                      <div>
+                        Validated: <span className="text-emerald-300">{indexStatus.located_evidence_count}</span> located ·{" "}
+                        <span className="text-amber-300">{indexStatus.unlocated_evidence_count}</span> unlocated ·{" "}
+                        <span className="text-red-300">{indexStatus.rejected_record_count}</span> rejected
+                      </div>
+                      <div>
+                        Instruments: {indexStatus.instruments_indexed.join(", ") || "None"} · R*Tree:{" "}
+                        {indexStatus.rtree_enabled ? "ON" : "OFF"}
+                      </div>
+                      <div className="text-[9px] text-amber-300/90">
+                        CRISM orbital: {indexStatus.crism_status}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-[10px] text-slate-500">Checking spatial index...</div>
+                  )}
+                </div>
+
+                {/* Discovery Query Form */}
                 <form
                   onSubmit={handleCompositionSearch}
                   className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536] space-y-2"
                 >
                   <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-200">
                     <FlaskConical className="w-3.5 h-3.5 text-[#38bdf8]" />
-                    <span>Mineral / Element Occurrence Search</span>
+                    <span>Element &amp; Mineral Discovery</span>
                   </div>
-                  <p className="text-[10px] text-slate-400">
-                    Queries indexed spectral/chemical observation products (CRISM, ChemCam LIBS, APXS). Returns results only from verified loaded datasets.
-                  </p>
+
                   <input
                     type="text"
+                    list="marscope-species-list"
                     value={compositionQuery}
                     onChange={(e) => setCompositionQuery(e.target.value)}
-                    placeholder="e.g., smectite, hematite, sulfate, SiO2"
+                    placeholder="Element (Fe, S), oxide (SO3, SiO2), or mineral (hematite, gypsum)"
                     className="w-full px-2.5 py-1.5 text-xs rounded bg-[#121622] border border-[#252f44] text-slate-100"
                   />
+                  <datalist id="marscope-species-list">
+                    {speciesVocab.map((sp) => (
+                      <option key={sp.canonical_id} value={sp.canonical_id}>
+                        {sp.canonical_name} ({sp.category})
+                      </option>
+                    ))}
+                  </datalist>
+
+                  {/* Quick-Pick Species Pills */}
+                  <div className="flex flex-wrap gap-1">
+                    {["Fe", "S", "SO3", "SiO2", "CaO", "hematite", "gypsum", "plagioclase", "olivine"].map((pill) => (
+                      <button
+                        key={pill}
+                        type="button"
+                        onClick={() => {
+                          setCompositionQuery(pill);
+                          void runCompositionQuery(pill);
+                        }}
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition-colors ${
+                          compositionQuery.toLowerCase() === pill.toLowerCase()
+                            ? "bg-[#e25b38]/25 border-[#e25b38]/70 text-orange-200"
+                            : "bg-[#121622] border-[#252f44] text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        {pill}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Mode & Sort Controls */}
+                  <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+                    <select
+                      value={compositionMode}
+                      onChange={(e) => setCompositionMode(e.target.value as CompositionSearchMode)}
+                      className="px-2 py-1 rounded bg-[#121622] border border-[#252f44] text-slate-200"
+                    >
+                      <option value="auto">Mode: Auto Resolve</option>
+                      <option value="element">Mode: Element Only</option>
+                      <option value="mineral">Mode: Mineral Only</option>
+                      <option value="element_bearing_mineral">Mode: +Host Minerals</option>
+                    </select>
+                    <select
+                      value={sortBy}
+                      onChange={(e) => setSortBy(e.target.value)}
+                      className="px-2 py-1 rounded bg-[#121622] border border-[#252f44] text-slate-200"
+                    >
+                      <option value="rank">Sort: Composite Rank</option>
+                      <option value="distance">Sort: Nearest to Explorer</option>
+                      <option value="abundance">Sort: Highest Value</option>
+                      <option value="sol">Sort: Latest Sol</option>
+                    </select>
+                  </div>
+
+                  {/* Instrument Filter Chips */}
+                  <div className="flex flex-wrap items-center gap-1 text-[10px]">
+                    <span className="text-slate-500 mr-0.5">Instr:</span>
+                    {["APXS", "ChemCam_LIBS", "CheMin_XRD"].map((inst) => {
+                      const active = selectedInstruments.includes(inst);
+                      return (
+                        <button
+                          key={inst}
+                          type="button"
+                          onClick={() => toggleInstrumentFilter(inst)}
+                          className={`px-1.5 py-0.5 rounded font-mono border ${
+                            active
+                              ? "bg-sky-950/60 border-sky-600/60 text-sky-200"
+                              : "bg-[#121622] border-[#252f44] text-slate-400"
+                          }`}
+                        >
+                          {inst}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div className="flex flex-col gap-1 text-[10px] text-slate-300">
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={includeBearingMinerals}
+                        onChange={(e) => setIncludeBearingMinerals(e.target.checked)}
+                      />
+                      <span>Include element-bearing host minerals (lower evidence tier)</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={excludeLowQuality}
+                        onChange={(e) => setExcludeLowQuality(e.target.checked)}
+                      />
+                      <span>Exclude elevated-RMSEP / minor-abundance flagged records</span>
+                    </label>
+                  </div>
+
                   <button
                     type="submit"
                     disabled={compositionLoading}
-                    className="w-full py-1.5 rounded bg-[#1e2638] hover:bg-[#28334a] border border-[#344260] text-[11px] font-semibold text-slate-100 disabled:opacity-50"
+                    className="w-full py-1.5 rounded bg-[#e25b38] hover:bg-[#cf4f2e] text-[11px] font-semibold text-white disabled:opacity-50"
                   >
-                    {compositionLoading ? "Querying Composition Index..." : "Search Verified Detections"}
+                    {compositionLoading ? "Querying Spatial Index..." : "Search Verified Detections"}
                   </button>
                 </form>
 
@@ -703,28 +987,211 @@ export default function SurfaceExplorerPage() {
                   </div>
                 )}
 
+                {savedTargetMessage && (
+                  <div className="p-2 rounded-lg bg-emerald-950/40 border border-emerald-700/50 text-[11px] text-emerald-200">
+                    {savedTargetMessage}
+                  </div>
+                )}
+
+                {/* Results Summary & Warnings */}
                 {compositionResult && (
-                  <div className="p-3 rounded-lg bg-[#161c2b] border border-[#252f44] space-y-2">
-                    <div className="flex items-center justify-between text-[11px]">
-                      <span className="font-semibold text-slate-200">Query: &ldquo;{compositionResult.query}&rdquo;</span>
-                      <span
-                        className={`text-[9px] font-mono px-1.5 py-0.5 rounded uppercase ${
-                          compositionResult.index_available
-                            ? "bg-emerald-950 text-emerald-300"
-                            : "bg-amber-950 text-amber-200"
-                        }`}
-                      >
-                        {compositionResult.index_available ? "Indexed" : "Index Unavailable"}
-                      </span>
+                  <div className="space-y-2.5">
+                    <div className="p-2.5 rounded-lg bg-[#161c2b] border border-[#252f44] space-y-1.5">
+                      <div className="flex items-center justify-between text-[11px]">
+                        <span className="font-semibold text-slate-100">
+                          {compositionResult.resolution?.species
+                            ? `${compositionResult.resolution.species.canonical_name} (${compositionResult.resolution.species.canonical_id})`
+                            : `Query: "${compositionResult.query}"`}
+                        </span>
+                        <span className="text-[10px] font-mono text-emerald-300">
+                          {compositionResult.candidate_locations.length} sites · {compositionResult.total_matches} hits
+                        </span>
+                      </div>
+
+                      {compositionResult.resolution?.explanation && (
+                        <div className="text-[10px] text-slate-300">
+                          {compositionResult.resolution.explanation}
+                        </div>
+                      )}
+
+                      {compositionResult.unlocated_matches_count > 0 && (
+                        <div className="text-[10px] text-amber-200/90 bg-amber-950/30 border border-amber-800/40 rounded px-2 py-1">
+                          {compositionResult.unlocated_matches_count} validated hits lack verified coordinates and are excluded from spatial candidates.
+                        </div>
+                      )}
+
+                      {compositionResult.unavailable_reason && (
+                        <p className="text-[10px] text-amber-200/90 leading-relaxed">
+                          {compositionResult.unavailable_reason}
+                        </p>
+                      )}
+
+                      {compositionResult.scientific_warnings.map((w, idx) => (
+                        <div key={idx} className="text-[10px] text-slate-400 flex items-start gap-1">
+                          <Info className="w-3 h-3 text-sky-400 shrink-0 mt-0.5" />
+                          <span>{w}</span>
+                        </div>
+                      ))}
                     </div>
-                    {compositionResult.unavailable_reason && (
-                      <p className="text-[11px] text-amber-200/90 leading-relaxed">
-                        {compositionResult.unavailable_reason}
-                      </p>
+
+                    {/* Evidence Provenance Inspector Card */}
+                    {evidenceLoading && (
+                      <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#252f44] text-[11px] text-slate-300">
+                        Loading full evidence provenance &amp; 12-stage validation record...
+                      </div>
                     )}
-                    <div className="text-[10px] font-mono text-slate-400 flex items-center gap-1.5">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-slate-500" />
-                      <span>Verified matches returned: {compositionResult.total_matches}</span>
+
+                    {inspectedEvidence && (
+                      <div className="p-2.5 rounded-lg bg-[#0b101b] border border-sky-700/60 space-y-2 text-[10px]">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-sky-300">
+                            Evidence Detail: {inspectedEvidence.target_name || inspectedEvidence.source_record_ref}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setInspectedEvidence(null)}
+                            className="text-slate-400 hover:text-white"
+                          >
+                            Close
+                          </button>
+                        </div>
+                        <div className="font-mono text-slate-300 space-y-0.5">
+                          <div>
+                            {inspectedEvidence.instrument_id} · Sol {inspectedEvidence.sol ?? "N/A"} ·{" "}
+                            {inspectedEvidence.canonical_species_id} ({inspectedEvidence.evidence_type})
+                          </div>
+                          <div>
+                            Raw: {inspectedEvidence.raw_value} {inspectedEvidence.raw_unit} → Norm:{" "}
+                            {inspectedEvidence.normalized_value?.toFixed(3)} {inspectedEvidence.normalized_unit}
+                            {inspectedEvidence.uncertainty_value != null
+                              ? ` (±${inspectedEvidence.uncertainty_value.toFixed(3)})`
+                              : ""}
+                          </div>
+                          {inspectedEvidence.normalization_formula && (
+                            <div className="text-slate-400">Formula: {inspectedEvidence.normalization_formula}</div>
+                          )}
+                          <div className="text-slate-400">
+                            Coords: {inspectedEvidence.coordinate_source} (±
+                            {inspectedEvidence.coordinate_uncertainty_m ?? "?"} m)
+                          </div>
+                          <div className="text-slate-500 break-all">
+                            Source: {inspectedEvidence.source_reference}
+                          </div>
+                        </div>
+                        <div className="border-t border-[#1e2638] pt-1.5 space-y-0.5 max-h-36 overflow-y-auto">
+                          <div className="font-semibold text-slate-400">12-Stage Validation Pipeline:</div>
+                          {inspectedEvidence.validation_stages.map((st) => (
+                            <div key={st.stage_number} className="flex items-center justify-between gap-2">
+                              <span className={st.passed ? "text-emerald-300" : "text-red-300"}>
+                                {st.stage_number}. {st.stage_name}
+                              </span>
+                              <span className="text-slate-500 truncate max-w-[160px]" title={st.detail}>
+                                {st.detail}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Ranked Candidate Discovery Locations */}
+                    <div className="space-y-2">
+                      {compositionResult.candidate_locations.map((cand, idx) => {
+                        const isSelected = cand.candidate_id === selectedCandidateId;
+                        return (
+                          <div
+                            key={cand.candidate_id}
+                            onClick={() => selectCompositionCandidate(cand.candidate_id)}
+                            className={`p-2.5 rounded-lg border cursor-pointer transition-colors space-y-1.5 ${
+                              isSelected
+                                ? "bg-emerald-950/25 border-emerald-600/70"
+                                : "bg-[#0d111a] border-[#1d2536] hover:border-[#324163]"
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-1.5 text-xs font-bold text-slate-100">
+                                  <span className="px-1.5 py-0.5 rounded bg-[#161c2b] font-mono text-[10px] text-amber-300">
+                                    #{idx + 1}
+                                  </span>
+                                  <span className="truncate">{cand.cluster_label}</span>
+                                </div>
+                                <div className="text-[10px] font-mono text-slate-400 mt-0.5">
+                                  {cand.latitude.toFixed(4)}°, {cand.longitude_east.toFixed(4)}°E · {cand.sol_range}
+                                </div>
+                              </div>
+                              <div className="text-right shrink-0">
+                                <div className="text-xs font-mono font-bold text-emerald-300">
+                                  {cand.best_normalized_value != null
+                                    ? `${cand.best_normalized_value.toFixed(2)} ${cand.best_normalized_unit || ""}`
+                                    : cand.best_species_id}
+                                </div>
+                                <div className="text-[9px] font-mono text-slate-500">
+                                  Rank {cand.ranking.composite_rank_score.toFixed(3)} (non-prob.)
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono text-slate-300">
+                              <span className="px-1.5 py-0.5 rounded bg-[#121622] border border-[#1e2638]">
+                                {cand.distinct_instruments.join(" + ")}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded bg-[#121622] border border-[#1e2638]">
+                                {cand.matched_evidence_count} obs
+                              </span>
+                              {cand.distance_from_astronaut_m != null && (
+                                <span className="px-1.5 py-0.5 rounded bg-sky-950/40 border border-sky-800/40 text-sky-200">
+                                  {cand.distance_from_astronaut_m >= 1000
+                                    ? `${(cand.distance_from_astronaut_m / 1000).toFixed(2)} km`
+                                    : `${cand.distance_from_astronaut_m.toFixed(0)} m`}{" "}
+                                  @ {cand.bearing_deg?.toFixed(0)}°
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="text-[10px] text-slate-400 leading-snug">
+                              {cand.ranking.rationale}
+                            </div>
+
+                            <div className="flex items-center gap-1.5 pt-1">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  selectCompositionCandidate(cand.candidate_id);
+                                  void evaluateDestination(cand.latitude, cand.longitude_east, cand.cluster_label);
+                                }}
+                                className="flex-1 py-1 px-2 rounded bg-[#161c2b] hover:bg-[#1e263b] border border-[#2a3650] text-[10px] font-medium text-sky-200"
+                              >
+                                Terrain
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (cand.evidence_ids[0]) {
+                                    void handleInspectEvidence(cand.evidence_ids[0]);
+                                  }
+                                }}
+                                className="flex-1 py-1 px-2 rounded bg-[#161c2b] hover:bg-[#1e263b] border border-[#2a3650] text-[10px] font-medium text-slate-200"
+                              >
+                                Evidence
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleRegisterCandidateTarget(cand);
+                                }}
+                                className="flex-1 inline-flex items-center justify-center gap-1 py-1 px-2 rounded bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-700/60 text-[10px] font-medium text-emerald-200"
+                              >
+                                <Sparkles className="w-3 h-3" />
+                                <span>Target</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 )}

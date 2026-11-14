@@ -43,6 +43,8 @@ export function MarsGlobeViewer() {
   const {
     selectedDestination,
     localizationStatus,
+    compositionCandidates,
+    selectedCandidateId,
     evaluateDestination,
   } = useMissionStore();
 
@@ -148,6 +150,26 @@ export function MarsGlobeViewer() {
         }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
         handler.setInputAction((click: CesiumTypes.ScreenSpaceEventHandler.PositionedEvent) => {
+          const picked = viewer.scene.pick(click.position);
+          const pickedEntityId =
+            picked && typeof picked === "object" && "id" in picked && picked.id && typeof picked.id === "object" && "id" in picked.id
+              ? String((picked.id as { id: unknown }).id)
+              : null;
+
+          if (pickedEntityId && pickedEntityId.startsWith("candidate:")) {
+            const candidateId = pickedEntityId.slice("candidate:".length);
+            const storeState = useMissionStore.getState();
+            storeState.selectCompositionCandidate(candidateId);
+            const matched = storeState.compositionCandidates.find((c) => c.candidate_id === candidateId);
+            if (matched) {
+              if (abortControllerRef.current) abortControllerRef.current.abort();
+              const controller = new AbortController();
+              abortControllerRef.current = controller;
+              evaluateDestination(matched.latitude, matched.longitude_east, matched.cluster_label, controller.signal);
+              return;
+            }
+          }
+
           const pos = viewer.camera.pickEllipsoid(click.position, marsEllipsoid);
           if (!pos) return;
           const carto = marsEllipsoid.cartesianToCartographic(pos);
@@ -266,7 +288,7 @@ export function MarsGlobeViewer() {
     });
   }, [viewerReady, availableLayers, layerStates, layerOrder, markLayerRendered, recordTileError, clearTileErrors]);
 
-  // Sync Destination & Manual Localization Markers on Globe
+  // Sync Destination, Manual Localization & Composition Candidate Markers on Globe
   useEffect(() => {
     const viewer = viewerRef.current;
     const Cesium = cesiumRef.current;
@@ -274,6 +296,39 @@ export function MarsGlobeViewer() {
     if (!viewerReady || !viewer || viewer.isDestroyed() || !Cesium || !marsEllipsoid) return;
 
     viewer.entities.removeAll();
+
+    // Render Composition Discovery candidate markers
+    compositionCandidates.forEach((cand, idx) => {
+      const isSelected = cand.candidate_id === selectedCandidateId;
+      const lon180 = cand.longitude_east > 180 ? cand.longitude_east - 360 : cand.longitude_east;
+      const pos = marsEllipsoid.cartographicToCartesian(
+        Cesium.Cartographic.fromDegrees(lon180, cand.latitude, 550)
+      );
+      const valStr =
+        cand.best_normalized_value != null
+          ? `${cand.best_normalized_value.toFixed(2)} ${cand.best_normalized_unit ?? ""}`.trim()
+          : cand.best_species_id;
+      viewer.entities.add({
+        id: `candidate:${cand.candidate_id}`,
+        position: pos,
+        point: {
+          pixelSize: isSelected ? 14 : 10,
+          color: Cesium.Color.fromCssColorString(isSelected ? "#34d399" : "#f59e0b"),
+          outlineColor: isSelected ? Cesium.Color.WHITE : Cesium.Color.fromCssColorString("#0b0d13"),
+          outlineWidth: isSelected ? 2.5 : 1.5,
+        },
+        label: isSelected || idx < 5
+          ? {
+              text: `#${idx + 1} ${cand.cluster_label} (${valStr})`,
+              font: isSelected ? "11px monospace" : "10px monospace",
+              fillColor: Cesium.Color.fromCssColorString(isSelected ? "#a7f3d0" : "#fde68a"),
+              backgroundColor: Cesium.Color.fromCssColorString("#0b0d13D9"),
+              showBackground: true,
+              pixelOffset: new Cesium.Cartesian2(0, -18),
+            }
+          : undefined,
+      });
+    });
 
     if (selectedDestination) {
       const pos = marsEllipsoid.cartographicToCartesian(
@@ -323,7 +378,30 @@ export function MarsGlobeViewer() {
         },
       });
     }
-  }, [viewerReady, selectedDestination, localizationStatus]);
+  }, [viewerReady, selectedDestination, localizationStatus, compositionCandidates, selectedCandidateId]);
+
+  // Smoothly fly camera toward newly selected composition candidate
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    const Cesium = cesiumRef.current;
+    const marsEllipsoid = ellipsoidRef.current;
+    if (!viewerReady || !viewer || viewer.isDestroyed() || !Cesium || !marsEllipsoid || !selectedCandidateId) {
+      return;
+    }
+    const cand = compositionCandidates.find((c) => c.candidate_id === selectedCandidateId);
+    if (!cand) return;
+    const lon180 = cand.longitude_east > 180 ? cand.longitude_east - 360 : cand.longitude_east;
+    const camCarto = marsEllipsoid.cartesianToCartographic(viewer.camera.position);
+    const currentH = camCarto ? camCarto.height : 25000.0;
+    const targetH = Math.min(Math.max(currentH, 6000.0), 40000.0);
+    viewer.camera.flyTo({
+      destination: marsEllipsoid.cartographicToCartesian(
+        Cesium.Cartographic.fromDegrees(lon180, cand.latitude, targetH)
+      ),
+      orientation: { heading: 0.0, pitch: -Cesium.Math.PI_OVER_TWO, roll: 0.0 },
+      duration: 0.9,
+    });
+  }, [viewerReady, selectedCandidateId, compositionCandidates]);
 
   // Camera control handlers
   const handleZoom = (factor: number) => {

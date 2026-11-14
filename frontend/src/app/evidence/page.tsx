@@ -1,16 +1,19 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CheckCircle2, Cpu, Database, Download, ExternalLink, RefreshCw, ShieldCheck } from "lucide-react";
+import { AlertOctagon, CheckCircle2, Cpu, Database, Download, ExternalLink, RefreshCw, ShieldCheck } from "lucide-react";
 import { PageHeader } from "../../components/PageHeader";
 import { StatusBadge } from "../../components/StatusBadge";
 import { API_BASE_URL } from "../../lib/constants";
-import { Dataset, Observation, SourceRegistryEntry } from "../../types";
+import { CompositionIndexStatus, Dataset, Observation, RejectionRecord, SourceRegistryEntry } from "../../types";
 
 export default function EvidenceProvenancePage() {
   const [sources, setSources] = useState<SourceRegistryEntry[]>([]);
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [observations, setObservations] = useState<Observation[]>([]);
+  const [indexStatus, setIndexStatus] = useState<CompositionIndexStatus | null>(null);
+  const [rejectedRecords, setRejectedRecords] = useState<RejectionRecord[]>([]);
+  const [rebuildingIndex, setRebuildingIndex] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [busyDatasetId, setBusyDatasetId] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -20,14 +23,21 @@ export default function EvidenceProvenancePage() {
     setLoading(true);
     setError(null);
     try {
-      const [sRes, dRes, oRes] = await Promise.all([
+      const [sRes, dRes, oRes, iRes, rRes] = await Promise.all([
         fetch(`${API_BASE_URL}/sources`, { cache: "no-store" }),
         fetch(`${API_BASE_URL}/datasets`, { cache: "no-store" }),
         fetch(`${API_BASE_URL}/observations`, { cache: "no-store" }),
+        fetch(`${API_BASE_URL}/composition/index/status`, { cache: "no-store" }),
+        fetch(`${API_BASE_URL}/composition/rejected?limit=25`, { cache: "no-store" }),
       ]);
       if (sRes.ok) setSources(await sRes.json());
       if (dRes.ok) setDatasets(await dRes.json());
       if (oRes.ok) setObservations(await oRes.json());
+      if (iRes.ok) setIndexStatus(await iRes.json());
+      if (rRes.ok) {
+        const rejData = await rRes.json();
+        setRejectedRecords(rejData.records || []);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to fetch provenance records");
     } finally {
@@ -39,15 +49,22 @@ export default function EvidenceProvenancePage() {
     let active = true;
     async function init() {
       try {
-        const [sRes, dRes, oRes] = await Promise.all([
+        const [sRes, dRes, oRes, iRes, rRes] = await Promise.all([
           fetch(`${API_BASE_URL}/sources`, { cache: "no-store" }),
           fetch(`${API_BASE_URL}/datasets`, { cache: "no-store" }),
           fetch(`${API_BASE_URL}/observations`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/composition/index/status`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/composition/rejected?limit=25`, { cache: "no-store" }),
         ]);
         if (!active) return;
         if (sRes.ok) setSources(await sRes.json());
         if (dRes.ok) setDatasets(await dRes.json());
         if (oRes.ok) setObservations(await oRes.json());
+        if (iRes.ok) setIndexStatus(await iRes.json());
+        if (rRes.ok) {
+          const rejData = await rRes.json();
+          setRejectedRecords(rejData.records || []);
+        }
       } catch (err) {
         if (active) setError(err instanceof Error ? err.message : "Failed to fetch provenance records");
       } finally {
@@ -59,6 +76,26 @@ export default function EvidenceProvenancePage() {
       active = false;
     };
   }, []);
+
+  async function handleRebuildCompositionIndex() {
+    setRebuildingIndex(true);
+    setActionMessage(null);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/composition/index/rebuild`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status} rebuilding composition index`);
+      const st: CompositionIndexStatus = await res.json();
+      setIndexStatus(st);
+      setActionMessage(
+        `Rebuilt SQLite R*Tree composition index (${st.active_generation_id}): ${st.located_evidence_count} located, ${st.unlocated_evidence_count} unlocated, ${st.rejected_record_count} rejected.`
+      );
+      await refreshAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to rebuild composition index");
+    } finally {
+      setRebuildingIndex(false);
+    }
+  }
 
   async function runDatasetAction(datasetId: string, action: "verify-remote" | "download" | "validate" | "process") {
     setBusyDatasetId(datasetId);
@@ -273,6 +310,79 @@ export default function EvidenceProvenancePage() {
             );
           })}
         </div>
+      </div>
+
+      {/* Composition Spatial Index & Rejection Audit Log */}
+      <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#1e2638] pb-3">
+          <div className="flex items-center gap-2 text-sm font-bold text-slate-100">
+            <Database className="w-4 h-4 text-emerald-400" />
+            <span>Composition Spatial Index (SQLite R*Tree) &amp; Validation Audit</span>
+          </div>
+          <button
+            type="button"
+            onClick={handleRebuildCompositionIndex}
+            disabled={rebuildingIndex}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#161c2b] hover:bg-[#1e263b] border border-[#252f44] text-xs font-medium text-slate-200 disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${rebuildingIndex ? "animate-spin" : ""}`} />
+            <span>{rebuildingIndex ? "Rebuilding Index..." : "Rebuild Composition Index"}</span>
+          </button>
+        </div>
+
+        {indexStatus && (
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-[11px] font-mono">
+            <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
+              <div className="text-[9px] text-slate-500">GENERATION</div>
+              <div className="text-slate-100">{indexStatus.active_generation_id || "None"}</div>
+            </div>
+            <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
+              <div className="text-[9px] text-slate-500">LOCATED EVIDENCE</div>
+              <div className="text-emerald-300">{indexStatus.located_evidence_count}</div>
+            </div>
+            <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
+              <div className="text-[9px] text-slate-500">UNLOCATED EVIDENCE</div>
+              <div className="text-amber-300">{indexStatus.unlocated_evidence_count}</div>
+            </div>
+            <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
+              <div className="text-[9px] text-slate-500">REJECTED RECORDS</div>
+              <div className="text-red-300">{indexStatus.rejected_record_count}</div>
+            </div>
+            <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
+              <div className="text-[9px] text-slate-500">CRISM ORBITAL</div>
+              <div className="text-amber-200 truncate" title={indexStatus.crism_status}>
+                {indexStatus.crism_status}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {rejectedRecords.length > 0 && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-red-300">
+              <AlertOctagon className="w-3.5 h-3.5" />
+              <span>Rejected Non-Composition / Invalid Records ({rejectedRecords.length})</span>
+            </div>
+            <div className="space-y-1.5 max-h-64 overflow-y-auto">
+              {rejectedRecords.map((rej) => (
+                <div
+                  key={rej.rejection_id}
+                  className="p-2.5 rounded-lg bg-[#0d111a] border border-red-900/40 text-[10px] font-mono space-y-0.5"
+                >
+                  <div className="flex items-center justify-between text-red-200">
+                    <span>
+                      {rej.instrument_id} · {rej.product_id} ({rej.source_record_ref})
+                    </span>
+                    <span>
+                      Stage {rej.rejection_stage}: {rej.rejection_code}
+                    </span>
+                  </div>
+                  <div className="text-slate-400">{rej.reason}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

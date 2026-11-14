@@ -7,6 +7,7 @@ Aggregates all domain sub-routers under the versioned /api namespace.
 
 from fastapi import APIRouter
 from app.api import (
+    composition,
     datasets,
     destinations,
     health,
@@ -26,6 +27,7 @@ api_router.include_router(datasets.router)
 api_router.include_router(terrain.router)
 api_router.include_router(layers.router)
 api_router.include_router(observations.router)
+api_router.include_router(composition.router)
 api_router.include_router(targets.router)
 api_router.include_router(sources.router)
 api_router.include_router(physics.router)

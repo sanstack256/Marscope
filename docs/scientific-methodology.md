@@ -33,3 +33,23 @@ Every science target in the MARSCOPE Target Explorer must provide:
 1. **Orbital Evidence:** Direct HiRISE visual morphology and CRISM spectral absorptions (e.g., $1.9\,\mu\text{m}$ band indicating structural $\text{H}_2\text{O}$ in hydrated sulfates).
 2. **In-Situ Ground Truth:** Associated Curiosity rover Sol number, ChemCam LIBS targets, or CheMin quantitative mineral percentages (where traversed).
 3. **Contradicting / Limiting Factors:** Observation limitations (e.g., dust cover obscuring bedrock, steep approach angles preventing safe astronaut contact).
+
+---
+
+## 4. Controlled Geochemical Discovery, Stoichiometry & Ranking Methodology (Prompt 4)
+
+### 4.1 Strict Ontology Separation
+MARSCOPE maintains a canonical vocabulary (`backend/app/science/composition/species.py`) distinguishing:
+- **Chemical Elements** (e.g., `Fe`, `S`, `Si`, `Ca`, `Mg`, `Al`, `K`, `Na`, `Ti`, `Mn`, `Cr`, `P`, `Cl`, `Ni`, `Zn`, `Br`)
+- **Calibrated Oxides** (`FeO`, `FeOT`, `Fe2O3`, `SO3`, `SiO2`, `CaO`, `MgO`, `Al2O3`, `K2O`, `Na2O`, `TiO2`, `MnO`, `Cr2O3`, `P2O5`)
+- **Crystalline Minerals** (`hematite`, `magnetite`, `gypsum`, `bassanite`, `anhydrite`, `jarosite`, `andesine`, `forsterite`, `augite`, `pigeonite`, `montmorillonite`, `quartz`, etc.)
+- **Mineral Groups** (`plagioclase`, `olivine`, `pyroxene`, `smectite`, `sulfate`, `carbonate`, `iron_oxide`)
+
+Ambiguous queries such as `"silica"` (`SiO2` vs crystalline `quartz`) or `"iron oxide"` (`FeO`/`Fe2O3` vs `hematite`/`magnetite`) are explicitly flagged rather than silently disambiguated. Searching for an element (`Fe`, `S`) retrieves direct element assays plus stoichiometric oxide conversions (`wt%` scaled by IUPAC atomic mass fractions, e.g., `FeO * 0.77731 -> Fe`, `SO3 * 0.40049 -> S`). Element-bearing host minerals are excluded by default unless `include_element_bearing_minerals=true` is requested, and are assigned a lower evidence tier.
+
+### 4.2 Explainable Non-Probabilistic Candidate Ranking
+Candidate locations are ranked strictly by transparent physical and spatial metrics (`backend/app/science/composition/ranking.py`) rather than fabricated probability percentages:
+- **Evidence Tier:** `1.0` (direct mineral/element), `0.90` (calibrated oxide/stoichiometric conversion), `0.55` (element-bearing host mineral)
+- **Abundance & Quality:** Normalized abundance scaled within query range and penalized for missing error bars or elevated RMSEP
+- **Instrument Corroboration:** Higher weight when independent instruments (e.g., `APXS` + `ChemCam_LIBS`) corroborate a location
+- **Mars IAU2000 Geodesic Proximity:** Ellipsoidal distance & forward azimuth from active astronaut position computed with `pyproj.Geod` (`a=3396190 m, b=3376200 m`)
