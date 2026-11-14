@@ -384,11 +384,30 @@ export interface ValidationStageResult {
   detail: string;
 }
 
+export type LocationSemanticType =
+  | "instrument_target_location"
+  | "rover_station_location"
+  | "product_footprint"
+  | "observation_region"
+  | "unlocated";
+
+export type IntegrityStatus =
+  | "verified"
+  | "source_files_missing"
+  | "checksum_mismatch"
+  | "incomplete"
+  | "unavailable";
+
 export interface CompositionEvidence {
   evidence_id: string;
+  determinism_version?: string;
   source_dataset_id: string;
   product_id: string;
   source_record_ref: string;
+  source_file_checksum?: string | null;
+  schema_version?: string | null;
+  parser_id?: string | null;
+  parser_version?: string | null;
   instrument_id: string;
   instrument_name: string;
   mission: string;
@@ -409,17 +428,28 @@ export interface CompositionEvidence {
   normalized_value?: number | null;
   normalized_unit?: string | null;
   normalization_formula?: string | null;
+  is_stoichiometric_conversion?: boolean;
+  source_oxide_species?: string | null;
+  stoichiometric_factor?: number | null;
+  stoichiometric_weights_version?: string | null;
   uncertainty_value?: number | null;
   uncertainty_unit?: string | null;
   uncertainty_type?: string | null;
+  uncertainty_semantics?: string | null;
+  secondary_uncertainty_value?: number | null;
+  secondary_uncertainty_unit?: string | null;
+  secondary_uncertainty_type?: string | null;
+  instrument_standoff_m?: number | null;
   detection_limit_value?: number | null;
   detection_limit_unit?: string | null;
+  detection_limit_status?: string | null;
   quality_flag?: string | null;
   methodology: string;
   provenance_url?: string | null;
   source_reference: string;
   citation?: string | null;
   location_verified: boolean;
+  location_semantic_type?: LocationSemanticType;
   latitude?: number | null;
   longitude_east?: number | null;
   elevation_m?: number | null;
@@ -429,18 +459,29 @@ export interface CompositionEvidence {
   coordinate_source?: string | null;
   coordinate_provenance?: string | null;
   coordinate_uncertainty_m?: number | null;
+  original_coordinate_values?: Record<string, unknown> | null;
+  original_coordinate_crs?: string | null;
+  coordinate_transform?: string | null;
+  coordinate_transform_params?: Record<string, unknown> | null;
+  waypoint_id?: string | null;
+  association_rule_version?: string | null;
+  coordinate_limitations?: string[];
   validation_stages: ValidationStageResult[];
   validated_at_utc?: string;
   generation_id?: string | null;
 }
 
 export interface RankingDimensions {
+  ranking_config_id?: string;
+  ranking_config_version?: string;
+  is_heuristic_only?: boolean;
   evidence_tier_score: number;
-  abundance_component: number;
-  quality_component: number;
-  corroboration_component: number;
+  abundance_component?: number | null;
+  quality_component?: number | null;
+  corroboration_component?: number | null;
   spatial_proximity_component?: number | null;
-  composite_rank_score: number;
+  composite_rank_score?: number | null;
+  unavailable_dimensions?: string[];
   score_formula: string;
   rationale: string;
 }
@@ -464,7 +505,9 @@ export interface CandidateDiscoveryLocation {
   elevation_m?: number | null;
   crs: string;
   coordinate_source: string;
+  location_semantic_type?: LocationSemanticType;
   coordinate_uncertainty_m?: number | null;
+  coordinate_limitations?: string[];
   distance_from_astronaut_m?: number | null;
   bearing_deg?: number | null;
   matched_evidence_count: number;
@@ -479,8 +522,29 @@ export interface CandidateDiscoveryLocation {
   sol_range?: string | null;
 }
 
+export interface ProductManifestEntry {
+  dataset_id: string;
+  product_id: string;
+  file_path: string;
+  sha256_checksum: string;
+  byte_size?: number;
+  source_mtime_utc?: string | null;
+  source_url?: string | null;
+  license?: string | null;
+  label_path?: string | null;
+  schema_version?: string | null;
+  parser_id?: string | null;
+  parser_version?: string | null;
+  validation_pipeline_version?: string | null;
+  determinism_version?: string | null;
+  coordinate_association_method?: string | null;
+  record_count?: number;
+  rejected_count?: number;
+}
+
 export interface CompositionIndexStatus {
   index_available: boolean;
+  integrity_status?: IntegrityStatus;
   active_generation_id?: string | null;
   built_at_utc?: string | null;
   total_validated_evidence: number;
@@ -491,10 +555,32 @@ export interface CompositionIndexStatus {
   ingested_products_count: number;
   instruments_indexed: string[];
   checksum_valid: boolean;
+  missing_source_files?: string[];
+  checksum_mismatches?: string[];
+  reproducibility_manifest_path?: string | null;
+  product_manifests?: ProductManifestEntry[];
   rtree_enabled: boolean;
   crism_status: string;
   sqlite_path?: string | null;
   notes: string[];
+}
+
+export interface ReproducibilityManifest {
+  manifest_format_version: string;
+  generation_id: string;
+  built_at_utc?: string;
+  source_manifest_checksum?: string;
+  determinism_version: string;
+  validation_pipeline_version?: string;
+  ranking_config_id?: string;
+  ranking_config_version?: string;
+  total_validated_evidence?: number;
+  located_evidence_count?: number;
+  unlocated_evidence_count?: number;
+  rejected_record_count?: number;
+  crism_status?: string;
+  products: ProductManifestEntry[];
+  notes?: string[];
 }
 
 export interface RejectionRecord {

@@ -192,8 +192,8 @@ export default function TargetExplorerPage() {
                     </span>
                   </div>
                   <div className="text-[11px] font-mono text-slate-300">
-                    Species: {tgt.matched_species || tgt.geology_type} · Rank Score:{" "}
-                    {tgt.scientific_value.toFixed(3)} · Instr: {tgt.instrument_source}
+                    Species: {tgt.matched_species || tgt.geology_type} · Heuristic Priority:{" "}
+                    {tgt.scientific_value != null ? tgt.scientific_value.toFixed(3) : "N/A"} · Instr: {tgt.instrument_source}
                     {tgt.distance_from_astronaut_m != null &&
                       ` · Dist: ${(tgt.distance_from_astronaut_m / 1000).toFixed(2)} km`}
                   </div>

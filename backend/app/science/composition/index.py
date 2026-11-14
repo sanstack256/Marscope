@@ -11,6 +11,7 @@ Stores validated geochemical and mineralogical CompositionEvidence in SQLite wit
 """
 
 from datetime import datetime, timezone
+import fnmatch
 import hashlib
 import json
 from pathlib import Path
@@ -27,8 +28,11 @@ from app.science.composition.adapters import (
 from app.science.composition.models import (
     CompositionEvidence,
     CompositionIndexStatus,
+    IntegrityStatus,
     RejectionRecord,
 )
+from app.science.composition.ranking import DEFAULT_HEURISTIC_RANKING_CONFIG
+from app.science.composition.validation import EVIDENCE_ID_DETERMINISM_VERSION
 from app.science.coordinate_association import CoordinateAssociationService
 
 
@@ -82,6 +86,7 @@ class CompositionSpatialIndex:
                     record_count INTEGER NOT NULL DEFAULT 0,
                     rejected_count INTEGER NOT NULL DEFAULT 0,
                     ingested_at_utc TEXT NOT NULL,
+                    manifest_json TEXT NOT NULL DEFAULT '{}',
                     PRIMARY KEY (generation_id, product_id)
                 );
 
@@ -154,6 +159,11 @@ class CompositionSpatialIndex:
             except sqlite3.OperationalError:
                 rtree_ok = False
             conn.commit()
+            # Graceful migration for pre-existing SQLite databases lacking manifest_json column
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(ingested_products)").fetchall()}
+            if "manifest_json" not in cols:
+                conn.execute("ALTER TABLE ingested_products ADD COLUMN manifest_json TEXT NOT NULL DEFAULT '{}'")
+                conn.commit()
             return rtree_ok
 
     def get_active_generation(self) -> Optional[sqlite3.Row]:
@@ -176,15 +186,20 @@ class CompositionSpatialIndex:
         If any insertion error occurs, rolls back completely leaving the previous generation active.
         """
         now_utc = datetime.now(timezone.utc).isoformat()
-        gen_id = generation_id or f"gen_{hashlib.sha256(f'{now_utc}|{len(evidence_records)}'.encode()).hexdigest()[:12]}"
-        manifests = product_manifests or []
+        manifests = sorted(
+            product_manifests or [],
+            key=lambda m: (str(m.get("dataset_id", "")), str(m.get("product_id", ""))),
+        )
         manifest_digest = hashlib.sha256(
             json.dumps(
-                sorted(
-                    [(m.get("product_id", ""), m.get("sha256_checksum", "")) for m in manifests]
-                )
+                [(m.get("product_id", ""), m.get("sha256_checksum", "")) for m in manifests],
+                sort_keys=True,
             ).encode("utf-8")
         ).hexdigest()
+        ev_digest = hashlib.sha256(
+            "|".join(e.evidence_id for e in sorted(evidence_records, key=lambda x: x.evidence_id)).encode("utf-8")
+        ).hexdigest()
+        gen_id = generation_id or f"gen_{hashlib.sha256(f'{manifest_digest}|{ev_digest}|{len(rejected_records)}'.encode()).hexdigest()[:12]}"
 
         located_count = sum(1 for e in evidence_records if e.location_verified)
         unlocated_count = len(evidence_records) - located_count
@@ -192,6 +207,12 @@ class CompositionSpatialIndex:
         with self._connect() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE;")
+                # Clear prior rows cleanly if rebuilding the exact same deterministic content generation_id
+                conn.execute("DELETE FROM composition_evidence WHERE generation_id = ?", (gen_id,))
+                conn.execute("DELETE FROM rejected_records WHERE generation_id = ?", (gen_id,))
+                conn.execute("DELETE FROM ingested_products WHERE generation_id = ?", (gen_id,))
+                conn.execute("DELETE FROM index_generations WHERE generation_id = ?", (gen_id,))
+
                 conn.execute(
                     """
                     INSERT INTO index_generations (
@@ -218,8 +239,8 @@ class CompositionSpatialIndex:
                         """
                         INSERT OR REPLACE INTO ingested_products (
                             generation_id, dataset_id, product_id, file_path,
-                            sha256_checksum, record_count, rejected_count, ingested_at_utc
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            sha256_checksum, record_count, rejected_count, ingested_at_utc, manifest_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             gen_id,
@@ -230,6 +251,7 @@ class CompositionSpatialIndex:
                             int(m.get("record_count", 0)),
                             int(m.get("rejected_count", 0)),
                             now_utc,
+                            json.dumps(m, sort_keys=True),
                         ),
                     )
 
@@ -323,7 +345,66 @@ class CompositionSpatialIndex:
                 conn.rollback()
                 raise
 
+        manifest_path = self.db_path.parent / "reproducibility_manifest.json"
+        repro_payload = {
+            "manifest_format_version": "reproducibility_manifest_v1",
+            "generation_id": gen_id,
+            "built_at_utc": now_utc,
+            "source_manifest_checksum": manifest_digest,
+            "sqlite_path": str(self.db_path),
+            "determinism_version": EVIDENCE_ID_DETERMINISM_VERSION,
+            "validation_pipeline_version": "12_stage_v2",
+            "ranking_config_id": DEFAULT_HEURISTIC_RANKING_CONFIG.ranking_config_id,
+            "ranking_config_version": DEFAULT_HEURISTIC_RANKING_CONFIG.ranking_config_version,
+            "total_validated_evidence": len(evidence_records),
+            "located_evidence_count": located_count,
+            "unlocated_evidence_count": unlocated_count,
+            "rejected_record_count": len(rejected_records),
+            "crism_status": crism_status,
+            "products": manifests,
+            "notes": notes or [],
+        }
+        tmp_manifest = manifest_path.with_suffix(".tmp")
+        tmp_manifest.write_text(json.dumps(repro_payload, indent=2), encoding="utf-8")
+        tmp_manifest.replace(manifest_path)
+
         return self.get_status()
+
+    @staticmethod
+    def _build_product_manifest(
+        *,
+        dataset_id: str,
+        product_id: str,
+        file_path: Path,
+        source_url: str,
+        label_path: Optional[Path],
+        schema_version: str,
+        parser_id: str,
+        parser_version: str,
+        coord_method: str,
+        record_count: int,
+        rejected_count: int,
+    ) -> Dict[str, Any]:
+        st = file_path.stat()
+        return {
+            "dataset_id": dataset_id,
+            "product_id": product_id,
+            "source_url": source_url,
+            "file_path": str(file_path),
+            "byte_size": int(st.st_size),
+            "source_mtime_utc": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+            "sha256_checksum": _sha256_file(file_path),
+            "license": "NASA Planetary Data System (PDS) Public Domain",
+            "label_path": str(label_path) if label_path else None,
+            "schema_version": schema_version,
+            "parser_id": parser_id,
+            "parser_version": parser_version,
+            "validation_pipeline_version": "12_stage_v2",
+            "determinism_version": EVIDENCE_ID_DETERMINISM_VERSION,
+            "coordinate_association_method": coord_method,
+            "record_count": int(record_count),
+            "rejected_count": int(rejected_count),
+        }
 
     def rebuild_from_raw_directory(
         self,
@@ -333,104 +414,153 @@ class CompositionSpatialIndex:
         """
         Discover and parse all verified NASA PDS raw artifacts inside raw_dir, associate
         documented coordinates via JPL MSL_waypoints.json when present, run the 12-stage
-        validation pipeline on every candidate, and atomically publish a fresh SQLite index.
+        validation pipeline on every candidate, and atomically publish a fresh SQLite index
+        plus reproducibility_manifest.json.
         """
+        def _glob_ci(pattern: str) -> List[Path]:
+            if not raw_dir.exists():
+                return []
+            pat = pattern.lower()
+            return sorted(
+                p for p in raw_dir.iterdir() if p.is_file() and fnmatch.fnmatchcase(p.name.lower(), pat)
+            )
+
+        def _find_companion(base_path: Path, suffixes: Tuple[str, ...]) -> Optional[Path]:
+            for sfx in suffixes:
+                cand = base_path.with_suffix(sfx)
+                if cand.exists():
+                    return cand
+            return None
+
         coord_svc = CoordinateAssociationService()
-        wp_candidates = sorted(raw_dir.glob("*waypoints*.json"))
+        wp_candidates = _glob_ci("*waypoints*.json")
         notes: List[str] = []
+        manifests: List[Dict[str, Any]] = []
         if wp_candidates:
-            wp_count = coord_svc.load_waypoints_geojson(wp_candidates[0])
-            notes.append(f"Loaded {wp_count} JPL MSL traverse waypoints from {wp_candidates[0].name}.")
+            wp_path = wp_candidates[0]
+            wp_count = coord_svc.load_waypoints_geojson(wp_path)
+            notes.append(f"Loaded {wp_count} JPL MSL traverse waypoints from {wp_path.name}.")
+            manifests.append(
+                self._build_product_manifest(
+                    dataset_id="jpl_msl_traverse_waypoints",
+                    product_id=wp_path.stem.upper(),
+                    file_path=wp_path,
+                    source_url="https://mars.nasa.gov/mmgis-maps/MSL/Layers/json/MSL_waypoints.json",
+                    label_path=None,
+                    schema_version="geojson_feature_collection",
+                    parser_id="coordinate_association_waypoints",
+                    parser_version="2.0.0",
+                    coord_method="rmc_site_drive_lookup",
+                    record_count=wp_count,
+                    rejected_count=0,
+                )
+            )
         else:
             notes.append("No JPL MSL_waypoints.json file in raw_dir; RMC coordinate joins will mark records unlocated.")
 
         evidence_all: List[CompositionEvidence] = []
         rejected_all: List[RejectionRecord] = []
-        manifests: List[Dict[str, Any]] = []
 
         if raw_dir.exists():
             # 1. APXS Supplement CSVs
-            for csv_path in sorted(raw_dir.glob("*2021je007171r*.csv")) + sorted(raw_dir.glob("*apxs*.csv")):
+            apxs_files = sorted({p for p in _glob_ci("*2021je007171r*.csv") + _glob_ci("*apxs*.csv")})
+            for csv_path in apxs_files:
+                xml_lbl = _find_companion(csv_path, (".xml", ".XML"))
+                url = "https://pds-geosciences.wustl.edu/msl/urn-nasa-pds-msl_apxs_supplement_sols_0_3076/data/ds01_2021je007171r.csv"
                 acc, rej = ApxsEvidenceAdapter.adapt_csv(
                     csv_path,
                     source_dataset_id="msl_apxs_supplement_sols_0_3076",
                     product_id=csv_path.stem.upper(),
-                    provenance_url="https://pds-geosciences.wustl.edu/msl/urn-nasa-pds-msl_apxs_supplement_sols_0_3076/data/ds01_2021je007171r.csv",
+                    provenance_url=url,
+                    label_path=xml_lbl,
                 )
                 evidence_all.extend(acc)
                 rejected_all.extend(rej)
                 manifests.append(
-                    {
-                        "dataset_id": "msl_apxs_supplement_sols_0_3076",
-                        "product_id": csv_path.stem.upper(),
-                        "file_path": str(csv_path),
-                        "sha256_checksum": _sha256_file(csv_path),
-                        "record_count": len(acc),
-                        "rejected_count": len(rej),
-                    }
+                    self._build_product_manifest(
+                        dataset_id="msl_apxs_supplement_sols_0_3076",
+                        product_id=csv_path.stem.upper(),
+                        file_path=csv_path,
+                        source_url=url,
+                        label_path=xml_lbl,
+                        schema_version=acc[0].schema_version if acc and acc[0].schema_version else "apxs_csv_header",
+                        parser_id="apxs_pds4_schema_parser",
+                        parser_version="2.0.0",
+                        coord_method="gale_eqc_target_pyproj",
+                        record_count=len(acc),
+                        rejected_count=len(rej),
+                    )
                 )
 
             # 2. ChemCam MOC Tables
-            for moc_csv in sorted(raw_dir.glob("moc_*.csv")):
-                lbl = moc_csv.with_suffix(".lbl")
-                if not lbl.exists():
-                    lbl = moc_csv.with_suffix(".LBL")
+            for moc_csv in _glob_ci("moc_*.csv"):
+                lbl = _find_companion(moc_csv, (".lbl", ".LBL"))
+                url = f"https://pds-geosciences.wustl.edu/msl/msl-m-chemcam-libs-4_5-rdr-v1/mslccm_1xxx/data/moc/{moc_csv.name}"
                 acc, rej = ChemCamEvidenceAdapter.adapt_moc_csv(
                     moc_csv,
-                    label_path=lbl if lbl.exists() else None,
+                    label_path=lbl,
                     source_dataset_id=f"msl_chemcam_{moc_csv.stem.lower()}",
                     coord_service=coord_svc,
-                    provenance_url=f"https://pds-geosciences.wustl.edu/msl/msl-m-chemcam-libs-4_5-rdr-v1/mslccm_1xxx/data/moc/{moc_csv.name}",
+                    provenance_url=url,
                 )
                 evidence_all.extend(acc)
                 rejected_all.extend(rej)
                 manifests.append(
-                    {
-                        "dataset_id": f"msl_chemcam_{moc_csv.stem.lower()}",
-                        "product_id": moc_csv.stem.upper(),
-                        "file_path": str(moc_csv),
-                        "sha256_checksum": _sha256_file(moc_csv),
-                        "record_count": len(acc),
-                        "rejected_count": len(rej),
-                    }
+                    self._build_product_manifest(
+                        dataset_id=f"msl_chemcam_{moc_csv.stem.lower()}",
+                        product_id=moc_csv.stem.upper(),
+                        file_path=moc_csv,
+                        source_url=url,
+                        label_path=lbl,
+                        schema_version=acc[0].schema_version if acc and acc[0].schema_version else "pds3_moc",
+                        parser_id="chemcam_moc_schema_parser",
+                        parser_version="2.0.0",
+                        coord_method="rmc_site_drive_rover_station",
+                        record_count=len(acc),
+                        rejected_count=len(rej),
+                    )
                 )
 
             # 3. CheMin Mineral RDR5 Tables
-            for cm_csv in sorted(raw_dir.glob("cm*min*.csv")):
-                lbl = cm_csv.with_suffix(".lbl")
-                if not lbl.exists():
-                    lbl = cm_csv.with_suffix(".LBL")
+            for cm_csv in _glob_ci("cm*min*.csv"):
+                lbl = _find_companion(cm_csv, (".lbl", ".LBL"))
+                url = f"https://pds-geosciences.wustl.edu/msl/msl-m-chemin-4-rdr-v1/mslcmn_1xxx/data/rdr5/{cm_csv.name}"
                 acc, rej = CheMinEvidenceAdapter.adapt_rdr5_csv(
                     cm_csv,
-                    label_path=lbl if lbl.exists() else None,
+                    label_path=lbl,
                     source_dataset_id=f"msl_chemin_{cm_csv.stem.lower()}",
                     coord_service=coord_svc,
                     extra_structure_dirs=[raw_dir],
-                    provenance_url=f"https://pds-geosciences.wustl.edu/msl/msl-m-chemin-4-rdr-v1/mslcmn_1xxx/data/rdr5/{cm_csv.name}",
+                    provenance_url=url,
                 )
                 evidence_all.extend(acc)
                 rejected_all.extend(rej)
                 manifests.append(
-                    {
-                        "dataset_id": f"msl_chemin_{cm_csv.stem.lower()}",
-                        "product_id": cm_csv.stem.upper(),
-                        "file_path": str(cm_csv),
-                        "sha256_checksum": _sha256_file(cm_csv),
-                        "record_count": len(acc),
-                        "rejected_count": len(rej),
-                    }
+                    self._build_product_manifest(
+                        dataset_id=f"msl_chemin_{cm_csv.stem.lower()}",
+                        product_id=cm_csv.stem.upper(),
+                        file_path=cm_csv,
+                        source_url=url,
+                        label_path=lbl,
+                        schema_version=acc[0].schema_version if acc and acc[0].schema_version else "pds3_chemin_fmt",
+                        parser_id="chemin_rdr5_schema_parser",
+                        parser_version="2.0.0",
+                        coord_method="rmc_site_drive_rover_station",
+                        record_count=len(acc),
+                        rejected_count=len(rej),
+                    )
                 )
 
             # 4. Audit non-compositional raw ChemCam PSV & REMS files into rejected_records
-            for psv_tab in sorted(raw_dir.glob("*psv*.tab")):
-                lbl = psv_tab.with_suffix(".lbl")
+            for psv_tab in _glob_ci("*psv*.tab"):
+                lbl = _find_companion(psv_tab, (".lbl", ".LBL"))
                 rej = ChemCamEvidenceAdapter.audit_raw_psv_as_non_compositional(
                     psv_tab,
-                    label_path=lbl if lbl.exists() else None,
+                    label_path=lbl,
                 )
                 rejected_all.extend(rej)
 
-            for rems_tab in sorted(raw_dir.glob("rme_*.tab")):
+            for rems_tab in _glob_ci("rme_*.tab"):
                 rej = EnvironmentalExclusionAdapter.audit_non_composition_file(rems_tab)
                 rejected_all.extend(rej)
 
@@ -445,11 +575,14 @@ class CompositionSpatialIndex:
 
     def get_status(self) -> CompositionIndexStatus:
         gen = self.get_active_generation()
+        manifest_path = self.db_path.parent / "reproducibility_manifest.json"
         if gen is None:
             return CompositionIndexStatus(
                 index_available=False,
+                integrity_status=IntegrityStatus.UNAVAILABLE,
                 rtree_enabled=self.rtree_enabled,
                 sqlite_path=str(self.db_path),
+                reproducibility_manifest_path=str(manifest_path) if manifest_path.exists() else None,
                 notes=["No active composition index generation has been built yet."],
             )
         gen_id = gen["generation_id"]
@@ -463,24 +596,46 @@ class CompositionSpatialIndex:
                 (gen_id,),
             ).fetchall()
             prod_rows = conn.execute(
-                "SELECT product_id, file_path, sha256_checksum FROM ingested_products WHERE generation_id = ?",
+                "SELECT product_id, file_path, sha256_checksum, manifest_json FROM ingested_products WHERE generation_id = ?",
                 (gen_id,),
             ).fetchall()
 
         notes = list(json.loads(gen["notes_json"] or "[]"))
-        checksum_valid = True
+        missing_files: List[str] = []
+        mismatches: List[str] = []
+        product_manifests: List[Dict[str, Any]] = []
         for pr in prod_rows:
             fp = Path(pr["file_path"])
-            if fp.exists():
-                if _sha256_file(fp) != pr["sha256_checksum"]:
-                    checksum_valid = False
-                    notes.append(f"Checksum drift detected for source file {fp.name}; index rebuild recommended.")
+            try:
+                mobj = json.loads(pr["manifest_json"] or "{}")
+                if mobj:
+                    product_manifests.append(mobj)
+            except Exception:
+                pass
+            if not fp.exists():
+                missing_files.append(fp.name)
+                notes.append(f"Indexed source file missing on disk: {fp.name}.")
+            elif _sha256_file(fp) != pr["sha256_checksum"]:
+                mismatches.append(fp.name)
+                notes.append(f"Checksum drift detected for source file {fp.name}; index rebuild required.")
+
+        checksum_valid = (len(missing_files) == 0) and (len(mismatches) == 0)
+        ev_cnt = int(gen["evidence_count"])
+        if mismatches:
+            integrity = IntegrityStatus.CHECKSUM_MISMATCH
+        elif missing_files:
+            integrity = IntegrityStatus.SOURCE_FILES_MISSING
+        elif ev_cnt <= 0:
+            integrity = IntegrityStatus.INCOMPLETE
+        else:
+            integrity = IntegrityStatus.VERIFIED
 
         return CompositionIndexStatus(
-            index_available=int(gen["evidence_count"]) > 0,
+            index_available=ev_cnt > 0,
+            integrity_status=integrity,
             active_generation_id=gen_id,
             built_at_utc=gen["created_at_utc"],
-            total_validated_evidence=int(gen["evidence_count"]),
+            total_validated_evidence=ev_cnt,
             located_evidence_count=int(gen["located_count"]),
             unlocated_evidence_count=int(gen["unlocated_count"]),
             rejected_record_count=int(gen["rejected_count"]),
@@ -488,9 +643,13 @@ class CompositionSpatialIndex:
             ingested_products_count=len(prod_rows),
             instruments_indexed=[r[0] for r in inst_rows],
             checksum_valid=checksum_valid,
+            missing_source_files=missing_files,
+            checksum_mismatches=mismatches,
             rtree_enabled=self.rtree_enabled,
             crism_status=gen["crism_status"],
             sqlite_path=str(self.db_path),
+            reproducibility_manifest_path=str(manifest_path) if manifest_path.exists() else None,
+            product_manifests=product_manifests,
             notes=notes,
         )
 

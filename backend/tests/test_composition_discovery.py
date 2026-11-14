@@ -19,6 +19,7 @@ from app.science.composition.models import (
     CompositionSearchMode,
     EvidenceStatus,
     EvidenceType,
+    LocationSemanticType,
     SpeciesCategory,
 )
 from app.science.composition.normalization import (
@@ -28,7 +29,10 @@ from app.science.composition.normalization import (
 )
 from app.science.composition.search import CompositionSearchService, StructuredCompositionQuery
 from app.science.composition.species import get_species_by_id, resolve_species_query
-from app.science.composition.validation import validate_composition_evidence
+from app.science.composition.validation import (
+    compute_deterministic_evidence_id,
+    validate_composition_evidence,
+)
 from app.science.target_registry import TargetRegistryService
 from app.services.destination_service import DestinationEvaluationService
 
@@ -60,7 +64,11 @@ def _make_sample_evidence(**overrides) -> CompositionEvidence:
         "uncertainty_type": "analytical_error",
         "methodology": "APXS alpha-XRF quantitative oxide determination",
         "source_reference": "PDS4_APXS_TEST",
+        "source_file_checksum": "a" * 64,
+        "schema_version": "PDS4_TEST_1",
+        "parser_version": "test_parser_v1",
         "location_verified": True,
+        "location_semantic_type": LocationSemanticType.INSTRUMENT_TARGET_LOCATION,
         "latitude": -4.5895,
         "longitude_east": 137.44172,
         "elevation_m": -4520.0,
@@ -69,10 +77,14 @@ def _make_sample_evidence(**overrides) -> CompositionEvidence:
         "longitude_direction": "East",
         "coordinate_source": "pds4_apxs_gale_eqc_projection",
         "coordinate_provenance": "Converted APXS Gale Crater Equirectangular planar coordinates",
-        "coordinate_uncertainty_m": 5.0,
+        "coordinate_uncertainty_m": None,
     }
     base.update(overrides)
-    return CompositionEvidence(**base)
+    explicit_id = "evidence_id" in overrides
+    ev = CompositionEvidence(**base)
+    if not explicit_id:
+        ev.evidence_id = compute_deterministic_evidence_id(ev)
+    return ev
 
 
 def test_species_vocabulary_normalization_and_ambiguity():
@@ -156,11 +168,12 @@ def test_validation_pipeline_rejects_invalid_and_non_composition_records():
     ok_crs, _, rej_crs = validate_composition_evidence(_make_sample_evidence(crs="EPSG:4326"))
     assert not ok_crs and rej_crs is not None and rej_crs.rejection_stage == 10
 
-    # Valid unlocated record passes ONLY when status == UNLOCATED
+    # Valid unlocated record passes ONLY when status == UNLOCATED & semantic type == UNLOCATED
     ok_unloc, stages_unloc, rej_unloc = validate_composition_evidence(
         _make_sample_evidence(
             evidence_status=EvidenceStatus.UNLOCATED,
             location_verified=False,
+            location_semantic_type=LocationSemanticType.UNLOCATED,
             latitude=None,
             longitude_east=None,
             crs=None,
@@ -237,7 +250,6 @@ def test_spatial_index_rebuild_search_antimeridian_and_targets(tmp_path: Path):
 
     # Antimeridian wrap query on synthetic wrapped point
     wrapped_ev = _make_sample_evidence(
-        evidence_id="ev_wrap_358",
         source_record_ref="wrap:358",
         latitude=-2.0,
         longitude_east=358.5,
@@ -265,7 +277,7 @@ def test_spatial_index_rebuild_search_antimeridian_and_targets(tmp_path: Path):
     manual = treg.register_target(_make_manual_target())
     assert manual.target_status == TargetProvenanceStatus.MANUAL_UNVERIFIED_ADMINISTRATIVE
 
-    ev_loc = _make_sample_evidence(evidence_id="ev_tgt_1", source_record_ref="tgt:1")
+    ev_loc = _make_sample_evidence(source_record_ref="tgt:1")
     ok_t, st_t, _ = validate_composition_evidence(ev_loc)
     assert ok_t
     ev_loc.validation_stages = st_t

@@ -5,13 +5,21 @@ import { AlertOctagon, CheckCircle2, Cpu, Database, Download, ExternalLink, Refr
 import { PageHeader } from "../../components/PageHeader";
 import { StatusBadge } from "../../components/StatusBadge";
 import { API_BASE_URL } from "../../lib/constants";
-import { CompositionIndexStatus, Dataset, Observation, RejectionRecord, SourceRegistryEntry } from "../../types";
+import {
+  CompositionIndexStatus,
+  Dataset,
+  Observation,
+  RejectionRecord,
+  ReproducibilityManifest,
+  SourceRegistryEntry,
+} from "../../types";
 
 export default function EvidenceProvenancePage() {
   const [sources, setSources] = useState<SourceRegistryEntry[]>([]);
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [observations, setObservations] = useState<Observation[]>([]);
   const [indexStatus, setIndexStatus] = useState<CompositionIndexStatus | null>(null);
+  const [manifest, setManifest] = useState<ReproducibilityManifest | null>(null);
   const [rejectedRecords, setRejectedRecords] = useState<RejectionRecord[]>([]);
   const [rebuildingIndex, setRebuildingIndex] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
@@ -23,12 +31,13 @@ export default function EvidenceProvenancePage() {
     setLoading(true);
     setError(null);
     try {
-      const [sRes, dRes, oRes, iRes, rRes] = await Promise.all([
+      const [sRes, dRes, oRes, iRes, rRes, mRes] = await Promise.all([
         fetch(`${API_BASE_URL}/sources`, { cache: "no-store" }),
         fetch(`${API_BASE_URL}/datasets`, { cache: "no-store" }),
         fetch(`${API_BASE_URL}/observations`, { cache: "no-store" }),
         fetch(`${API_BASE_URL}/composition/index/status`, { cache: "no-store" }),
         fetch(`${API_BASE_URL}/composition/rejected?limit=25`, { cache: "no-store" }),
+        fetch(`${API_BASE_URL}/composition/reproducibility-manifest`, { cache: "no-store" }),
       ]);
       if (sRes.ok) setSources(await sRes.json());
       if (dRes.ok) setDatasets(await dRes.json());
@@ -38,6 +47,7 @@ export default function EvidenceProvenancePage() {
         const rejData = await rRes.json();
         setRejectedRecords(rejData.records || []);
       }
+      if (mRes.ok) setManifest(await mRes.json());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to fetch provenance records");
     } finally {
@@ -49,12 +59,13 @@ export default function EvidenceProvenancePage() {
     let active = true;
     async function init() {
       try {
-        const [sRes, dRes, oRes, iRes, rRes] = await Promise.all([
+        const [sRes, dRes, oRes, iRes, rRes, mRes] = await Promise.all([
           fetch(`${API_BASE_URL}/sources`, { cache: "no-store" }),
           fetch(`${API_BASE_URL}/datasets`, { cache: "no-store" }),
           fetch(`${API_BASE_URL}/observations`, { cache: "no-store" }),
           fetch(`${API_BASE_URL}/composition/index/status`, { cache: "no-store" }),
           fetch(`${API_BASE_URL}/composition/rejected?limit=25`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/composition/reproducibility-manifest`, { cache: "no-store" }),
         ]);
         if (!active) return;
         if (sRes.ok) setSources(await sRes.json());
@@ -65,6 +76,7 @@ export default function EvidenceProvenancePage() {
           const rejData = await rRes.json();
           setRejectedRecords(rejData.records || []);
         }
+        if (mRes.ok) setManifest(await mRes.json());
       } catch (err) {
         if (active) setError(err instanceof Error ? err.message : "Failed to fetch provenance records");
       } finally {
@@ -331,28 +343,97 @@ export default function EvidenceProvenancePage() {
         </div>
 
         {indexStatus && (
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-[11px] font-mono">
-            <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
-              <div className="text-[9px] text-slate-500">GENERATION</div>
-              <div className="text-slate-100">{indexStatus.active_generation_id || "None"}</div>
-            </div>
-            <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
-              <div className="text-[9px] text-slate-500">LOCATED EVIDENCE</div>
-              <div className="text-emerald-300">{indexStatus.located_evidence_count}</div>
-            </div>
-            <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
-              <div className="text-[9px] text-slate-500">UNLOCATED EVIDENCE</div>
-              <div className="text-amber-300">{indexStatus.unlocated_evidence_count}</div>
-            </div>
-            <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
-              <div className="text-[9px] text-slate-500">REJECTED RECORDS</div>
-              <div className="text-red-300">{indexStatus.rejected_record_count}</div>
-            </div>
-            <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
-              <div className="text-[9px] text-slate-500">CRISM ORBITAL</div>
-              <div className="text-amber-200 truncate" title={indexStatus.crism_status}>
-                {indexStatus.crism_status}
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-[11px] font-mono">
+              <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
+                <div className="text-[9px] text-slate-500">INTEGRITY</div>
+                <div
+                  className={
+                    indexStatus.integrity_status === "verified" && indexStatus.checksum_valid
+                      ? "text-emerald-300 font-semibold"
+                      : "text-red-300 font-semibold"
+                  }
+                >
+                  {(indexStatus.integrity_status || (indexStatus.checksum_valid ? "verified" : "mismatch")).toUpperCase()}
+                </div>
               </div>
+              <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
+                <div className="text-[9px] text-slate-500">GENERATION</div>
+                <div className="text-slate-100">{indexStatus.active_generation_id || "None"}</div>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
+                <div className="text-[9px] text-slate-500">LOCATED EVIDENCE</div>
+                <div className="text-emerald-300">{indexStatus.located_evidence_count}</div>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
+                <div className="text-[9px] text-slate-500">UNLOCATED EVIDENCE</div>
+                <div className="text-amber-300">{indexStatus.unlocated_evidence_count}</div>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
+                <div className="text-[9px] text-slate-500">REJECTED RECORDS</div>
+                <div className="text-red-300">{indexStatus.rejected_record_count}</div>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
+                <div className="text-[9px] text-slate-500">CRISM ORBITAL</div>
+                <div className="text-amber-200 truncate" title={indexStatus.crism_status}>
+                  {indexStatus.crism_status}
+                </div>
+              </div>
+            </div>
+
+            {!indexStatus.checksum_valid && (
+              <div className="p-3 rounded-lg bg-red-950/40 border border-red-800/50 text-[11px] font-mono text-red-200 space-y-1">
+                <div>
+                  Integrity check failed ({indexStatus.integrity_status}):
+                </div>
+                {indexStatus.missing_source_files && indexStatus.missing_source_files.length > 0 && (
+                  <div>Missing: {indexStatus.missing_source_files.join(", ")}</div>
+                )}
+                {indexStatus.checksum_mismatches && indexStatus.checksum_mismatches.length > 0 && (
+                  <div>Modified SHA-256: {indexStatus.checksum_mismatches.join(", ")}</div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {manifest && manifest.products && manifest.products.length > 0 && (
+          <div className="space-y-2">
+            <div className="text-xs font-semibold text-slate-200">
+              Reproducibility Manifest ({manifest.products.length} raw NASA artifacts · {manifest.determinism_version} · Rank Config {manifest.ranking_config_id} v{manifest.ranking_config_version})
+            </div>
+            <div className="overflow-x-auto rounded-lg border border-[#1d2536]">
+              <table className="w-full text-left text-[10px] font-mono">
+                <thead className="bg-[#0d111a] text-slate-400 border-b border-[#1d2536]">
+                  <tr>
+                    <th className="px-2.5 py-1.5">Product</th>
+                    <th className="px-2.5 py-1.5">SHA-256</th>
+                    <th className="px-2.5 py-1.5">Schema</th>
+                    <th className="px-2.5 py-1.5">Parser</th>
+                    <th className="px-2.5 py-1.5">Coords Method</th>
+                    <th className="px-2.5 py-1.5 text-right">Accepted / Rej</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#1a2233] text-slate-300">
+                  {manifest.products.map((pm) => (
+                    <tr key={`${pm.product_id}-${pm.sha256_checksum}`}>
+                      <td className="px-2.5 py-1.5 text-slate-100">{pm.product_id}</td>
+                      <td className="px-2.5 py-1.5 text-slate-400" title={pm.sha256_checksum}>
+                        {pm.sha256_checksum ? `${pm.sha256_checksum.slice(0, 12)}...` : "N/A"}
+                      </td>
+                      <td className="px-2.5 py-1.5">{pm.schema_version || "N/A"}</td>
+                      <td className="px-2.5 py-1.5">
+                        {pm.parser_id || "?"} v{pm.parser_version || "?"}
+                      </td>
+                      <td className="px-2.5 py-1.5">{pm.coordinate_association_method || "N/A"}</td>
+                      <td className="px-2.5 py-1.5 text-right">
+                        <span className="text-emerald-300">{pm.record_count ?? 0}</span> /{" "}
+                        <span className="text-red-300">{pm.rejected_count ?? 0}</span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
         )}

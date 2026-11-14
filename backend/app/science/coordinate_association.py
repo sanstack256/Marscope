@@ -14,10 +14,11 @@ import json
 import math
 from pathlib import Path
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 from pyproj import CRS, Transformer
 from app.geospatial.crs import MARS_EQUATORIAL_RADIUS_M, validate_mars_coordinates
+from app.science.composition.models import LocationSemanticType
 
 
 # Authoritative JPL/MMGIS MSL Gale Crater Equirectangular projection (R = 3396190.0 m at equator)
@@ -46,11 +47,24 @@ class AssociatedCoordinates(BaseModel):
     crs: str = "IAU2000:49900"
     latitude_convention: str = "Planetocentric"
     longitude_direction: str = "East"
+    location_semantic_type: LocationSemanticType = LocationSemanticType.ROVER_STATION_LOCATION
     rmc_key: Optional[str] = None
+    waypoint_id: Optional[str] = None
     coordinate_source: str = Field(..., description="Traceable association mechanism ID")
     coordinate_provenance: str = Field(..., description="Human-readable provenance record")
+    original_coordinate_values: Optional[Dict[str, Any]] = None
+    original_coordinate_crs: Optional[str] = None
+    coordinate_transform: Optional[str] = None
+    coordinate_transform_params: Optional[Dict[str, Any]] = None
+    association_rule_version: str = "coord_assoc_v2"
+    coordinate_limitations: List[str] = Field(default_factory=list)
     coordinate_uncertainty_m: Optional[float] = Field(
-        None, description="Estimated horizontal positional uncertainty in meters (e.g., rover station vs mast standoff)"
+        None,
+        description="Reported horizontal positional uncertainty in meters ONLY when explicitly present in source; None when unreported.",
+    )
+    instrument_standoff_m: Optional[float] = Field(
+        None,
+        description="Measured mast-to-target range when reported (e.g. ChemCam DISTANCE_TO_TARGET); NOT directional target offset uncertainty.",
     )
 
 
@@ -143,8 +157,9 @@ class CoordinateAssociationService:
         self,
         site: Optional[int],
         drive: Optional[int],
-        uncertainty_m: Optional[float] = 10.0,
+        uncertainty_m: Optional[float] = None,
         rmc_source: str = "pds3_label_rover_motion_counter",
+        standoff_m: Optional[float] = None,
     ) -> Optional[AssociatedCoordinates]:
         """Resolve verified rover localization coordinates by (Site, Drive) RMC key."""
         if site is None or drive is None:
@@ -154,6 +169,14 @@ class CoordinateAssociationService:
         if not wp:
             return None
         lat, lon = validate_mars_coordinates(wp["lat"], wp["lon"], "Planetocentric", "East")
+        limitations = [
+            "Coordinates represent the MSL rover station waypoint (RMC Site_Drive), NOT an independently surveyed instrument target coordinate.",
+            "JPL MSL_waypoints.json does not publish horizontal localization uncertainty; coordinate_uncertainty_m is unreported (None).",
+        ]
+        if standoff_m is not None:
+            limitations.append(
+                f"Instrument standoff distance_to_target={standoff_m:.2f} m recorded without azimuth; actual laser spot lies on rover station + unknown azimuth vector."
+            )
         return AssociatedCoordinates(
             latitude=lat,
             longitude=lon,
@@ -163,24 +186,42 @@ class CoordinateAssociationService:
             crs="IAU2000:49900",
             latitude_convention="Planetocentric",
             longitude_direction="East",
+            location_semantic_type=LocationSemanticType.ROVER_STATION_LOCATION,
             rmc_key=key,
+            waypoint_id=key,
             coordinate_source=f"{self._source_label}+{rmc_source}",
             coordinate_provenance=(
                 f"Matched MSL RMC Site={site}, Drive={drive} against official JPL Curiosity traverse "
-                f"waypoints ({self._source_label}); mast/arm target offset represented by ±{uncertainty_m or 10.0:.1f} m uncertainty."
+                f"waypoints ({self._source_label}); assigned rover station location (uncertainty unreported in source)."
             ),
+            original_coordinate_values={
+                "rmc": key,
+                "easting_m": wp.get("easting"),
+                "northing_m": wp.get("northing"),
+                "elev_geoid_m": wp.get("elev_geoid"),
+                "lat_deg": wp.get("lat"),
+                "lon_deg": wp.get("lon"),
+            },
+            original_coordinate_crs="JPL_MSL_waypoints_Gale_EQC_IAU2000",
+            coordinate_transform="rmc_site_drive_exact_lookup",
+            coordinate_transform_params={"site": int(site), "drive": int(drive), "rule": rmc_source},
+            association_rule_version="coord_assoc_v2",
+            coordinate_limitations=limitations,
             coordinate_uncertainty_m=uncertainty_m,
+            instrument_standoff_m=standoff_m,
         )
 
     def resolve_from_pds_metadata(
         self,
         pds_meta: Optional[Dict[str, Any]] = None,
         product_id: Optional[str] = None,
-        uncertainty_m: Optional[float] = 10.0,
+        uncertainty_m: Optional[float] = None,
+        standoff_m: Optional[float] = None,
     ) -> Optional[AssociatedCoordinates]:
         """
         Attempt coordinate association from explicit PDS label fields first, then ROVER_MOTION_COUNTER
         against JPL waypoints, then documented filename RMC token. Returns None when unlocated.
+        Never invents a default positional uncertainty.
         """
         if pds_meta:
             rmc = pds_meta.get("rover_motion_counter") or {}
@@ -190,6 +231,7 @@ class CoordinateAssociationService:
                     rmc["drive"],
                     uncertainty_m=uncertainty_m,
                     rmc_source="pds3_label_rover_motion_counter",
+                    standoff_m=standoff_m,
                 )
                 if res:
                     return res
@@ -203,5 +245,6 @@ class CoordinateAssociationService:
                     drive,
                     uncertainty_m=uncertainty_m,
                     rmc_source=rule,
+                    standoff_m=standoff_m,
                 )
         return None

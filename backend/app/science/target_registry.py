@@ -103,7 +103,7 @@ class TargetRegistryService:
                 elevation_m=cand.elevation_m,
                 crs=cand.crs,
                 geology_type=geol,
-                scientific_value=min(1.0, max(0.0, cand.ranking.composite_rank_score)),
+                scientific_value=min(1.0, max(0.0, cand.ranking.composite_rank_score or 0.0)),
                 instrument_source=inst_str,
                 provenance_product_id=f"CAND:{cand.candidate_id}",
                 target_status=TargetProvenanceStatus.EVIDENCE_BACKED,

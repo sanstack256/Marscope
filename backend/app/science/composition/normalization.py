@@ -7,9 +7,12 @@ conversions while always preserving the original reported value, unit, and formu
 """
 
 import math
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from app.science.composition.models import SpeciesCategory, SpeciesRecord
 from app.science.composition.species import get_species_by_id
+
+
+STOICHIOMETRIC_WEIGHTS_VERSION = "IUPAC_CIAAW_2021"
 
 
 class NormalizationError(ValueError):
@@ -63,14 +66,15 @@ def normalize_concentration_value(
     raise NormalizationError(f"Unsupported unit conversion from '{canon_src}' to '{dest}'.")
 
 
-def oxide_wt_pct_to_element_wt_pct(
+def oxide_wt_pct_to_element_with_metadata(
     oxide_species_id: str,
     oxide_wt_pct: float,
     oxide_uncertainty_wt_pct: Optional[float] = None,
-) -> Tuple[str, float, Optional[float], str]:
+) -> Dict[str, Any]:
     """
     Convert calibrated oxide concentration (wt%) into elemental mass concentration (wt%)
-    using exact IUPAC stoichiometric atomic weights from species vocabulary.
+    using exact IUPAC stoichiometric atomic weights from species vocabulary, returning
+    full audit metadata (`factor`, `weights_version`, `formula`, `element_id`).
     """
     if not math.isfinite(oxide_wt_pct):
         raise NormalizationError("Oxide value must be finite.")
@@ -87,5 +91,35 @@ def oxide_wt_pct_to_element_wt_pct(
         if oxide_uncertainty_wt_pct is not None and math.isfinite(oxide_uncertainty_wt_pct)
         else None
     )
-    formula = f"{ox_spec.canonical_id} wt% * {factor} (IUPAC stoichiometry) -> {ox_spec.stoichiometric_element} wt%"
-    return ox_spec.stoichiometric_element, elem_val, elem_err, formula
+    formula = f"{ox_spec.canonical_id} wt% * {factor} ({STOICHIOMETRIC_WEIGHTS_VERSION} stoichiometry) -> {ox_spec.stoichiometric_element} wt%"
+    return {
+        "element_id": ox_spec.stoichiometric_element,
+        "source_oxide_species": ox_spec.canonical_id,
+        "element_wt_pct": elem_val,
+        "element_uncertainty_wt_pct": elem_err,
+        "stoichiometric_factor": factor,
+        "weights_version": STOICHIOMETRIC_WEIGHTS_VERSION,
+        "formula": formula,
+    }
+
+
+def oxide_wt_pct_to_element_wt_pct(
+    oxide_species_id: str,
+    oxide_wt_pct: float,
+    oxide_uncertainty_wt_pct: Optional[float] = None,
+) -> Tuple[str, float, Optional[float], str]:
+    """
+    Convert calibrated oxide concentration (wt%) into elemental mass concentration (wt%)
+    using exact IUPAC stoichiometric atomic weights from species vocabulary.
+    """
+    res = oxide_wt_pct_to_element_with_metadata(
+        oxide_species_id=oxide_species_id,
+        oxide_wt_pct=oxide_wt_pct,
+        oxide_uncertainty_wt_pct=oxide_uncertainty_wt_pct,
+    )
+    return (
+        res["element_id"],
+        res["element_wt_pct"],
+        res["element_uncertainty_wt_pct"],
+        res["formula"],
+    )

@@ -13,12 +13,15 @@ from app.geospatial.crs import MARS_EQUATORIAL_RADIUS_M, MARS_POLAR_RADIUS_M, no
 from app.science.composition.models import (
     CompositionEvidence,
     EvidenceType,
+    RankingConfiguration,
     RankingDimensions,
     SearchMatchType,
 )
 
 # Authoritative Mars IAU2000 ellipsoidal geodesic calculator
 MARS_GEOD = Geod(a=MARS_EQUATORIAL_RADIUS_M, b=MARS_POLAR_RADIUS_M)
+
+DEFAULT_HEURISTIC_RANKING_CONFIG = RankingConfiguration()
 
 
 def mars_geodesic_distance_and_bearing(
@@ -45,11 +48,15 @@ def compute_ranking_dimensions(
     corroborating_instruments: List[str],
     nearby_count: int,
     distance_m: Optional[float] = None,
-    distance_scale_m: float = 2000.0,
+    config: Optional[RankingConfiguration] = None,
 ) -> RankingDimensions:
     """
-    Compute deterministic, explainable ranking components (NOT probability percentages).
+    Compute deterministic, explicitly heuristic exploration-priority ranking components.
+    Never fabricates default quality (None when unreported) or default corroboration (None when single observation).
     """
+    cfg = config or DEFAULT_HEURISTIC_RANKING_CONFIG
+    unavailable: List[str] = []
+
     # 1. Evidence tier weight by analytical directness
     if match_type == SearchMatchType.EXACT_SPECIES and ev.evidence_type == EvidenceType.DIRECT_MINERAL_DETECTION:
         tier = 1.0
@@ -62,68 +69,104 @@ def compute_ranking_dimensions(
     else:
         tier = 0.50
 
-    # 2. Abundance normalized cleanly within the observed result set for this unit/query
-    val = float(ev.normalized_value or 0.0)
-    if ev.normalized_unit == "ppm":
-        val_wt = val / 10000.0
-        max_wt = max(max_observed_abundance / 10000.0, 1e-6)
+    # 2. Abundance normalized cleanly within observed result set
+    abundance_comp: Optional[float] = None
+    if ev.normalized_value is not None and math.isfinite(ev.normalized_value):
+        val = float(ev.normalized_value)
+        if ev.normalized_unit == "ppm":
+            val_wt = val / 10000.0
+            max_wt = max(max_observed_abundance / 10000.0, 1e-6)
+        else:
+            val_wt = val
+            max_wt = max(max_observed_abundance, 1e-6)
+        abundance_comp = round(min(1.0, max(0.0, val_wt / max_wt)), 4) if max_wt > 0 else 0.0
     else:
-        val_wt = val
-        max_wt = max(max_observed_abundance, 1e-6)
-    abundance_comp = round(min(1.0, max(0.0, val_wt / max_wt)), 4) if max_wt > 0 else 0.0
+        val = 0.0
+        unavailable.append("abundance_component")
 
-    # 3. Uncertainty & quality score
-    quality_comp = 0.85
-    if ev.quality_flag and "low" in ev.quality_flag.lower():
-        quality_comp -= 0.25
-    if ev.uncertainty_value is not None and val > 0:
-        rel_err = ev.uncertainty_value / val
-        if rel_err <= 0.05:
-            quality_comp = min(1.0, quality_comp + 0.10)
-        elif rel_err > 0.35:
-            quality_comp = max(0.25, quality_comp - 0.25)
-    quality_comp = round(max(0.0, min(1.0, quality_comp)), 4)
+    # 3. Uncertainty & calibration quality score (None when source reports no uncertainty or quality flag)
+    quality_comp: Optional[float] = None
+    if ev.uncertainty_value is not None and ev.normalized_value is not None and ev.normalized_value > 0:
+        rel_err = float(ev.uncertainty_value) / float(ev.normalized_value)
+        q_base = max(0.05, 1.0 - min(0.95, rel_err))
+        if ev.quality_flag and "low" in ev.quality_flag.lower():
+            q_base *= 0.65
+        quality_comp = round(max(0.0, min(1.0, q_base)), 4)
+    elif ev.quality_flag and any(tok in ev.quality_flag.lower() for tok in ("low", "poor", "fair", "high")):
+        q_low = ev.quality_flag.lower()
+        if "low" in q_low or "poor" in q_low:
+            quality_comp = 0.45
+        elif "fair" in q_low:
+            quality_comp = 0.70
+        else:
+            quality_comp = 0.90
+    else:
+        unavailable.append("quality_component")
 
-    # 4. Multi-instrument / repeated observation corroboration
+    # 4. Multi-instrument / repeated observation corroboration (None when only 1 observation exists)
     n_inst = len(set(corroborating_instruments))
-    corrob_comp = round(min(1.0, 0.35 * max(0, n_inst - 1) + 0.12 * min(4, max(0, nearby_count - 1)) + 0.20), 4)
+    corrob_comp: Optional[float] = None
+    if nearby_count >= 2 or n_inst >= 2:
+        corrob_comp = round(
+            min(1.0, 0.40 * max(0, n_inst - 1) + 0.15 * min(4, max(0, nearby_count - 1))),
+            4,
+        )
+    else:
+        unavailable.append("corroboration_component")
 
     # 5. Geodesic spatial proximity if astronaut position is available
     prox_comp: Optional[float] = None
     if distance_m is not None and math.isfinite(distance_m):
-        prox_comp = round(math.exp(-max(0.0, distance_m) / max(1.0, distance_scale_m)), 4)
-        score = (
-            0.35 * tier
-            + 0.25 * abundance_comp
-            + 0.15 * quality_comp
-            + 0.10 * corrob_comp
-            + 0.15 * prox_comp
+        prox_comp = round(
+            math.exp(-max(0.0, distance_m) / max(1.0, cfg.distance_reference_scale_m)),
+            4,
         )
-        formula = "0.35*tier + 0.25*abundance + 0.15*quality + 0.10*corroboration + 0.15*exp(-dist_m/2000)"
     else:
-        score = (
-            0.40 * tier
-            + 0.30 * abundance_comp
-            + 0.15 * quality_comp
-            + 0.15 * corrob_comp
-        )
-        formula = "0.40*tier + 0.30*abundance + 0.15*quality + 0.15*corroboration (no astronaut position)"
+        unavailable.append("spatial_proximity_component")
+
+    # Weighted linear sum re-normalized across available components only
+    w = cfg.weights
+    active_terms: List[Tuple[str, float, float]] = [
+        ("evidence_tier", float(w.get("evidence_tier", 0.35)), round(tier, 4))
+    ]
+    if abundance_comp is not None:
+        active_terms.append(("abundance", float(w.get("abundance", 0.25)), abundance_comp))
+    if quality_comp is not None:
+        active_terms.append(("quality", float(w.get("quality", 0.15)), quality_comp))
+    if corrob_comp is not None:
+        active_terms.append(("corroboration", float(w.get("corroboration", 0.15)), corrob_comp))
+    if prox_comp is not None:
+        active_terms.append(("spatial_proximity", float(w.get("spatial_proximity", 0.10)), prox_comp))
+
+    weight_sum = sum(weight for _, weight, _ in active_terms)
+    composite_score: Optional[float] = None
+    if weight_sum > 0:
+        composite_score = round(sum(weight * val_c for _, weight, val_c in active_terms) / weight_sum, 4)
+
+    formula_parts = [f"{round(weight / weight_sum, 3)}*{name}" for name, weight, _ in active_terms] if weight_sum > 0 else []
+    formula = f"[{cfg.ranking_config_id} v{cfg.ranking_config_version} HEURISTIC] " + " + ".join(formula_parts)
+    if unavailable:
+        formula += f" (unreported/excluded: {', '.join(unavailable)})"
 
     val_str = f"{ev.normalized_value:.3g} {ev.normalized_unit}" if ev.normalized_value is not None else "N/A"
-    err_str = f" +/- {ev.uncertainty_value:.3g}" if ev.uncertainty_value is not None else ""
+    err_str = f" +/- {ev.uncertainty_value:.3g}" if ev.uncertainty_value is not None else " (uncertainty unreported)"
     dist_str = f"; {distance_m:.0f} m geodesic from astronaut" if distance_m is not None else ""
     rationale = (
-        f"{ev.instrument_id} {ev.canonical_species_id}={val_str}{err_str} ({match_type.value})"
-        f"; {len(set(corroborating_instruments))} instrument(s) within cluster{dist_str}."
+        f"[Heuristic priority only] {ev.instrument_id} {ev.canonical_species_id}={val_str}{err_str} "
+        f"({match_type.value}); {n_inst} instrument(s), {nearby_count} obs at cluster{dist_str}."
     )
 
     return RankingDimensions(
+        ranking_config_id=cfg.ranking_config_id,
+        ranking_config_version=cfg.ranking_config_version,
+        is_heuristic_only=cfg.is_heuristic_only,
         evidence_tier_score=round(tier, 4),
         abundance_component=abundance_comp,
         quality_component=quality_comp,
         corroboration_component=corrob_comp,
         spatial_proximity_component=prox_comp,
-        composite_rank_score=round(score, 4),
+        composite_rank_score=composite_score,
+        unavailable_dimensions=unavailable,
         score_formula=formula,
         rationale=rationale,
     )

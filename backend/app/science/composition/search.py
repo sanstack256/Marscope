@@ -18,13 +18,16 @@ from app.science.composition.models import (
     CompositionIndexStatus,
     CompositionSearchMode,
     EvidenceType,
+    LocationSemanticType,
     RankedCompositionHit,
+    RankingConfiguration,
     SearchMatchType,
     SpeciesCategory,
     SpeciesResolutionResult,
 )
-from app.science.composition.normalization import oxide_wt_pct_to_element_wt_pct
+from app.science.composition.normalization import oxide_wt_pct_to_element_with_metadata
 from app.science.composition.ranking import (
+    DEFAULT_HEURISTIC_RANKING_CONFIG,
     compute_ranking_dimensions,
     mars_geodesic_distance_and_bearing,
 )
@@ -51,6 +54,7 @@ class StructuredCompositionQuery(BaseModel):
     sort_by: str = Field("rank", description="rank | distance | abundance | sol")
     limit: int = Field(50, ge=1, le=500)
     offset: int = Field(0, ge=0)
+    ranking_config: Optional[RankingConfiguration] = None
 
 
 class StructuredCompositionSearchResult(BaseModel):
@@ -59,6 +63,7 @@ class StructuredCompositionSearchResult(BaseModel):
     index_status: CompositionIndexStatus
     index_available: bool
     astronaut_position_used: Optional[Dict[str, float]] = None
+    ranking_configuration_used: RankingConfiguration = Field(default_factory=lambda: DEFAULT_HEURISTIC_RANKING_CONFIG)
     total_located_matches: int = 0
     unlocated_matches_count: int = 0
     returned_count: int = 0
@@ -85,6 +90,8 @@ class CompositionSearchService:
             a_lat, a_lon = validate_mars_coordinates(req.astronaut_latitude, req.astronaut_longitude)
             astro_pos = {"latitude": a_lat, "longitude_east": normalize_longitude_360(a_lon)}
 
+        rank_cfg = req.ranking_config or DEFAULT_HEURISTIC_RANKING_CONFIG
+
         if not status.index_available:
             return StructuredCompositionSearchResult(
                 query=req.query,
@@ -92,6 +99,7 @@ class CompositionSearchService:
                 index_status=status,
                 index_available=False,
                 astronaut_position_used=astro_pos,
+                ranking_configuration_used=rank_cfg,
                 unavailable_reason=(
                     "Composition spatial index is currently empty or unbuilt. "
                     "Acquire NASA PDS composition products (APXS / ChemCam MOC / CheMin RDR5) "
@@ -106,6 +114,7 @@ class CompositionSearchService:
                 index_status=status,
                 index_available=True,
                 astronaut_position_used=astro_pos,
+                ranking_configuration_used=rank_cfg,
                 unavailable_reason=res.explanation,
             )
 
@@ -209,18 +218,28 @@ class CompositionSearchService:
             mtype, mexpl = target_species_meta[ev.canonical_species_id]
             ev_out = ev
             if mtype == SearchMatchType.OXIDE_TO_ELEMENT_CONVERSION and spec.category == SpeciesCategory.ELEMENT and ev.normalized_value is not None:
-                el_id, el_val, el_err, stoich_formula = oxide_wt_pct_to_element_wt_pct(
+                stoich = oxide_wt_pct_to_element_with_metadata(
                     ev.canonical_species_id, ev.normalized_value, ev.uncertainty_value
                 )
+                # Preserve exact uncertainty matching only if units align cleanly
+                el_err = stoich["element_uncertainty_wt_pct"]
                 ev_out = ev.model_copy(
                     update={
-                        "normalized_value": el_val,
+                        "normalized_value": stoich["element_wt_pct"],
                         "normalized_unit": "wt%",
                         "uncertainty_value": el_err,
-                        "normalization_formula": stoich_formula,
+                        "uncertainty_unit": "wt%" if el_err is not None else None,
+                        "normalization_formula": stoich["formula"],
+                        "is_stoichiometric_conversion": True,
+                        "source_oxide_species": stoich["source_oxide_species"],
+                        "stoichiometric_factor": stoich["stoichiometric_factor"],
+                        "stoichiometric_weights_version": stoich["weights_version"],
                     }
                 )
-                mexpl = f"{ev.canonical_species_id} ({ev.raw_value} {ev.raw_unit}) converted via {stoich_formula}."
+                mexpl = (
+                    f"Stoichiometric oxide conversion ({stoich['weights_version']}): "
+                    f"{ev.canonical_species_id} ({ev.raw_value} {ev.raw_unit}) -> {spec.canonical_id} ({stoich['element_wt_pct']} wt%) via factor {stoich['stoichiometric_factor']}."
+                )
 
             if req.min_value is not None and (ev_out.normalized_value is None or ev_out.normalized_value < req.min_value):
                 continue
@@ -258,6 +277,16 @@ class CompositionSearchService:
                 scientific_warnings=warnings,
             )
 
+        seen_oxide_sources = {item[0].canonical_species_id for item in processed if item[0].is_stoichiometric_conversion}
+        if "FeO" in seen_oxide_sources and "FeOT" in seen_oxide_sources:
+            warnings.append(
+                "Total iron oxide stoichiometry combines APXS total iron reported as FeO with ChemCam LIBS total iron reported as FeOT (both on divalent FeO basis; oxidation state Fe2+/Fe3+ is not independently resolved)."
+            )
+        if spec.canonical_id in {"FeO", "FeOT"}:
+            warnings.append(
+                "APXS reports total iron as FeO and ChemCam LIBS MOC reports total iron as FeOT; both express total iron on an equivalent FeO basis rather than separated ferric/ferrous speciation."
+            )
+
         # Compute max abundance per query unit scale for ranking normalization
         max_abund = max((float(x[0].normalized_value or 0.0) for x in processed), default=1.0)
 
@@ -281,6 +310,7 @@ class CompositionSearchService:
                 corroborating_instruments=insts,
                 nearby_count=len(peer_items),
                 distance_m=dist_m,
+                config=rank_cfg,
             )
             hits.append(
                 RankedCompositionHit(
@@ -297,7 +327,12 @@ class CompositionSearchService:
 
         # Sort hits deterministically
         if req.sort_by == "distance" and astro_pos is not None:
-            hits.sort(key=lambda h: (h.distance_from_astronaut_m if h.distance_from_astronaut_m is not None else 1e12, -h.ranking.composite_rank_score))
+            hits.sort(
+                key=lambda h: (
+                    h.distance_from_astronaut_m if h.distance_from_astronaut_m is not None else 1e12,
+                    -(h.ranking.composite_rank_score if h.ranking.composite_rank_score is not None else -1.0),
+                )
+            )
         elif req.sort_by == "abundance":
             hits.sort(key=lambda h: -(h.evidence.normalized_value or 0.0))
         elif req.sort_by == "sol":
@@ -305,7 +340,7 @@ class CompositionSearchService:
         else:
             hits.sort(
                 key=lambda h: (
-                    -h.ranking.composite_rank_score,
+                    -(h.ranking.composite_rank_score if h.ranking.composite_rank_score is not None else -1.0),
                     -(h.evidence.normalized_value or 0.0),
                     h.distance_from_astronaut_m if h.distance_from_astronaut_m is not None else 1e12,
                 )
@@ -316,7 +351,7 @@ class CompositionSearchService:
         for ckey, items in clusters.items():
             # Pick best ranked hit in cluster as cluster representative
             cluster_hits = [h for h in hits if f"{round(float(h.evidence.latitude), 3):.3f}_{round(float(h.evidence.longitude_east), 3):.3f}" == ckey]
-            cluster_hits.sort(key=lambda h: -h.ranking.composite_rank_score)
+            cluster_hits.sort(key=lambda h: -(h.ranking.composite_rank_score if h.ranking.composite_rank_score is not None else -1.0))
             best = cluster_hits[0]
             rep = best.evidence
             sols = [h.evidence.sol for h in cluster_hits if h.evidence.sol is not None]
@@ -330,8 +365,10 @@ class CompositionSearchService:
                     longitude_east=float(rep.longitude_east),  # type: ignore[arg-type]
                     elevation_m=rep.elevation_m,
                     crs=rep.crs or "IAU2000:49900",
+                    location_semantic_type=rep.location_semantic_type,
                     coordinate_source=rep.coordinate_source or "verified",
                     coordinate_uncertainty_m=rep.coordinate_uncertainty_m,
+                    coordinate_limitations=rep.coordinate_limitations,
                     distance_from_astronaut_m=best.distance_from_astronaut_m,
                     bearing_deg=best.bearing_deg,
                     matched_evidence_count=len(cluster_hits),
@@ -346,7 +383,7 @@ class CompositionSearchService:
                     sol_range=sol_rng,
                 )
             )
-        cand_locs.sort(key=lambda c: -c.ranking.composite_rank_score)
+        cand_locs.sort(key=lambda c: -(c.ranking.composite_rank_score if c.ranking.composite_rank_score is not None else -1.0))
 
         paged_hits = hits[req.offset : req.offset + req.limit]
         return StructuredCompositionSearchResult(
@@ -355,6 +392,7 @@ class CompositionSearchService:
             index_status=status,
             index_available=True,
             astronaut_position_used=astro_pos,
+            ranking_configuration_used=rank_cfg,
             total_located_matches=len(hits),
             unlocated_matches_count=unlocated_count,
             returned_count=len(paged_hits),

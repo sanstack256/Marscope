@@ -118,7 +118,10 @@ All endpoints are served under the `/api` prefix by the FastAPI backend. Standar
 - **Description:** Returns full `CompositionEvidence` provenance, raw vs stoichiometric conversion formula, coordinate derivation source, and all 12 `validation_stages`.
 
 ### `GET /api/composition/rejected`
-- **Description:** Returns paginated `RejectionRecord` audit log (`?limit=50&offset=0`) showing why passive PSVs, REMS tables, `<LOD` measurements, or invalid records were excluded.
+- **Description:** Returns paginated `RejectionRecord` audit log (`?limit=50&offset=0`) showing why passive PSVs, REMS tables, `<LOD` measurements, unknown CheMin species, or invalid records were excluded.
+
+### `GET /api/composition/reproducibility-manifest`
+- **Description:** Returns `datasets/index/reproducibility_manifest.json` containing the deterministic `generation_id`, raw artifact SHA-256 digests, schema/parser versions, coordinate association rules, `RankingConfiguration`, and record totals. Also `GET /api/composition/index/status` exposes `integrity_status` (`verified | source_files_missing | checksum_mismatch | incomplete | unavailable`), `missing_source_files`, and `checksum_mismatches`.
 
 ### `POST /api/targets/generate`
 - **Description:** Deterministically generates `evidence_backed` `ScienceTarget` records from top-ranked composition discovery clusters, storing immutable `evidence_ids` and distance/rationale metadata. Also `GET /api/sources/msl/archive-query` exposes live NASA PDS/ODE archive product discovery.

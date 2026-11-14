@@ -299,7 +299,9 @@ export function MarsGlobeViewer() {
 
     // Render Composition Discovery candidate markers
     compositionCandidates.forEach((cand, idx) => {
+      if (cand.location_semantic_type === "unlocated") return;
       const isSelected = cand.candidate_id === selectedCandidateId;
+      const isRoverStation = cand.location_semantic_type === "rover_station_location";
       const lon180 = cand.longitude_east > 180 ? cand.longitude_east - 360 : cand.longitude_east;
       const pos = marsEllipsoid.cartographicToCartesian(
         Cesium.Cartographic.fromDegrees(lon180, cand.latitude, 550)
@@ -308,20 +310,24 @@ export function MarsGlobeViewer() {
         cand.best_normalized_value != null
           ? `${cand.best_normalized_value.toFixed(2)} ${cand.best_normalized_unit ?? ""}`.trim()
           : cand.best_species_id;
+      const semanticTag = isRoverStation ? "Station" : "Target";
+      const baseColor = isRoverStation ? "#c084fc" : "#f59e0b";
       viewer.entities.add({
         id: `candidate:${cand.candidate_id}`,
         position: pos,
         point: {
-          pixelSize: isSelected ? 14 : 10,
-          color: Cesium.Color.fromCssColorString(isSelected ? "#34d399" : "#f59e0b"),
+          pixelSize: isSelected ? 14 : isRoverStation ? 9 : 11,
+          color: Cesium.Color.fromCssColorString(isSelected ? "#34d399" : baseColor),
           outlineColor: isSelected ? Cesium.Color.WHITE : Cesium.Color.fromCssColorString("#0b0d13"),
           outlineWidth: isSelected ? 2.5 : 1.5,
         },
         label: isSelected || idx < 5
           ? {
-              text: `#${idx + 1} ${cand.cluster_label} (${valStr})`,
+              text: `#${idx + 1} [${semanticTag}] ${cand.cluster_label} (${valStr})`,
               font: isSelected ? "11px monospace" : "10px monospace",
-              fillColor: Cesium.Color.fromCssColorString(isSelected ? "#a7f3d0" : "#fde68a"),
+              fillColor: Cesium.Color.fromCssColorString(
+                isSelected ? "#a7f3d0" : isRoverStation ? "#e9d5ff" : "#fde68a"
+              ),
               backgroundColor: Cesium.Color.fromCssColorString("#0b0d13D9"),
               showBackground: true,
               pixelOffset: new Cesium.Cartesian2(0, -18),

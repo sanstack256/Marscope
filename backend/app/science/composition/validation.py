@@ -15,6 +15,7 @@ from app.science.composition.models import (
     CompositionEvidence,
     EvidenceStatus,
     EvidenceType,
+    LocationSemanticType,
     RejectionRecord,
     SpeciesCategory,
     ValidationStageResult,
@@ -22,7 +23,28 @@ from app.science.composition.models import (
 from app.science.composition.species import get_species_by_id
 
 
+EVIDENCE_ID_DETERMINISM_VERSION = "evidence_id_v1"
 _NON_COMPOSITION_INSTRUMENTS = {"REMS", "RAD", "NAVCAM", "HAZCAM", "MASTCAM", "MARDI", "DAN"}
+
+
+def compute_deterministic_evidence_id(ev: CompositionEvidence) -> str:
+    """
+    Compute the canonical content-derived SHA-256 evidence ID exclusively from
+    immutable source identity fields (never timestamps, UUIDs, or host filesystem paths).
+    """
+    ver = (ev.determinism_version or EVIDENCE_ID_DETERMINISM_VERSION).strip()
+    key = "|".join(
+        [
+            ver,
+            ev.source_dataset_id.strip(),
+            ev.product_id.strip(),
+            ev.source_record_ref.strip(),
+            ev.canonical_species_id.strip(),
+            ev.raw_species_name.strip(),
+            ev.evidence_type.value,
+        ]
+    )
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
 
 
 def _make_rejection(
@@ -65,10 +87,24 @@ def validate_composition_evidence(
     def ok(num: int, name: str, detail: str) -> None:
         stages.append(ValidationStageResult(stage_number=num, stage_name=name, passed=True, detail=detail))
 
-    # Stage 1: Source dataset & product identity
+    # Stage 1: Source dataset, product & checksum provenance identity
     if not ev.source_dataset_id.strip() or not ev.product_id.strip() or not ev.source_reference.strip():
         return fail(1, "source_dataset_identity", "MISSING_PROVENANCE_IDENTITY", "Missing dataset, product, or reference ID.")
-    ok(1, "source_dataset_identity", f"Dataset '{ev.source_dataset_id}', product '{ev.product_id}'.")
+    if not ev.source_file_checksum or not ev.source_file_checksum.strip():
+        return fail(
+            1,
+            "source_dataset_identity",
+            "MISSING_SOURCE_CHECKSUM",
+            f"Product '{ev.product_id}' missing verifiable source_file_checksum.",
+        )
+    if not ev.schema_version or not ev.parser_version:
+        return fail(
+            1,
+            "source_dataset_identity",
+            "MISSING_PARSER_PROVENANCE",
+            f"Product '{ev.product_id}' must declare schema_version and parser_version.",
+        )
+    ok(1, "source_dataset_identity", f"Dataset '{ev.source_dataset_id}', product '{ev.product_id}', sha256={ev.source_file_checksum[:12]}....")
 
     # Stage 2: Instrument eligibility (reject meteorology/radiation/imaging from composition assertions)
     inst_upper = ev.instrument_id.upper()
@@ -192,9 +228,31 @@ def validate_composition_evidence(
                 "INVALID_UNCERTAINTY",
                 f"Uncertainty value ({ev.uncertainty_value}) must be finite and non-negative.",
             )
+        if not ev.uncertainty_unit or ev.uncertainty_unit != ev.normalized_unit:
+            return fail(
+                9,
+                "uncertainty_and_quality_metadata",
+                "UNCERTAINTY_UNIT_MISMATCH",
+                f"Uncertainty unit '{ev.uncertainty_unit}' incompatible with measurement unit '{ev.normalized_unit}'.",
+            )
+        if not ev.uncertainty_type or not ev.uncertainty_type.strip():
+            return fail(
+                9,
+                "uncertainty_and_quality_metadata",
+                "MISSING_UNCERTAINTY_TYPE",
+                "Uncertainty value reported without documented uncertainty_type.",
+            )
+    if ev.secondary_uncertainty_value is not None:
+        if not math.isfinite(ev.secondary_uncertainty_value) or ev.secondary_uncertainty_value < 0.0:
+            return fail(
+                9,
+                "uncertainty_and_quality_metadata",
+                "INVALID_SECONDARY_UNCERTAINTY",
+                f"Secondary uncertainty ({ev.secondary_uncertainty_value}) must be finite and non-negative.",
+            )
     ok(9, "uncertainty_and_quality_metadata", f"Uncertainty={ev.uncertainty_value} ({ev.uncertainty_type or 'unreported'}).")
 
-    # Stage 10: Coordinate, CRS, and provenance integrity (located vs unlocated)
+    # Stage 10: Coordinate, CRS, semantic type & provenance integrity (located vs unlocated)
     if ev.location_verified:
         if ev.latitude is None or ev.longitude_east is None:
             return fail(
@@ -202,6 +260,13 @@ def validate_composition_evidence(
                 "coordinate_and_crs_integrity",
                 "LOCATED_FLAG_WITHOUT_COORDS",
                 "location_verified=True but latitude or longitude is None.",
+            )
+        if ev.location_semantic_type == LocationSemanticType.UNLOCATED:
+            return fail(
+                10,
+                "coordinate_and_crs_integrity",
+                "LOCATED_SEMANTIC_TYPE_CONFLICT",
+                "location_verified=True cannot carry location_semantic_type=unlocated.",
             )
         if not validate_mars_crs(ev.crs):
             return fail(
@@ -226,7 +291,11 @@ def validate_composition_evidence(
                 "MISSING_COORDINATE_PROVENANCE",
                 "Verified coordinates must cite coordinate_source and coordinate_provenance.",
             )
-        ok(10, "coordinate_and_crs_integrity", f"Located ({ev.latitude:.5f}, {ev.longitude_east:.5f}) via {ev.coordinate_source}.")
+        ok(
+            10,
+            "coordinate_and_crs_integrity",
+            f"Located [{ev.location_semantic_type.value}] ({ev.latitude:.5f}, {ev.longitude_east:.5f}) via {ev.coordinate_source}.",
+        )
     else:
         if ev.latitude is not None or ev.longitude_east is not None:
             return fail(
@@ -234,6 +303,13 @@ def validate_composition_evidence(
                 "coordinate_and_crs_integrity",
                 "UNVERIFIED_COORDINATES_LEAKED",
                 "Unlocated record cannot carry unverified lat/lon coordinates.",
+            )
+        if ev.location_semantic_type != LocationSemanticType.UNLOCATED:
+            return fail(
+                10,
+                "coordinate_and_crs_integrity",
+                "UNLOCATED_SEMANTIC_TYPE_CONFLICT",
+                f"Unlocated record must use location_semantic_type='unlocated', got '{ev.location_semantic_type.value}'.",
             )
         ok(10, "coordinate_and_crs_integrity", "Explicitly marked unlocated (excluded from map markers & geodesic ranking).")
 
@@ -267,6 +343,14 @@ def validate_composition_evidence(
     # Stage 12: Deterministic ID & citation verification
     if not ev.evidence_id.strip():
         return fail(12, "provenance_and_determinism", "MISSING_EVIDENCE_ID", "Evidence record ID is empty.")
-    ok(12, "provenance_and_determinism", "Deterministic evidence ID and citation verified.")
+    expected_id = compute_deterministic_evidence_id(ev)
+    if ev.evidence_id.strip() != expected_id:
+        return fail(
+            12,
+            "provenance_and_determinism",
+            "EVIDENCE_ID_MISMATCH",
+            f"Non-deterministic or corrupted evidence_id '{ev.evidence_id}' != expected '{expected_id}'.",
+        )
+    ok(12, "provenance_and_determinism", f"Deterministic evidence ID ({ev.determinism_version}) verified.")
 
     return True, stages, None

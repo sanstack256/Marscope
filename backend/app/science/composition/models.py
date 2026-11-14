@@ -58,6 +58,76 @@ class CompositionSearchMode(str, Enum):
     ELEMENT_BEARING_MINERAL = "element_bearing_mineral"
 
 
+class LocationSemanticType(str, Enum):
+    INSTRUMENT_TARGET_LOCATION = "instrument_target_location"
+    ROVER_STATION_LOCATION = "rover_station_location"
+    PRODUCT_FOOTPRINT = "product_footprint"
+    OBSERVATION_REGION = "observation_region"
+    UNLOCATED = "unlocated"
+
+
+class IntegrityStatus(str, Enum):
+    VERIFIED = "verified"
+    SOURCE_FILES_MISSING = "source_files_missing"
+    CHECKSUM_MISMATCH = "checksum_mismatch"
+    INCOMPLETE = "incomplete"
+    UNAVAILABLE = "unavailable"
+
+
+class RankingConfiguration(BaseModel):
+    ranking_config_id: str = "heuristic_exploration_priority_v2"
+    ranking_config_version: str = "2.0.0"
+    is_heuristic_only: bool = True
+    methodology_note: str = (
+        "Heuristic exploration priority weighting only — NOT a validated scientific probability, "
+        "detection confidence, or physical hazard rating."
+    )
+    weights: Dict[str, float] = Field(
+        default_factory=lambda: {
+            "evidence_tier": 0.35,
+            "abundance": 0.25,
+            "quality": 0.15,
+            "corroboration": 0.15,
+            "spatial_proximity": 0.10,
+        }
+    )
+    distance_reference_scale_m: float = 2000.0
+    quality_scaling_rule: str = (
+        "When positive abundance > 0 and source uncertainty >= 0 are both reported in matching units, "
+        "quality_component = max(0.05, 1 - min(1.0, uncertainty / abundance)) * nominal_factor (1.0 nominal, 0.6 low). "
+        "When quality & uncertainty are unreported in source, quality_component = None (not fabricated)."
+    )
+    corroboration_rule: str = (
+        "Explicit peer corroboration: None when only 1 matching observation exists at the site; "
+        "scaled across independent instruments and nearby cluster count when count >= 2."
+    )
+
+
+class ParserFieldMapping(BaseModel):
+    schema_field_name: str
+    resolved_header_name: Optional[str] = None
+    column_index: Optional[int] = None
+    data_type: Optional[str] = None
+    unit: Optional[str] = None
+    description: Optional[str] = None
+
+
+class ParserResult(BaseModel):
+    parser_id: str
+    parser_version: str
+    schema_source: str
+    schema_version: str
+    source_file_path: str
+    source_file_checksum: str
+    field_mappings: List[ParserFieldMapping] = Field(default_factory=list)
+    total_rows_read: int = 0
+    accepted_row_count: int = 0
+    rejected_row_count: int = 0
+    unsupported_row_count: int = 0
+    row_rejections: List[Dict[str, Any]] = Field(default_factory=list)
+    records: List[Dict[str, Any]] = Field(default_factory=list)
+
+
 class SpeciesRecord(BaseModel):
     canonical_id: str = Field(..., description="Canonical identifier e.g. 'Fe', 'SiO2', 'hematite'")
     symbol_or_formula: str = Field(..., description="Chemical symbol, oxide formula, or mineral formula")
@@ -112,9 +182,15 @@ class RejectionRecord(BaseModel):
 
 class CompositionEvidence(BaseModel):
     evidence_id: str
+    determinism_version: str = "evidence_id_v1"
     source_dataset_id: str
     product_id: str
     source_record_ref: str
+    source_file_path: Optional[str] = None
+    source_file_checksum: Optional[str] = None
+    schema_version: Optional[str] = None
+    parser_id: Optional[str] = None
+    parser_version: Optional[str] = None
     instrument_id: str
     instrument_name: str
     mission: str = "Mars Science Laboratory (MSL)"
@@ -137,11 +213,20 @@ class CompositionEvidence(BaseModel):
     normalized_value: Optional[float] = None
     normalized_unit: Optional[str] = None
     normalization_formula: Optional[str] = None
+    is_stoichiometric_conversion: bool = False
+    source_oxide_species: Optional[str] = None
+    stoichiometric_factor: Optional[float] = None
+    stoichiometric_weights_version: Optional[str] = None
     uncertainty_value: Optional[float] = None
     uncertainty_unit: Optional[str] = None
     uncertainty_type: Optional[str] = None
+    uncertainty_semantics: Optional[str] = None
+    secondary_uncertainty_value: Optional[float] = None
+    secondary_uncertainty_unit: Optional[str] = None
+    secondary_uncertainty_type: Optional[str] = None
     detection_limit_value: Optional[float] = None
     detection_limit_unit: Optional[str] = None
+    detection_limit_status: Optional[str] = None
     quality_flag: Optional[str] = None
 
     methodology: str
@@ -149,8 +234,9 @@ class CompositionEvidence(BaseModel):
     source_reference: str
     citation: Optional[str] = None
 
-    # Spatial coordinates & footprint (explicitly separated unlocated vs verified)
+    # Spatial coordinates & footprint (explicitly separated unlocated vs verified & station vs target)
     location_verified: bool = False
+    location_semantic_type: LocationSemanticType = LocationSemanticType.UNLOCATED
     latitude: Optional[float] = None
     longitude_east: Optional[float] = None
     elevation_m: Optional[float] = None
@@ -159,7 +245,15 @@ class CompositionEvidence(BaseModel):
     longitude_direction: Optional[str] = None
     coordinate_source: Optional[str] = None
     coordinate_provenance: Optional[str] = None
+    original_coordinate_values: Optional[Dict[str, Any]] = None
+    original_coordinate_crs: Optional[str] = None
+    coordinate_transform: Optional[str] = None
+    coordinate_transform_params: Optional[Dict[str, Any]] = None
+    waypoint_id: Optional[str] = None
+    association_rule_version: Optional[str] = None
+    coordinate_limitations: List[str] = Field(default_factory=list)
     coordinate_uncertainty_m: Optional[float] = None
+    instrument_standoff_m: Optional[float] = None
     geometry_type: GeometryType = GeometryType.POINT
     min_lat: Optional[float] = None
     max_lat: Optional[float] = None
@@ -173,15 +267,25 @@ class CompositionEvidence(BaseModel):
 
 
 class RankingDimensions(BaseModel):
+    ranking_config_id: str = "heuristic_exploration_priority_v2"
+    ranking_config_version: str = "2.0.0"
+    is_heuristic_only: bool = True
     evidence_tier_score: float = Field(..., description="Instrument/methodology tier (1.0=direct mineral/oxide, 0.55=element-bearing host)")
-    abundance_component: float = Field(..., description="Normalized abundance contribution [0, 1] within query scale")
-    quality_component: float = Field(..., description="Uncertainty & calibration quality score [0, 1]")
-    corroboration_component: float = Field(..., description="Independent instrument/observation corroboration [0, 1]")
+    abundance_component: Optional[float] = Field(None, description="Normalized abundance contribution [0, 1] within query scale")
+    quality_component: Optional[float] = Field(
+        None, description="Uncertainty & calibration quality score [0, 1]; None when unreported in source"
+    )
+    corroboration_component: Optional[float] = Field(
+        None, description="Independent instrument/observation corroboration [0, 1]; None for single uncorroborated observation"
+    )
     spatial_proximity_component: Optional[float] = Field(
         None, description="Inverse Mars geodesic distance factor [0, 1] when astronaut position provided"
     )
-    composite_rank_score: float = Field(..., description="Transparent weighted ranking score for candidate sorting only (NOT probability %)")
-    score_formula: str = Field(..., description="Exact formula documenting weights used")
+    composite_rank_score: Optional[float] = Field(
+        None, description="Transparent heuristic weighted priority score (NOT probability or confidence)"
+    )
+    unavailable_dimensions: List[str] = Field(default_factory=list)
+    score_formula: str = Field(..., description="Exact formula documenting weights & active terms used")
     rationale: str = Field(..., description="Human-readable scientific explanation for ranking position")
 
 
@@ -203,8 +307,10 @@ class CandidateDiscoveryLocation(BaseModel):
     longitude_east: float
     elevation_m: Optional[float] = None
     crs: str = "IAU2000:49900"
+    location_semantic_type: LocationSemanticType = LocationSemanticType.ROVER_STATION_LOCATION
     coordinate_source: str
     coordinate_uncertainty_m: Optional[float] = None
+    coordinate_limitations: List[str] = Field(default_factory=list)
     distance_from_astronaut_m: Optional[float] = None
     bearing_deg: Optional[float] = None
     matched_evidence_count: int
@@ -221,6 +327,7 @@ class CandidateDiscoveryLocation(BaseModel):
 
 class CompositionIndexStatus(BaseModel):
     index_available: bool
+    integrity_status: IntegrityStatus = IntegrityStatus.UNAVAILABLE
     active_generation_id: Optional[str] = None
     built_at_utc: Optional[str] = None
     total_validated_evidence: int = 0
@@ -231,7 +338,11 @@ class CompositionIndexStatus(BaseModel):
     ingested_products_count: int = 0
     instruments_indexed: List[str] = Field(default_factory=list)
     checksum_valid: bool = True
+    missing_source_files: List[str] = Field(default_factory=list)
+    checksum_mismatches: List[str] = Field(default_factory=list)
     rtree_enabled: bool = False
     crism_status: str = "unavailable_no_validated_mineral_cube"
     sqlite_path: Optional[str] = None
+    reproducibility_manifest_path: Optional[str] = None
+    product_manifests: List[Dict[str, Any]] = Field(default_factory=list)
     notes: List[str] = Field(default_factory=list)

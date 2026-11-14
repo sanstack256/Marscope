@@ -165,9 +165,14 @@ MARSCOPE strictly enforces an anti-fabrication standard:
 
 ---
 
-## 7. Current Project Status
+## 7. Current Project Status & Reproducible Build
 
-- **Phase:** Infrastructure & Architectural Initialization Complete (Prompt 1).
-- **Frontend Skeleton:** Fully functional Next.js App Router workspace with aerospace dark design tokens, sidebar navigation, top navigation, and responsive layouts for all 9 application views.
-- **Backend Core:** Configured FastAPI application with verified `GET /api/health` endpoint, modular package architecture (`physics`, `terrain`, `routing`, `geospatial`, `science`), and CORS configuration.
-- **Ready for Feature Implementation:** Subsystem structures, API schemas, and data pipelines are fully prepared for subsequent feature prompts.
+- **Phase:** Prompt 5 — Scientific Integrity Gate, PDS Schema Correctness & Reproducible Discovery Complete.
+- **Geospatial & Terrain Engine:** Verified GeoTIFF/MOLA/PDS3 ingestion pipeline, IAU2000 Mars ellipsoid calculations, slope/aspect/TRI derivation, and deterministic EVA physics engine.
+- **Scientific Discovery & Integrity Engine:** Dynamic PDS3 (`.LBL` / `.FMT`) & PDS4 (`.XML`) schema-driven parsers, spatial semantic separation (`instrument_target_location` vs `rover_station_location` vs `unlocated`), 12-stage validation pipeline with deterministic SHA-256 `evidence_id`s, SQLite R*Tree spatial index, and automated integrity drift detection (`IntegrityStatus`).
+- **Reproducible Offline Index Rebuild:**
+  ```bash
+  PYTHONPATH=backend python3 backend/scripts/rebuild_composition_index.py
+  ```
+  Writes atomic `datasets/index/composition_index.sqlite` and `datasets/index/reproducibility_manifest.json` from local NASA PDS files (pass `--acquire` to fetch missing source files from official NASA PDS / JPL URLs).
+- **Automated Verification:** Verified backend unit/integration test suite (`pytest`) and clean Next.js TypeScript/ESLint production build. Route optimization remains scoped out until the next milestone.

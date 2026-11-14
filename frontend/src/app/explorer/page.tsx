@@ -237,7 +237,7 @@ export default function SurfaceExplorerPage() {
         elevation_m: cand.elevation_m ?? null,
         crs: cand.crs,
         geology_type: cand.best_species_id,
-        scientific_value: Number(Math.min(1, Math.max(0, cand.ranking.composite_rank_score)).toFixed(4)),
+        scientific_value: Number(Math.min(1, Math.max(0, cand.ranking.composite_rank_score ?? 0)).toFixed(4)),
         instrument_source: cand.distinct_instruments.join(", "),
         provenance_product_id: cand.evidence_ids[0] || cand.candidate_id,
         target_status: "evidence_backed",
@@ -842,15 +842,31 @@ export default function SurfaceExplorerPage() {
                   </div>
                   {indexStatus ? (
                     <div className="text-[10px] font-mono text-slate-400 space-y-0.5">
-                      <div>
-                        Validated: <span className="text-emerald-300">{indexStatus.located_evidence_count}</span> located ·{" "}
-                        <span className="text-amber-300">{indexStatus.unlocated_evidence_count}</span> unlocated ·{" "}
-                        <span className="text-red-300">{indexStatus.rejected_record_count}</span> rejected
+                      <div className="flex items-center justify-between gap-2">
+                        <span>
+                          Validated: <span className="text-emerald-300">{indexStatus.located_evidence_count}</span> located ·{" "}
+                          <span className="text-amber-300">{indexStatus.unlocated_evidence_count}</span> unlocated ·{" "}
+                          <span className="text-red-300">{indexStatus.rejected_record_count}</span> rejected
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[9px] border ${
+                            indexStatus.integrity_status === "verified" && indexStatus.checksum_valid
+                              ? "bg-emerald-950/60 border-emerald-700/60 text-emerald-300"
+                              : "bg-red-950/60 border-red-700/60 text-red-300"
+                          }`}
+                        >
+                          {(indexStatus.integrity_status || (indexStatus.checksum_valid ? "verified" : "checksum_mismatch")).toUpperCase()}
+                        </span>
                       </div>
                       <div>
                         Instruments: {indexStatus.instruments_indexed.join(", ") || "None"} · R*Tree:{" "}
-                        {indexStatus.rtree_enabled ? "ON" : "OFF"}
+                        {indexStatus.rtree_enabled ? "ON" : "OFF"} · Gen: {indexStatus.active_generation_id || "N/A"}
                       </div>
+                      {!indexStatus.checksum_valid && (
+                        <div className="text-[9px] text-red-300">
+                          Source integrity drift detected ({indexStatus.missing_source_files?.length || 0} missing, {indexStatus.checksum_mismatches?.length || 0} modified). Rebuild required.
+                        </div>
+                      )}
                       <div className="text-[9px] text-amber-300/90">
                         CRISM orbital: {indexStatus.crism_status}
                       </div>
@@ -1043,37 +1059,100 @@ export default function SurfaceExplorerPage() {
 
                     {inspectedEvidence && (
                       <div className="p-2.5 rounded-lg bg-[#0b101b] border border-sky-700/60 space-y-2 text-[10px]">
-                        <div className="flex items-center justify-between">
+                        <div className="flex items-center justify-between gap-2">
                           <span className="font-bold text-sky-300">
                             Evidence Detail: {inspectedEvidence.target_name || inspectedEvidence.source_record_ref}
                           </span>
                           <button
                             type="button"
                             onClick={() => setInspectedEvidence(null)}
-                            className="text-slate-400 hover:text-white"
+                            className="text-slate-400 hover:text-white shrink-0"
                           >
                             Close
                           </button>
                         </div>
+
+                        <div className="flex flex-wrap gap-1 font-mono text-[9px]">
+                          <span
+                            className={`px-1.5 py-0.5 rounded border ${
+                              inspectedEvidence.is_stoichiometric_conversion
+                                ? "bg-amber-950/60 border-amber-700/60 text-amber-200"
+                                : "bg-emerald-950/60 border-emerald-700/60 text-emerald-200"
+                            }`}
+                          >
+                            {inspectedEvidence.is_stoichiometric_conversion
+                              ? `Oxide-Derived (${inspectedEvidence.source_oxide_species} → ${inspectedEvidence.canonical_species_id})`
+                              : "Direct Measurement"}
+                          </span>
+                          <span
+                            className={`px-1.5 py-0.5 rounded border ${
+                              inspectedEvidence.location_semantic_type === "rover_station_location"
+                                ? "bg-purple-950/60 border-purple-700/60 text-purple-200"
+                                : inspectedEvidence.location_semantic_type === "unlocated"
+                                  ? "bg-red-950/60 border-red-700/60 text-red-200"
+                                  : "bg-sky-950/60 border-sky-700/60 text-sky-200"
+                            }`}
+                          >
+                            {inspectedEvidence.location_semantic_type || "unknown_spatial_semantics"}
+                          </span>
+                        </div>
+
                         <div className="font-mono text-slate-300 space-y-0.5">
                           <div>
                             {inspectedEvidence.instrument_id} · Sol {inspectedEvidence.sol ?? "N/A"} ·{" "}
                             {inspectedEvidence.canonical_species_id} ({inspectedEvidence.evidence_type})
                           </div>
                           <div>
-                            Raw: {inspectedEvidence.raw_value} {inspectedEvidence.raw_unit} → Norm:{" "}
-                            {inspectedEvidence.normalized_value?.toFixed(3)} {inspectedEvidence.normalized_unit}
+                            Raw: {inspectedEvidence.raw_value ?? "N/A"} {inspectedEvidence.raw_unit || ""} → Norm:{" "}
+                            {inspectedEvidence.normalized_value?.toFixed(3) ?? "N/A"} {inspectedEvidence.normalized_unit || ""}
                             {inspectedEvidence.uncertainty_value != null
-                              ? ` (±${inspectedEvidence.uncertainty_value.toFixed(3)})`
-                              : ""}
+                              ? ` (±${inspectedEvidence.uncertainty_value.toFixed(3)} ${inspectedEvidence.uncertainty_unit || ""} ${inspectedEvidence.uncertainty_type || ""})`
+                              : " (primary uncert: Unreported in source)"}
                           </div>
+                          {inspectedEvidence.secondary_uncertainty_value != null && (
+                            <div className="text-slate-400">
+                              Secondary Uncert: ±{inspectedEvidence.secondary_uncertainty_value.toFixed(3)}{" "}
+                              {inspectedEvidence.secondary_uncertainty_unit || ""} ({inspectedEvidence.secondary_uncertainty_type})
+                            </div>
+                          )}
                           {inspectedEvidence.normalization_formula && (
-                            <div className="text-slate-400">Formula: {inspectedEvidence.normalization_formula}</div>
+                            <div className="text-slate-400">
+                              Formula: {inspectedEvidence.normalization_formula}
+                              {inspectedEvidence.stoichiometric_weights_version
+                                ? ` [${inspectedEvidence.stoichiometric_weights_version}]`
+                                : ""}
+                            </div>
                           )}
                           <div className="text-slate-400">
-                            Coords: {inspectedEvidence.coordinate_source} (±
-                            {inspectedEvidence.coordinate_uncertainty_m ?? "?"} m)
+                            Coords: {inspectedEvidence.coordinate_source || "None"} · Pos. Uncert:{" "}
+                            {inspectedEvidence.coordinate_uncertainty_m != null
+                              ? `±${inspectedEvidence.coordinate_uncertainty_m} m`
+                              : "Unreported in source"}
+                            {inspectedEvidence.instrument_standoff_m != null
+                              ? ` · Standoff: ${inspectedEvidence.instrument_standoff_m.toFixed(2)} m`
+                              : ""}
                           </div>
+                          {inspectedEvidence.coordinate_transform && (
+                            <div className="text-slate-500">
+                              Transform: {inspectedEvidence.coordinate_transform}
+                              {inspectedEvidence.waypoint_id ? ` · Waypoint: ${inspectedEvidence.waypoint_id}` : ""}
+                            </div>
+                          )}
+                          {inspectedEvidence.coordinate_limitations && inspectedEvidence.coordinate_limitations.length > 0 && (
+                            <div className="text-amber-300/90">
+                              Spatial note: {inspectedEvidence.coordinate_limitations.join(" ")}
+                            </div>
+                          )}
+                          <div className="text-slate-500 break-all">
+                            ID: {inspectedEvidence.evidence_id} ({inspectedEvidence.determinism_version || "v1"}) · Schema:{" "}
+                            {inspectedEvidence.schema_version || "N/A"} · Parser: {inspectedEvidence.parser_id || "N/A"} v
+                            {inspectedEvidence.parser_version || "?"}
+                          </div>
+                          {inspectedEvidence.source_file_checksum && (
+                            <div className="text-slate-500 break-all">
+                              SHA-256: {inspectedEvidence.source_file_checksum}
+                            </div>
+                          )}
                           <div className="text-slate-500 break-all">
                             Source: {inspectedEvidence.source_reference}
                           </div>
@@ -1126,13 +1205,27 @@ export default function SurfaceExplorerPage() {
                                     ? `${cand.best_normalized_value.toFixed(2)} ${cand.best_normalized_unit || ""}`
                                     : cand.best_species_id}
                                 </div>
-                                <div className="text-[9px] font-mono text-slate-500">
-                                  Rank {cand.ranking.composite_rank_score.toFixed(3)} (non-prob.)
+                                <div className="text-[9px] font-mono text-slate-400" title={cand.ranking.score_formula}>
+                                  Priority {cand.ranking.composite_rank_score != null ? cand.ranking.composite_rank_score.toFixed(3) : "N/A"} (Heuristic · Not Prob.)
                                 </div>
                               </div>
                             </div>
 
                             <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono text-slate-300">
+                              <span
+                                className={`px-1.5 py-0.5 rounded border ${
+                                  cand.location_semantic_type === "rover_station_location"
+                                    ? "bg-purple-950/50 border-purple-700/60 text-purple-200"
+                                    : "bg-amber-950/40 border-amber-700/50 text-amber-200"
+                                }`}
+                              >
+                                {cand.location_semantic_type === "rover_station_location"
+                                  ? "Rover Station Location"
+                                  : "Instrument Target Location"}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded bg-[#121622] border border-[#1e2638]">
+                                Uncert: {cand.coordinate_uncertainty_m != null ? `±${cand.coordinate_uncertainty_m} m` : "Unreported"}
+                              </span>
                               <span className="px-1.5 py-0.5 rounded bg-[#121622] border border-[#1e2638]">
                                 {cand.distinct_instruments.join(" + ")}
                               </span>
@@ -1152,6 +1245,11 @@ export default function SurfaceExplorerPage() {
                             <div className="text-[10px] text-slate-400 leading-snug">
                               {cand.ranking.rationale}
                             </div>
+                            {cand.coordinate_limitations && cand.coordinate_limitations.length > 0 && (
+                              <div className="text-[9px] text-purple-300/90 leading-snug">
+                                Note: {cand.coordinate_limitations[0]}
+                              </div>
+                            )}
 
                             <div className="flex items-center gap-1.5 pt-1">
                               <button

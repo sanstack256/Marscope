@@ -10,6 +10,7 @@ COLUMN/FIELD schemas, data pointers (^TABLE, ^SPREADSHEET, ^HEADER), external
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Tuple
+import xml.etree.ElementTree as ET
 
 
 _NUM_RE = re.compile(r"^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eEdD][+-]?\d+)?$")
@@ -271,10 +272,12 @@ def load_pds3_columns_and_structure(
     label_path: Path,
     table_object_names: Optional[Tuple[str, ...]] = None,
     extra_structure_dirs: Optional[List[Path]] = None,
+    strict_structure: bool = False,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Parse a PDS3 .LBL file and resolve any inline COLUMN/FIELD definitions as well as
     external ^STRUCTURE (.FMT) schema definitions referenced inside the label or table object.
+    When strict_structure=True, raises FileNotFoundError if a referenced ^STRUCTURE file is missing.
     """
     if not label_path.exists():
         raise FileNotFoundError(f"PDS3 label not found: {label_path}")
@@ -300,7 +303,12 @@ def load_pds3_columns_and_structure(
                         break
                 if fmt_path:
                     break
-            if fmt_path is not None:
+            if fmt_path is None:
+                if strict_structure:
+                    raise FileNotFoundError(
+                        f"Referenced PDS3 ^STRUCTURE file '{struct_name}' missing for label '{label_path.name}'."
+                    )
+            else:
                 fmt_parsed = parse_pds3_odl(fmt_path.read_text(encoding="utf-8", errors="replace"))
                 columns.extend(fmt_parsed.get("_COLUMNS", []))
 
@@ -498,4 +506,84 @@ def extract_pds3_metadata(label_path: Path) -> Dict[str, Any]:
         "table_columns": int(tbl_obj.get("COLUMNS") or tbl_obj.get("FIELDS") or 0) or None,
         "structure_file": tbl_obj.get("^STRUCTURE"),
         "parsed_odl": parsed,
+    }
+
+
+def _strip_ns(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def parse_pds4_table_delimited(xml_path: Path) -> Dict[str, Any]:
+    """
+    Parse a PDS4 Product_Observational XML label containing <Table_Delimited> and
+    extract ordered <Field_Delimited> schema definitions without hardcoded column names.
+    """
+    if not xml_path.exists():
+        raise FileNotFoundError(f"PDS4 XML label not found: {xml_path}")
+
+    tree = ET.parse(str(xml_path))
+    root = tree.getroot()
+
+    logical_id: Optional[str] = None
+    version_id: Optional[str] = None
+    title: Optional[str] = None
+    file_name: Optional[str] = None
+    table_offset_bytes: Optional[int] = None
+    field_delimiter: str = ","
+    records_count: Optional[int] = None
+    fields: List[Dict[str, Any]] = []
+
+    for elem in root.iter():
+        tag = _strip_ns(elem.tag)
+        if tag == "logical_identifier" and logical_id is None:
+            logical_id = (elem.text or "").strip()
+        elif tag == "version_id" and version_id is None:
+            version_id = (elem.text or "").strip()
+        elif tag == "title" and title is None:
+            title = (elem.text or "").strip()
+        elif tag == "file_name" and file_name is None:
+            file_name = (elem.text or "").strip()
+        elif tag == "Table_Delimited":
+            for child in elem:
+                ctag = _strip_ns(child.tag)
+                if ctag == "offset":
+                    try:
+                        table_offset_bytes = int((child.text or "0").strip())
+                    except ValueError:
+                        table_offset_bytes = 0
+                elif ctag == "records":
+                    try:
+                        records_count = int((child.text or "0").strip())
+                    except ValueError:
+                        records_count = None
+                elif ctag == "field_delimiter":
+                    txt = (child.text or "").strip().lower()
+                    field_delimiter = "," if "comma" in txt or txt == "," else txt
+                elif ctag == "Record_Delimited":
+                    for sub in child:
+                        if _strip_ns(sub.tag) == "Field_Delimited":
+                            fdict: Dict[str, Any] = {}
+                            for fchild in sub:
+                                fdict[_strip_ns(fchild.tag)] = (fchild.text or "").strip()
+                            if "field_number" in fdict:
+                                try:
+                                    fdict["field_number_int"] = int(fdict["field_number"])
+                                except ValueError:
+                                    pass
+                            fields.append(fdict)
+
+    if not fields:
+        raise ValueError(f"PDS4 XML label '{xml_path.name}' contains zero <Field_Delimited> definitions.")
+
+    fields.sort(key=lambda f: f.get("field_number_int", 999999))
+    return {
+        "logical_identifier": logical_id,
+        "version_id": version_id,
+        "title": title,
+        "file_name": file_name,
+        "offset_bytes": table_offset_bytes,
+        "field_delimiter": field_delimiter,
+        "records_count": records_count,
+        "fields": fields,
+        "schema_version": f"pds4:{logical_id or xml_path.stem}@{version_id or 'unknown'}",
     }

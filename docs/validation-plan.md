@@ -60,3 +60,11 @@ MARSCOPE implements a multi-tier testing and validation framework ensuring scien
 
 - **`test_pds_parsing_and_coords.py`:** Offline verification of PDS3 ODL pointer/`^STRUCTURE` resolution, ChemCam PSV (`DIGITAL_NUMBER`, full channel read) vs LIBS CCS differentiation, REMS schema-driven parsing without heuristic guesses, Gale Crater Equirectangular metric conversion, and guarantee that unlocated products never receive synthetic Gale coordinates.
 - **`test_composition_discovery.py`:** Offline verification of controlled species alias/ambiguity resolution, IUPAC oxide-to-element stoichiometry, all critical failure modes of the 12-stage validation pipeline (`REMS`, `CHEMCAM-PSV`, invalid LIBS mineralogy, negative/`<LOD`/`>100 wt%`, Earth CRS rejection), SQLite R*Tree rebuild & antimeridian bbox wrap, SHA-256 checksum drift detection, `unlocated` spatial exclusion, strict `coverage_verification == VERIFIED` checks in destination evaluation, and `evidence_backed` vs `manual_unverified_administrative` target provenance separation.
+
+---
+
+## 5. Prompt 5 Scientific Integrity & Reproducibility Gate (`backend/tests/test_prompt5_scientific_integrity.py`)
+
+- **Dynamic PDS3/PDS4 Schema Tests:** Verifies reordered ChemCam MOC `.LBL` columns + header mismatch rejection (`MalformedObservationError`), reordered APXS PDS4 `<Field_Delimited>` columns + blank `Quality` preserved as `None`, strict CheMin `^STRUCTURE` `.FMT` enforcement (`FileNotFoundError`), and rejection of unknown CheMin mineral phases (`UNKNOWN_SPECIES`).
+- **Validation Gate Adversarial Checks:** Verifies Stage 1 missing provenance (`source_file_checksum`, `schema_version`, `parser_version`), Stage 9 uncertainty unit/type consistency, Stage 10 `location_semantic_type` consistency, and Stage 12 deterministic `evidence_id` verification.
+- **Ranking Honesty & Reproducibility Checks:** Confirms `quality_component` and `corroboration_component` remain `None` when unreported/single-observation, custom `RankingConfiguration` provenance attachment, identical `generation_id` and sorted `evidence_id`s across two independent `rebuild_from_raw_directory` runs, and live `CHECKSUM_MISMATCH` / `SOURCE_FILES_MISSING` integrity drift detection.

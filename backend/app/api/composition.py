@@ -3,6 +3,7 @@ MARSCOPE Verified Composition Discovery & Spatial Index Endpoints
 Martian Surface Intelligence & Exploration System
 """
 
+import json
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, status
 from app.science.composition.models import (
@@ -17,6 +18,7 @@ from app.science.composition.search import (
 )
 from app.science.composition.species import list_all_species, resolve_species_query
 from app.services.container import (
+    INDEX_DIR,
     PROCESSED_DIR,
     RAW_DIR,
     composition_index,
@@ -108,3 +110,15 @@ async def list_rejected_composition_records(
         "offset": offset,
         "records": [r.model_dump(mode="json") for r in items],
     }
+
+
+@router.get("/reproducibility-manifest")
+async def get_reproducibility_manifest() -> Dict[str, Any]:
+    """Return the active deterministic build reproducibility manifest for all ingested NASA PDS artifacts."""
+    manifest_path = INDEX_DIR / "reproducibility_manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Reproducibility manifest unavailable; rebuild composition index first.",
+        )
+    return json.loads(manifest_path.read_text(encoding="utf-8"))

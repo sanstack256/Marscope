@@ -9,6 +9,7 @@ into candidate CompositionEvidence records and routes every record through the
 
 import hashlib
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Tuple
 from app.ingestion.pds_label import extract_pds3_metadata
 from app.science.composition.models import (
@@ -16,26 +17,51 @@ from app.science.composition.models import (
     EvidenceStatus,
     EvidenceType,
     GeometryType,
+    LocationSemanticType,
+    ParserResult,
     RejectionRecord,
     SpeciesCategory,
 )
 from app.science.composition.normalization import canonicalize_unit, normalize_concentration_value
 from app.science.composition.species import get_species_by_id, resolve_species_query
-from app.science.composition.validation import validate_composition_evidence
+from app.science.composition.validation import (
+    EVIDENCE_ID_DETERMINISM_VERSION,
+    compute_deterministic_evidence_id,
+    validate_composition_evidence,
+)
 from app.science.coordinate_association import CoordinateAssociationService
-from app.science.curiosity_parser import CuriosityDataParser
-
-
-def _deterministic_id(*parts: str) -> str:
-    joined = "|".join(str(p) for p in parts)
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:24]
+from app.science.curiosity_parser import CuriosityDataParser, _sha256_file
 
 
 def _evaluate_batch(
     candidates: List[Tuple[CompositionEvidence, Dict[str, Any]]],
+    parser_result: Optional[ParserResult] = None,
+    source_dataset_id: str = "",
+    product_id: str = "",
+    instrument_id: str = "",
 ) -> Tuple[List[CompositionEvidence], List[RejectionRecord]]:
     accepted: List[CompositionEvidence] = []
     rejected: List[RejectionRecord] = []
+
+    if parser_result is not None:
+        for rr in parser_result.row_rejections:
+            ridx = rr.get("row_index", "?")
+            reason = str(rr.get("reason") or "Schema row rejection")
+            rkey = f"{source_dataset_id}|{product_id}|parser_row:{ridx}|{reason}"
+            rejected.append(
+                RejectionRecord(
+                    rejection_id=hashlib.sha256(rkey.encode("utf-8")).hexdigest()[:20],
+                    source_dataset_id=source_dataset_id,
+                    product_id=product_id,
+                    source_record_ref=f"parser_row:{ridx}",
+                    instrument_id=instrument_id,
+                    rejection_stage=0,
+                    rejection_code="PARSER_ROW_REJECTED",
+                    reason=reason,
+                    raw_payload=rr,
+                )
+            )
+
     for cand, raw_payload in candidates:
         ok, stages, rej = validate_composition_evidence(cand, raw_payload=raw_payload)
         cand.validation_stages = stages
@@ -55,20 +81,27 @@ class ApxsEvidenceAdapter:
         source_dataset_id: str = "msl_apxs_supplement_sols_0_3076",
         product_id: str = "DS01_2021JE007171R",
         provenance_url: Optional[str] = None,
+        label_path: Optional[Path] = None,
     ) -> Tuple[List[CompositionEvidence], List[RejectionRecord]]:
-        parsed_rows = CuriosityDataParser.parse_apxs_csv(
+        parsed_res = CuriosityDataParser.parse_apxs_csv_with_contract(
             csv_path,
             source_dataset_id=source_dataset_id,
             product_id=product_id,
+            label_path=label_path,
         )
         candidates: List[Tuple[CompositionEvidence, Dict[str, Any]]] = []
 
-        for row in parsed_rows:
+        for row in parsed_res.records:
             coords = row.get("coordinates")
             loc_verified = coords is not None
             lat = coords["latitude"] if coords else None
             lon = coords["longitude"] if coords else None
             elev = coords.get("elevation_m") if coords else None
+            loc_semantic = (
+                LocationSemanticType(coords["location_semantic_type"])
+                if coords and coords.get("location_semantic_type")
+                else LocationSemanticType.UNLOCATED
+            )
 
             # Oxides (Na2O .. FeO) and Cl (reported directly as elemental wt%)
             for raw_name, m in row.get("oxides_wt_pct", {}).items():
@@ -77,7 +110,7 @@ class ApxsEvidenceAdapter:
                 raw_unit = m.get("unit", "wt%")
                 res = resolve_species_query(raw_name)
                 spec = res.species if res.resolved else get_species_by_id(raw_name)
-                canon_id = spec.canonical_id if spec else raw_name
+                canon_id = spec.canonical_id if spec else f"UNKNOWN:{raw_name}"
                 canon_name = spec.canonical_name if spec else raw_name
                 category = spec.category if spec else SpeciesCategory.OXIDE
                 ev_type = (
@@ -86,13 +119,15 @@ class ApxsEvidenceAdapter:
                     else EvidenceType.OXIDE_COMPOSITION_MEASUREMENT
                 )
 
-                # In APXS table, val == 0 and (err is None or err == 0) denotes undetected / below LOD
+                dl_status: Optional[str] = None
                 if val is None:
                     status = EvidenceStatus.MISSING_NULL
                     norm_val, norm_unit, norm_formula = None, None, None
+                    dl_status = "missing_null_in_source"
                 elif val == 0.0 and (err is None or err == 0.0):
                     status = EvidenceStatus.BELOW_DETECTION_LIMIT
-                    norm_val, norm_unit, norm_formula = 0.0, "wt%", "bdl_zero_sentinel"
+                    norm_val, norm_unit, norm_formula = 0.0, "wt%", "zero_with_zero_error_bdl_excluded"
+                    dl_status = "reported_zero_with_zero_error_bdl_excluded_no_quantitative_lod_in_source"
                 else:
                     status = EvidenceStatus.MEASURED if loc_verified else EvidenceStatus.UNLOCATED
                     try:
@@ -105,22 +140,29 @@ class ApxsEvidenceAdapter:
                         norm_val, norm_unit, norm_formula = None, None, None
 
                 rec_ref = f"row:{row['row_index']}:{row['target_name']}:sol{row['sol']}"
+                raw_sp = m.get("source_column") or f"{raw_name}_pct"
                 ev = CompositionEvidence(
-                    evidence_id=_deterministic_id(source_dataset_id, product_id, rec_ref, canon_id),
+                    evidence_id="pending",
+                    determinism_version=EVIDENCE_ID_DETERMINISM_VERSION,
                     source_dataset_id=source_dataset_id,
                     product_id=product_id,
                     source_record_ref=rec_ref,
+                    source_file_path=parsed_res.source_file_path,
+                    source_file_checksum=parsed_res.source_file_checksum,
+                    schema_version=parsed_res.schema_version,
+                    parser_id=parsed_res.parser_id,
+                    parser_version=parsed_res.parser_version,
                     instrument_id="APXS",
                     instrument_name="Alpha Particle X-ray Spectrometer (APXS)",
-                    processing_level=f"Calibrated Derived ({row.get('fit_type') or 'RGFit_v2'})",
-                    calibration_status="Calibrated oxide & trace concentration with 1-sigma precision error",
+                    processing_level=f"Calibrated Derived ({row.get('fit_type') or 'RGFit'})",
+                    calibration_status="Calibrated oxide concentration with reported analytical precision error",
                     target_name=row.get("target_name"),
                     sol=row.get("sol"),
                     observation_timestamp_utc=row.get("start_time"),
                     canonical_species_id=canon_id,
                     canonical_species_name=canon_name,
                     species_category=category,
-                    raw_species_name=f"{raw_name}_pct",
+                    raw_species_name=raw_sp,
                     evidence_type=ev_type,
                     evidence_status=status,
                     raw_value=val,
@@ -129,14 +171,17 @@ class ApxsEvidenceAdapter:
                     normalized_unit=norm_unit,
                     normalization_formula=norm_formula,
                     uncertainty_value=err,
-                    uncertainty_unit=raw_unit if err is not None else None,
-                    uncertainty_type="1_sigma_precision_error",
+                    uncertainty_unit=norm_unit if err is not None else None,
+                    uncertainty_type="reported_apxs_analytical_error" if err is not None else None,
+                    uncertainty_semantics="1_sigma_analytical_precision_per_PDS4_XML" if err is not None else None,
+                    detection_limit_status=dl_status,
                     quality_flag=row.get("quality_flag"),
-                    methodology="APXS X-ray spectroscopy calibrated RGFit_v2 elemental/oxide reduction",
+                    methodology="APXS X-ray spectroscopy calibrated RGFit elemental/oxide reduction",
                     provenance_url=provenance_url,
                     source_reference=f"PDS4:{product_id}:{rec_ref}",
                     citation="Berger et al. (2022), JGR Planets, DOI:10.1029/2021JE007171",
                     location_verified=loc_verified,
+                    location_semantic_type=loc_semantic,
                     latitude=lat,
                     longitude_east=lon,
                     elevation_m=elev,
@@ -145,7 +190,13 @@ class ApxsEvidenceAdapter:
                     longitude_direction="East" if coords else None,
                     coordinate_source=coords["coordinate_source"] if coords else None,
                     coordinate_provenance=coords["coordinate_provenance"] if coords else None,
-                    coordinate_uncertainty_m=coords.get("coordinate_uncertainty_m") if coords else None,
+                    original_coordinate_values=coords.get("original_coordinate_values") if coords else None,
+                    original_coordinate_crs=coords.get("original_coordinate_crs") if coords else None,
+                    coordinate_transform=coords.get("coordinate_transform") if coords else None,
+                    coordinate_transform_params=coords.get("coordinate_transform_params") if coords else None,
+                    association_rule_version=coords.get("association_rule_version") if coords else None,
+                    coordinate_limitations=coords.get("coordinate_limitations", []) if coords else [],
+                    coordinate_uncertainty_m=None,
                     geometry_type=GeometryType.POINT,
                     min_lat=lat,
                     max_lat=lat,
@@ -153,6 +204,7 @@ class ApxsEvidenceAdapter:
                     max_lon_east=lon,
                     geometry_wkt=f"POINT ({lon} {lat})" if loc_verified else None,
                 )
+                ev.evidence_id = compute_deterministic_evidence_id(ev)
                 candidates.append((ev, {"sol": row.get("sol"), "target": row.get("target_name"), "val": val, "err": err}))
 
             # Trace elements (Ni, Zn, Br in ppm)
@@ -160,12 +212,16 @@ class ApxsEvidenceAdapter:
                 val = m.get("value")
                 err = m.get("error")
                 spec = get_species_by_id(raw_el)
+                canon_id = spec.canonical_id if spec else f"UNKNOWN:{raw_el}"
+                dl_status = None
                 if val is None:
                     status = EvidenceStatus.MISSING_NULL
                     norm_val, norm_unit, norm_formula = None, None, None
+                    dl_status = "missing_null_in_source"
                 elif val == 0.0 and (err is None or err == 0.0):
                     status = EvidenceStatus.BELOW_DETECTION_LIMIT
-                    norm_val, norm_unit, norm_formula = 0.0, "ppm", "bdl_zero_sentinel"
+                    norm_val, norm_unit, norm_formula = 0.0, "ppm", "zero_with_zero_error_bdl_excluded"
+                    dl_status = "reported_zero_with_zero_error_bdl_excluded_no_quantitative_lod_in_source"
                 else:
                     status = EvidenceStatus.MEASURED if loc_verified else EvidenceStatus.UNLOCATED
                     norm_val, norm_unit, norm_formula = (
@@ -174,22 +230,29 @@ class ApxsEvidenceAdapter:
                         else (val, "ppm", "identity (ppm)")
                     )
                 rec_ref = f"row:{row['row_index']}:{row['target_name']}:sol{row['sol']}"
+                raw_sp = m.get("source_column") or f"{raw_el}_ppm"
                 ev = CompositionEvidence(
-                    evidence_id=_deterministic_id(source_dataset_id, product_id, rec_ref, raw_el),
+                    evidence_id="pending",
+                    determinism_version=EVIDENCE_ID_DETERMINISM_VERSION,
                     source_dataset_id=source_dataset_id,
                     product_id=product_id,
                     source_record_ref=rec_ref,
+                    source_file_path=parsed_res.source_file_path,
+                    source_file_checksum=parsed_res.source_file_checksum,
+                    schema_version=parsed_res.schema_version,
+                    parser_id=parsed_res.parser_id,
+                    parser_version=parsed_res.parser_version,
                     instrument_id="APXS",
                     instrument_name="Alpha Particle X-ray Spectrometer (APXS)",
-                    processing_level=f"Calibrated Derived ({row.get('fit_type') or 'RGFit_v2'})",
-                    calibration_status="Calibrated trace element (ppm) with 1-sigma precision error",
+                    processing_level=f"Calibrated Derived ({row.get('fit_type') or 'RGFit'})",
+                    calibration_status="Calibrated trace element (ppm) with reported analytical precision error",
                     target_name=row.get("target_name"),
                     sol=row.get("sol"),
                     observation_timestamp_utc=row.get("start_time"),
-                    canonical_species_id=spec.canonical_id if spec else raw_el,
+                    canonical_species_id=canon_id,
                     canonical_species_name=spec.canonical_name if spec else raw_el,
                     species_category=SpeciesCategory.ELEMENT,
-                    raw_species_name=f"{raw_el}_ppm",
+                    raw_species_name=raw_sp,
                     evidence_type=EvidenceType.DIRECT_ELEMENT_MEASUREMENT,
                     evidence_status=status,
                     raw_value=val,
@@ -198,14 +261,17 @@ class ApxsEvidenceAdapter:
                     normalized_unit=norm_unit,
                     normalization_formula=norm_formula,
                     uncertainty_value=err,
-                    uncertainty_unit="ppm" if err is not None else None,
-                    uncertainty_type="1_sigma_precision_error",
+                    uncertainty_unit=norm_unit if err is not None else None,
+                    uncertainty_type="reported_apxs_analytical_error" if err is not None else None,
+                    uncertainty_semantics="1_sigma_analytical_precision_per_PDS4_XML" if err is not None else None,
+                    detection_limit_status=dl_status,
                     quality_flag=row.get("quality_flag"),
-                    methodology="APXS X-ray spectroscopy calibrated RGFit_v2 trace element quantification",
+                    methodology="APXS X-ray spectroscopy calibrated RGFit trace element quantification",
                     provenance_url=provenance_url,
                     source_reference=f"PDS4:{product_id}:{rec_ref}",
                     citation="Berger et al. (2022), JGR Planets, DOI:10.1029/2021JE007171",
                     location_verified=loc_verified,
+                    location_semantic_type=loc_semantic,
                     latitude=lat,
                     longitude_east=lon,
                     elevation_m=elev,
@@ -214,7 +280,13 @@ class ApxsEvidenceAdapter:
                     longitude_direction="East" if coords else None,
                     coordinate_source=coords["coordinate_source"] if coords else None,
                     coordinate_provenance=coords["coordinate_provenance"] if coords else None,
-                    coordinate_uncertainty_m=coords.get("coordinate_uncertainty_m") if coords else None,
+                    original_coordinate_values=coords.get("original_coordinate_values") if coords else None,
+                    original_coordinate_crs=coords.get("original_coordinate_crs") if coords else None,
+                    coordinate_transform=coords.get("coordinate_transform") if coords else None,
+                    coordinate_transform_params=coords.get("coordinate_transform_params") if coords else None,
+                    association_rule_version=coords.get("association_rule_version") if coords else None,
+                    coordinate_limitations=coords.get("coordinate_limitations", []) if coords else [],
+                    coordinate_uncertainty_m=None,
                     geometry_type=GeometryType.POINT,
                     min_lat=lat,
                     max_lat=lat,
@@ -222,9 +294,16 @@ class ApxsEvidenceAdapter:
                     max_lon_east=lon,
                     geometry_wkt=f"POINT ({lon} {lat})" if loc_verified else None,
                 )
+                ev.evidence_id = compute_deterministic_evidence_id(ev)
                 candidates.append((ev, {"sol": row.get("sol"), "target": row.get("target_name"), "val": val, "err": err}))
 
-        return _evaluate_batch(candidates)
+        return _evaluate_batch(
+            candidates,
+            parser_result=parsed_res,
+            source_dataset_id=source_dataset_id,
+            product_id=product_id,
+            instrument_id="APXS",
+        )
 
 
 class ChemCamEvidenceAdapter:
@@ -242,7 +321,7 @@ class ChemCamEvidenceAdapter:
         coord_service: Optional[CoordinateAssociationService] = None,
         provenance_url: Optional[str] = None,
     ) -> Tuple[List[CompositionEvidence], List[RejectionRecord]]:
-        rows = CuriosityDataParser.parse_chemcam_moc_table(
+        parsed_res = CuriosityDataParser.parse_chemcam_moc_table_with_contract(
             csv_path,
             label_path=label_path,
             coord_service=coord_service,
@@ -250,18 +329,16 @@ class ChemCamEvidenceAdapter:
         moc_pid = csv_path.stem.upper()
         candidates: List[Tuple[CompositionEvidence, Dict[str, Any]]] = []
 
-        for r in rows:
+        for r in parsed_res.records:
             coords = r.get("coordinates")
             loc_verified = coords is not None
             lat = coords.latitude if coords else None
             lon = coords.longitude if coords else None
             elev = coords.elevation_m if coords else None
             rmc_key = coords.rmc_key if coords else None
+            loc_semantic = coords.location_semantic_type if coords else LocationSemanticType.UNLOCATED
 
-            # Extract Sol cleanly from filename CCAM02014P3 -> 14 if numeric suffix matches
             sol_num = None
-            import re
-
             m_sol = re.search(r"CCAM\d{2}(\d{3})P", r["product_name"], re.I)
             if m_sol:
                 sol_num = int(m_sol.group(1))
@@ -269,13 +346,18 @@ class ChemCamEvidenceAdapter:
             for ox_name, ox_m in r.get("oxides", {}).items():
                 val = ox_m.get("value")
                 rmsep = ox_m.get("rmsep")
+                shots_stdev = ox_m.get("shots_stdev")
                 spec = get_species_by_id(ox_name)
+                canon_id = spec.canonical_id if spec else f"UNKNOWN:{ox_name}"
+                dl_status: Optional[str] = None
                 if val is None:
                     status = EvidenceStatus.MISSING_NULL
                     norm_val, norm_unit, norm_formula = None, None, None
+                    dl_status = "missing_null_in_source"
                 elif val == 0.0 and (rmsep is None or rmsep == 0.0):
                     status = EvidenceStatus.BELOW_DETECTION_LIMIT
-                    norm_val, norm_unit, norm_formula = 0.0, "wt%", "bdl_zero_sentinel"
+                    norm_val, norm_unit, norm_formula = 0.0, "wt%", "zero_with_zero_rmsep_excluded"
+                    dl_status = "reported_zero_with_zero_rmsep_excluded_no_quantitative_lod_in_source"
                 else:
                     status = EvidenceStatus.MEASURED if loc_verified else EvidenceStatus.UNLOCATED
                     norm_val, norm_unit, norm_formula = (
@@ -286,18 +368,24 @@ class ChemCamEvidenceAdapter:
 
                 rec_ref = f"moc_row:{r['row_index']}:{r['product_name']}"
                 ev = CompositionEvidence(
-                    evidence_id=_deterministic_id(source_dataset_id, moc_pid, rec_ref, ox_name),
+                    evidence_id="pending",
+                    determinism_version=EVIDENCE_ID_DETERMINISM_VERSION,
                     source_dataset_id=source_dataset_id,
                     product_id=r["product_name"].replace(".CSV", ""),
                     source_record_ref=rec_ref,
+                    source_file_path=parsed_res.source_file_path,
+                    source_file_checksum=parsed_res.source_file_checksum,
+                    schema_version=parsed_res.schema_version,
+                    parser_id=parsed_res.parser_id,
+                    parser_version=parsed_res.parser_version,
                     instrument_id="ChemCam_LIBS",
                     instrument_name="Chemistry Camera (ChemCam LIBS)",
                     processing_level="Derived Level 5 (PLS+ICA Combined Oxide Prediction)",
-                    calibration_status="Calibrated major oxide wt% with RMSEP uncertainty",
+                    calibration_status="Calibrated major oxide wt% with RMSEP & shot-to-shot stdev",
                     target_name=r.get("target_name"),
                     sol=sol_num,
                     rmc=rmc_key,
-                    canonical_species_id=spec.canonical_id if spec else ox_name,
+                    canonical_species_id=canon_id,
                     canonical_species_name=spec.canonical_name if spec else ox_name,
                     species_category=SpeciesCategory.OXIDE,
                     raw_species_name=ox_name,
@@ -310,12 +398,19 @@ class ChemCamEvidenceAdapter:
                     normalization_formula=norm_formula,
                     uncertainty_value=rmsep,
                     uncertainty_unit="wt%" if rmsep is not None else None,
-                    uncertainty_type="RMSEP",
-                    quality_flag=f"total_oxide_wt={r.get('total_wt_pct')}",
+                    uncertainty_type="RMSEP" if rmsep is not None else None,
+                    uncertainty_semantics="Root-Mean-Square Error of Prediction (calibration accuracy)" if rmsep is not None else None,
+                    secondary_uncertainty_value=shots_stdev,
+                    secondary_uncertainty_unit="wt%" if shots_stdev is not None else None,
+                    secondary_uncertainty_type="shots_stdev" if shots_stdev is not None else None,
+                    detection_limit_status=dl_status,
+                    quality_flag=f"total_oxide_wt={r.get('total_wt_pct')}" if r.get("total_wt_pct") is not None else None,
                     methodology="ChemCam LIBS Multivariate PLS+ICA Oxide Regression (LANL MOC table)",
                     provenance_url=provenance_url,
                     source_reference=f"PDS3:{r['data_set_id']}:{r['product_name']}",
+                    citation="Clegg et al. (2017), Spectrochimica Acta B; LANL ChemCam PDS3 MOC RDR",
                     location_verified=loc_verified,
+                    location_semantic_type=loc_semantic,
                     latitude=lat,
                     longitude_east=lon,
                     elevation_m=elev,
@@ -324,7 +419,15 @@ class ChemCamEvidenceAdapter:
                     longitude_direction=coords.longitude_direction if coords else None,
                     coordinate_source=coords.coordinate_source if coords else None,
                     coordinate_provenance=coords.coordinate_provenance if coords else None,
+                    original_coordinate_values=coords.original_coordinate_values if coords else None,
+                    original_coordinate_crs=coords.original_coordinate_crs if coords else None,
+                    coordinate_transform=coords.coordinate_transform if coords else None,
+                    coordinate_transform_params=coords.coordinate_transform_params if coords else None,
+                    waypoint_id=coords.waypoint_id if coords else None,
+                    association_rule_version=coords.association_rule_version if coords else None,
+                    coordinate_limitations=coords.coordinate_limitations if coords else [],
                     coordinate_uncertainty_m=coords.coordinate_uncertainty_m if coords else None,
+                    instrument_standoff_m=coords.instrument_standoff_m if coords else r.get("distance_m"),
                     geometry_type=GeometryType.POINT,
                     min_lat=lat,
                     max_lat=lat,
@@ -332,9 +435,16 @@ class ChemCamEvidenceAdapter:
                     max_lon_east=lon,
                     geometry_wkt=f"POINT ({lon} {lat})" if loc_verified else None,
                 )
-                candidates.append((ev, {"product": r["product_name"], "oxide": ox_name, "val": val, "rmsep": rmsep}))
+                ev.evidence_id = compute_deterministic_evidence_id(ev)
+                candidates.append((ev, {"product": r["product_name"], "oxide": ox_name, "val": val, "rmsep": rmsep, "shots_stdev": shots_stdev}))
 
-        return _evaluate_batch(candidates)
+        return _evaluate_batch(
+            candidates,
+            parser_result=parsed_res,
+            source_dataset_id=source_dataset_id,
+            product_id=moc_pid,
+            instrument_id="ChemCam_LIBS",
+        )
 
     @staticmethod
     def audit_raw_psv_as_non_compositional(
@@ -349,10 +459,16 @@ class ChemCamEvidenceAdapter:
         meta = extract_pds3_metadata(label_path) if label_path and label_path.exists() else {}
         pid = str(meta.get("product_id") or file_path.stem.upper())
         ev = CompositionEvidence(
-            evidence_id=_deterministic_id(source_dataset_id, pid, "raw_psv_audit"),
+            evidence_id="pending",
+            determinism_version=EVIDENCE_ID_DETERMINISM_VERSION,
             source_dataset_id=source_dataset_id,
             product_id=pid,
             source_record_ref=file_path.name,
+            source_file_path=str(file_path),
+            source_file_checksum=_sha256_file(file_path) if file_path.exists() else "missing",
+            schema_version="pds3_psv",
+            parser_id="chemcam_psv_audit",
+            parser_version="2.0.0",
             instrument_id="ChemCam_PSV",
             instrument_name="ChemCam Passive Spectrometer",
             processing_level="Level 1 Passive Spectrum (MSL:LASER_MODE=NO)",
@@ -369,6 +485,7 @@ class ChemCamEvidenceAdapter:
             methodology="Passive reflectance intensity without calibrated mineral/element inversion",
             source_reference=f"PDS3:{pid}",
         )
+        ev.evidence_id = compute_deterministic_evidence_id(ev)
         _, _, rej = validate_composition_evidence(ev, raw_payload={"file": file_path.name})
         return [rej] if rej else []
 
@@ -385,21 +502,22 @@ class CheMinEvidenceAdapter:
         provenance_url: Optional[str] = None,
         extra_structure_dirs: Optional[List[Path]] = None,
     ) -> Tuple[List[CompositionEvidence], List[RejectionRecord]]:
-        parsed = CuriosityDataParser.parse_chemin_min_csv(
+        parsed_res = CuriosityDataParser.parse_chemin_min_csv_with_contract(
             csv_path,
             label_path=label_path,
             coord_service=coord_service,
             extra_structure_dirs=extra_structure_dirs,
         )
+        parsed = parsed_res.records[0]
         coords = parsed.get("coordinates")
         loc_verified = coords is not None
         lat = coords.latitude if coords else None
         lon = coords.longitude if coords else None
         elev = coords.elevation_m if coords else None
         rmc_key = coords.rmc_key if coords else None
+        loc_semantic = coords.location_semantic_type if coords else LocationSemanticType.UNLOCATED
         pid = parsed["product_id"]
 
-        # Extract sample target phrase cleanly from CheMin PDS3 description if present
         target_label = pid
         desc = parsed.get("description") or ""
         if "rocknest" in desc.lower():
@@ -410,18 +528,23 @@ class CheMinEvidenceAdapter:
             raw_min = m["mineral"]
             wt_pct = m.get("weight_percent")
             err = m.get("estimated_error")
+            err_sem = m.get("error_semantics") or "2_sigma_topas_rietveld"
             res = resolve_species_query(raw_min)
             spec = res.species if res.resolved else None
-            canon_id = spec.canonical_id if spec else raw_min.lower()
+            # Never invent/guess canonical species IDs for unknown mineral rows
+            canon_id = spec.canonical_id if spec else f"UNKNOWN:{raw_min}"
             canon_name = spec.canonical_name if spec else raw_min
             category = spec.category if spec else SpeciesCategory.MINERAL
 
+            dl_status: Optional[str] = None
             if wt_pct is None:
                 status = EvidenceStatus.MISSING_NULL
                 norm_val, norm_unit, norm_formula = None, None, None
+                dl_status = "missing_null_in_source"
             elif wt_pct == 0.0 and (err is None or err == 0.0):
                 status = EvidenceStatus.BELOW_DETECTION_LIMIT
-                norm_val, norm_unit, norm_formula = 0.0, "wt%", "bdl_zero_sentinel"
+                norm_val, norm_unit, norm_formula = 0.0, "wt%", "zero_with_zero_error_bdl_excluded"
+                dl_status = "reported_zero_with_zero_error_bdl_excluded_no_quantitative_lod_in_source"
             else:
                 status = EvidenceStatus.DETECTED if loc_verified else EvidenceStatus.UNLOCATED
                 norm_val, norm_unit, norm_formula = (
@@ -432,14 +555,20 @@ class CheMinEvidenceAdapter:
 
             rec_ref = f"chemin_row:{m['row_index']}:{raw_min}"
             ev = CompositionEvidence(
-                evidence_id=_deterministic_id(source_dataset_id, pid, rec_ref, canon_id),
+                evidence_id="pending",
+                determinism_version=EVIDENCE_ID_DETERMINISM_VERSION,
                 source_dataset_id=source_dataset_id,
                 product_id=pid,
                 source_record_ref=rec_ref,
+                source_file_path=parsed_res.source_file_path,
+                source_file_checksum=parsed_res.source_file_checksum,
+                schema_version=parsed_res.schema_version,
+                parser_id=parsed_res.parser_id,
+                parser_version=parsed_res.parser_version,
                 instrument_id="CheMin_XRD",
                 instrument_name="Chemistry & Mineralogy X-Ray Diffractometer (CheMin)",
                 processing_level="Derived Mineral Abundance RDR5 (TOPAS Rietveld)",
-                calibration_status="Quantitative crystalline mineral weight% with 1-sigma error",
+                calibration_status="Quantitative crystalline mineral weight% with 2-sigma TOPAS Rietveld error",
                 target_name=target_label,
                 sol=parsed.get("sol"),
                 observation_timestamp_utc=parsed.get("start_time"),
@@ -457,12 +586,16 @@ class CheMinEvidenceAdapter:
                 normalization_formula=norm_formula,
                 uncertainty_value=err,
                 uncertainty_unit="wt%" if err is not None else None,
-                uncertainty_type="TOPAS_Rietveld_1_sigma_error",
+                uncertainty_type="TOPAS_Rietveld_2_sigma_error" if err is not None else None,
+                uncertainty_semantics=err_sem if err is not None else None,
+                detection_limit_status=dl_status,
                 quality_flag="crystalline_phase_wt_pct",
                 methodology="CheMin Co K-alpha X-Ray Diffraction TOPAS Rietveld refinement",
                 provenance_url=provenance_url,
                 source_reference=f"PDS3:{parsed.get('data_set_id')}:{pid}",
+                citation="Blake et al., MSL CheMin PDS3 RDR5 Mineral Abundance Table (CHEMIN_MIN.FMT 2-sigma error)",
                 location_verified=loc_verified,
+                location_semantic_type=loc_semantic,
                 latitude=lat,
                 longitude_east=lon,
                 elevation_m=elev,
@@ -471,6 +604,13 @@ class CheMinEvidenceAdapter:
                 longitude_direction=coords.longitude_direction if coords else None,
                 coordinate_source=coords.coordinate_source if coords else None,
                 coordinate_provenance=coords.coordinate_provenance if coords else None,
+                original_coordinate_values=coords.original_coordinate_values if coords else None,
+                original_coordinate_crs=coords.original_coordinate_crs if coords else None,
+                coordinate_transform=coords.coordinate_transform if coords else None,
+                coordinate_transform_params=coords.coordinate_transform_params if coords else None,
+                waypoint_id=coords.waypoint_id if coords else None,
+                association_rule_version=coords.association_rule_version if coords else None,
+                coordinate_limitations=coords.coordinate_limitations if coords else [],
                 coordinate_uncertainty_m=coords.coordinate_uncertainty_m if coords else None,
                 geometry_type=GeometryType.POINT,
                 min_lat=lat,
@@ -479,9 +619,16 @@ class CheMinEvidenceAdapter:
                 max_lon_east=lon,
                 geometry_wkt=f"POINT ({lon} {lat})" if loc_verified else None,
             )
+            ev.evidence_id = compute_deterministic_evidence_id(ev)
             candidates.append((ev, {"mineral": raw_min, "wt_pct": wt_pct, "err": err}))
 
-        return _evaluate_batch(candidates)
+        return _evaluate_batch(
+            candidates,
+            parser_result=parsed_res,
+            source_dataset_id=source_dataset_id,
+            product_id=pid,
+            instrument_id="CheMin_XRD",
+        )
 
 
 class CrismEvidenceAdapter:
@@ -511,10 +658,16 @@ class EnvironmentalExclusionAdapter:
         source_dataset_id: str = "msl_rems_sol00010_adr",
     ) -> List[RejectionRecord]:
         ev = CompositionEvidence(
-            evidence_id=_deterministic_id(source_dataset_id, file_path.stem.upper(), "env_exclusion"),
+            evidence_id="pending",
+            determinism_version=EVIDENCE_ID_DETERMINISM_VERSION,
             source_dataset_id=source_dataset_id,
             product_id=file_path.stem.upper(),
             source_record_ref=file_path.name,
+            source_file_path=str(file_path),
+            source_file_checksum=_sha256_file(file_path) if file_path.exists() else "missing",
+            schema_version="pds3_rems",
+            parser_id="rems_exclusion_audit",
+            parser_version="2.0.0",
             instrument_id=instrument_id,
             instrument_name="Rover Environmental Monitoring Station (REMS)",
             processing_level="Environmental Telemetry",
@@ -530,5 +683,6 @@ class EnvironmentalExclusionAdapter:
             methodology="Meteorological/Ancillary observation (excluded from geochemical index)",
             source_reference=f"PDS3:{file_path.stem.upper()}",
         )
+        ev.evidence_id = compute_deterministic_evidence_id(ev)
         _, _, rej = validate_composition_evidence(ev, raw_payload={"file": file_path.name})
         return [rej] if rej else []

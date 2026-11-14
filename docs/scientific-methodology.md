@@ -53,3 +53,9 @@ Candidate locations are ranked strictly by transparent physical and spatial metr
 - **Abundance & Quality:** Normalized abundance scaled within query range and penalized for missing error bars or elevated RMSEP
 - **Instrument Corroboration:** Higher weight when independent instruments (e.g., `APXS` + `ChemCam_LIBS`) corroborate a location
 - **Mars IAU2000 Geodesic Proximity:** Ellipsoidal distance & forward azimuth from active astronaut position computed with `pyproj.Geod` (`a=3396190 m, b=3376200 m`)
+
+### 4.3 Prompt 5 Heuristic Priority Governance & Stoichiometric Truthfulness
+
+- **Explicitly Heuristic Ranking (`RankingConfiguration`):** Candidate scores carry `ranking_config_id` (`heuristic_exploration_priority_v2`), `ranking_config_version` (`2.0.0`), and `is_heuristic_only = true`. Unreported quality/uncertainty (`quality_component = null`) and single uncorroborated detections (`corroboration_component = null`) remain explicitly `null` and are listed in `unavailable_dimensions` with weight renormalized over available terms—never defaulted to baseline constants (`0.85` / `0.20`).
+- **Stoichiometric Conversion Lineage (`IUPAC_CIAAW_2021`):** Element queries fulfilled via oxide stoichiometry mark `is_stoichiometric_conversion = true`, `source_oxide_species`, `stoichiometric_factor`, and `stoichiometric_weights_version`. `FeO` (APXS) vs `FeOT` (ChemCam LIBS) assumptions are surfaced in `scientific_warnings`.
+- **Spatial Semantic Integrity:** `ROVER_STATION_LOCATION` (RMC-joined rover stations for ChemCam LIBS / CheMin) is separated visually and in metadata from `INSTRUMENT_TARGET_LOCATION` (APXS target coordinates).

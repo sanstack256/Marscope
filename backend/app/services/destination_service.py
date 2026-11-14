@@ -400,6 +400,10 @@ class DestinationEvaluationService:
                 uncertainty=h.evidence.uncertainty_value,
                 distance_from_astronaut_m=h.distance_from_astronaut_m,
                 composite_rank_score=h.ranking.composite_rank_score,
+                location_semantic_type=h.evidence.location_semantic_type.value,
+                coordinate_uncertainty_m=h.evidence.coordinate_uncertainty_m,
+                is_stoichiometric_conversion=h.evidence.is_stoichiometric_conversion,
+                source_oxide_species=h.evidence.source_oxide_species,
                 coordinate_source=h.evidence.coordinate_source,
                 source_reference=h.evidence.source_reference,
             )
@@ -416,6 +420,7 @@ class DestinationEvaluationService:
             candidate_locations=structured.candidate_locations,
             resolution=structured.resolution,
             index_status=structured.index_status,
+            ranking_configuration_used=structured.ranking_configuration_used,
             astronaut_position_used=structured.astronaut_position_used,
             unavailable_reason=structured.unavailable_reason,
             scientific_warnings=structured.scientific_warnings,

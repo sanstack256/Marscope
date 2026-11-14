@@ -12,6 +12,7 @@ from app.science.composition.models import (
     CompositionIndexStatus,
     CompositionSearchMode,
     RankedCompositionHit,
+    RankingConfiguration,
     SpeciesResolutionResult,
 )
 
@@ -111,7 +112,11 @@ class CompositionOccurrence(BaseModel):
     units: Optional[str] = None
     uncertainty: Optional[float] = None
     distance_from_astronaut_m: Optional[float] = None
-    composite_rank_score: float = 0.0
+    composite_rank_score: Optional[float] = None
+    location_semantic_type: Optional[str] = None
+    coordinate_uncertainty_m: Optional[float] = None
+    is_stoichiometric_conversion: bool = False
+    source_oxide_species: Optional[str] = None
     coordinate_source: Optional[str] = None
     source_reference: str
 
@@ -126,6 +131,7 @@ class CompositionSearchResponse(BaseModel):
     candidate_locations: List[CandidateDiscoveryLocation] = Field(default_factory=list)
     resolution: Optional[SpeciesResolutionResult] = None
     index_status: Optional[CompositionIndexStatus] = None
+    ranking_configuration_used: Optional[RankingConfiguration] = None
     astronaut_position_used: Optional[Dict[str, Any]] = None
     unavailable_reason: Optional[str] = None
     scientific_warnings: List[str] = Field(default_factory=list)
