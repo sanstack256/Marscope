@@ -1,4 +1,6 @@
 @import "tailwindcss";
+@source "../../src";
+@source "../**/*.{ts,tsx}";
 
 :root {
   --mars-bg: #0b0d13;
