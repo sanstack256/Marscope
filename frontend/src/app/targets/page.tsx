@@ -2,13 +2,17 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Database, RefreshCw, ShieldAlert, ShieldCheck, Sparkles, Telescope } from "lucide-react";
+import { Database, RefreshCw, Route as RouteIcon, ShieldAlert, ShieldCheck, Sparkles, Telescope } from "lucide-react";
 import { EmptyState } from "../../components/EmptyState";
 import { PageHeader } from "../../components/PageHeader";
 import { API_BASE_URL } from "../../lib/constants";
+import { useRoutingStore } from "../../stores/useRoutingStore";
 import { Observation, ScienceTarget } from "../../types";
 
 export default function TargetExplorerPage() {
+  const selectedTargetIds = useRoutingStore((s) => s.selectedTargetIds);
+  const toggleTargetId = useRoutingStore((s) => s.toggleTargetId);
+  const setDestinationPoint = useRoutingStore((s) => s.setDestinationPoint);
   const [targets, setTargets] = useState<ScienceTarget[]>([]);
   const [observations, setObservations] = useState<Observation[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -200,8 +204,38 @@ export default function TargetExplorerPage() {
                   {tgt.explanation && (
                     <div className="text-[10px] text-slate-400 leading-relaxed">{tgt.explanation}</div>
                   )}
-                  <div className="text-[10px] font-mono text-slate-500">
-                    Evidence IDs: {tgt.evidence_ids?.length ? tgt.evidence_ids.slice(0, 4).join(", ") : "None (administrative)"}
+                  <div className="flex items-center justify-between gap-2 pt-1">
+                    <span className="text-[10px] font-mono text-slate-500 truncate">
+                      Evidence IDs: {tgt.evidence_ids?.length ? tgt.evidence_ids.slice(0, 4).join(", ") : "None (administrative)"}
+                    </span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => toggleTargetId(tgt.id)}
+                        className={`px-2 py-1 rounded text-[10px] font-mono border transition-colors ${
+                          selectedTargetIds.includes(tgt.id)
+                            ? "bg-purple-600/30 border-purple-400 text-purple-200"
+                            : "bg-[#161c2b] border-[#252f44] text-slate-300 hover:border-purple-400/50"
+                        }`}
+                      >
+                        {selectedTargetIds.includes(tgt.id) ? "In Route ✓" : "+ Add to Route"}
+                      </button>
+                      <Link
+                        href="/planner"
+                        onClick={() =>
+                          setDestinationPoint({
+                            lat: tgt.latitude,
+                            lon_east: tgt.longitude,
+                            label: tgt.name,
+                            target_id: tgt.id,
+                          })
+                        }
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded text-[10px] font-mono bg-[#e25b38]/20 border border-[#e25b38]/40 text-[#f38d72] hover:bg-[#e25b38]/35"
+                      >
+                        <RouteIcon className="w-3 h-3" />
+                        <span>Route Here</span>
+                      </Link>
+                    </div>
                   </div>
                 </div>
               );

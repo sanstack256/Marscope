@@ -718,7 +718,7 @@ def test_mobility_api_endpoints_live_contracts():
     r_status = client.get("/api/mobility/status")
     assert r_status.status_code == 200
     st_body = r_status.json()
-    assert st_body["route_optimization_enabled"] is False
+    assert st_body["route_optimization_enabled"] is True
     assert st_body["safety_certification_enabled"] is False
     assert st_body["locally_downloaded_dem_count"] >= 1
     mola_inv = next(i for i in st_body["terrain_inventory"] if i["dataset_id"] == "mola_megt90n000cb")

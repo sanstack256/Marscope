@@ -1,0 +1,74 @@
+{
+  "id": "hirise_esp_040770_1755_ortho",
+  "product_id": "ESP_040770_1755_RED_C_01_ORTHO.JP2",
+  "product_title": "HiRISE Orthorectified Surface Image — Bradbury to Vera Rubin Ridge (1.01 m/px)",
+  "product_type": "IMAGE / Orthorectified Orbital Imagery",
+  "mission": "Mars Reconnaissance Orbiter (MRO)",
+  "instrument": "High Resolution Imaging Science Experiment (HiRISE)",
+  "source_archive": "NASA PDS / University of Arizona HiRISE DTM Archive",
+  "original_product_url": "https://hirise-pds.lpl.arizona.edu/PDS/DTM/ESP/ORB_040700_040799/ESP_040770_1755_ESP_039280_1755/ESP_040770_1755_RED_C_01_ORTHO.JP2",
+  "original_label_url": "https://hirise-pds.lpl.arizona.edu/PDS/DTM/ESP/ORB_040700_040799/ESP_040770_1755_ESP_039280_1755/ESP_040770_1755_RED_C_01_ORTHO.LBL",
+  "doi_or_pds_id": "MRO-M-HIRISE-5-DTM-V1.0:ESP_040770_1755_RED_C_01_ORTHO",
+  "license": "NASA Public Domain / US Govt Open",
+  "attribution": "NASA/JPL-Caltech/University of Arizona HiRISE Team",
+  "acquisition_timestamp": null,
+  "observation_sol": null,
+  "processing_level": "DTM-Orthorectified JP2 (1.01 m/px)",
+  "calibration_status": "Radiometrically stretched 8-bit greyscale registered to DTEEC_040770_1755",
+  "coverage": {
+    "min_latitude": -4.792188,
+    "max_latitude": -4.583297,
+    "min_longitude": 137.335157,
+    "max_longitude": 137.442692,
+    "center_latitude": -4.687743,
+    "center_longitude": 137.388925,
+    "longitude_range": "[0, 360]"
+  },
+  "coordinate_reference_system": "IAU2000:49900",
+  "latitude_convention": "Planetocentric",
+  "longitude_direction": "East",
+  "map_projection": "Equirectangular (central_meridian=137.39)",
+  "planetary_radii_m": {
+    "a": 3396190.0,
+    "b": 3396190.0,
+    "c": 3396190.0
+  },
+  "horizontal_resolution_meters": 1.0118,
+  "vertical_resolution_meters": null,
+  "units": "digital_number",
+  "nodata_value": null,
+  "data_format": "PDS3 .LBL + JPEG2000 (.JP2)",
+  "file_size_bytes": 24772092,
+  "sha256_checksum": "f25a1a8caab875cd84250a6e79fb2ea082eb3f01f6db2ab9791be25f05649a2a",
+  "status": "downloaded",
+  "verification": {
+    "archive_availability": "verified",
+    "product_discovery": "verified",
+    "metadata_verification": "verified",
+    "license_verification": "verified",
+    "coverage_verification": "verified",
+    "download_verification": "verified",
+    "processing_verification": "unverified",
+    "field_verification": {
+      "resolution": "verified",
+      "crs": "verified",
+      "units": "verified",
+      "coverage": "verified",
+      "license": "verified"
+    },
+    "evidence_notes": [
+      "Verified downloaded file esp_040770_1755_red_c_01_ortho.jp2 (24772092 bytes, SHA-256=f25a1a8caab8...)",
+      "Verified PDS3 header esp_040770_1755_red_c_01_ortho.lbl"
+    ],
+    "last_checked_utc": "2026-11-14T14:28:36.420458Z"
+  },
+  "failure_reason": null,
+  "quality_flags": [],
+  "known_limitations": [],
+  "processing_history": [
+    "Catalog record discovered via HiriseSourceAdapter"
+  ],
+  "local_file_path": "raw/esp_040770_1755_red_c_01_ortho.jp2",
+  "local_label_path": "raw/esp_040770_1755_red_c_01_ortho.lbl",
+  "processed_file_path": null
+}

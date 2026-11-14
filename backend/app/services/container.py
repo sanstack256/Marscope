@@ -10,6 +10,7 @@ from pathlib import Path
 from app.ingestion.acquisition import AcquisitionService
 from app.ingestion.catalog import DatasetCatalogService
 from app.mobility.service import HumanMobilityService
+from app.routing.service import ScienceAwareRoutingService
 from app.science.composition.index import CompositionSpatialIndex
 from app.science.composition.search import CompositionSearchService
 from app.science.coordinate_association import CoordinateAssociationService
@@ -17,6 +18,7 @@ from app.science.target_registry import TargetRegistryService
 from app.services.destination_service import DestinationEvaluationService
 from app.services.layer_service import LayerCatalogService
 from app.services.localization_service import LocalizationService
+from app.terrain.mesh import TerrainMeshService
 
 # Project root path resolution
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
@@ -61,4 +63,14 @@ mobility_service = HumanMobilityService(
     catalog_service=catalog_service,
     raw_dir=RAW_DIR,
     processed_dir=PROCESSED_DIR,
+)
+terrain_mesh_service = TerrainMeshService(
+    catalog_service=catalog_service,
+    raw_dir=RAW_DIR,
+)
+routing_service = ScienceAwareRoutingService(
+    catalog_service=catalog_service,
+    raw_dir=RAW_DIR,
+    target_registry=target_registry,
+    composition_search=composition_search_service,
 )

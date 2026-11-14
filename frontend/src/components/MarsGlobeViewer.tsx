@@ -2,9 +2,11 @@
 
 import { useEffect, useRef, useState } from "react";
 import type * as CesiumTypes from "cesium";
+import { API_BASE_URL } from "../lib/constants";
 import { useLayerStore } from "../stores/useLayerStore";
 import { useMissionStore } from "../stores/useMissionStore";
-import { Compass, Globe2, Layers, Minus, Plus, RotateCcw, Crosshair } from "lucide-react";
+import { useRoutingStore } from "../stores/useRoutingStore";
+import { Compass, Globe2, Layers, Minus, Plus, RotateCcw, Crosshair, Route as RouteIcon } from "lucide-react";
 
 type SceneViewMode = "3D" | "2.5D" | "2D";
 const GLOBAL_VIEW_CAMERA_HEIGHT_M = 9_000_000; // Initial UI framing distance; not a scientific parameter.
@@ -14,6 +16,149 @@ interface ManagedImageryLayer {
   endpoint: string;
 }
 
+// Bounding box covering local Gale Crater MOLA & HiRISE GeoTIFFs where real DEM terrain is served.
+const GALE_DEM_REGION = {
+  minLat: -6.0,
+  maxLat: -4.0,
+  minLonEast: 136.8,
+  maxLonEast: 138.5,
+};
+
+function createMarscopeDemTerrainProvider(
+  Cesium: typeof CesiumTypes,
+  marsEllipsoid: CesiumTypes.Ellipsoid,
+  signal: AbortSignal
+): CesiumTypes.TerrainProvider {
+  const baseProvider = new Cesium.EllipsoidTerrainProvider({ ellipsoid: marsEllipsoid });
+  const tileCache = new Map<string, Promise<CesiumTypes.TerrainData>>();
+  let pendingFetches = 0;
+
+  const customProvider: CesiumTypes.TerrainProvider = {
+    get errorEvent() {
+      return baseProvider.errorEvent;
+    },
+    get credit() {
+      return new Cesium.Credit("NASA HiRISE / MOLA Real DEM");
+    },
+    get tilingScheme() {
+      return baseProvider.tilingScheme;
+    },
+    get hasWaterMask() {
+      return false;
+    },
+    get hasVertexNormals() {
+      return false;
+    },
+    get availability() {
+      return undefined;
+    },
+    getLevelMaximumGeometricError(level: number) {
+      return baseProvider.getLevelMaximumGeometricError(level);
+    },
+    getTileDataAvailable(x: number, y: number, level: number) {
+      const rect = baseProvider.tilingScheme.tileXYToRectangle(x, y, level);
+      const south = Cesium.Math.toDegrees(rect.south);
+      const north = Cesium.Math.toDegrees(rect.north);
+      let west = Cesium.Math.toDegrees(rect.west);
+      let east = Cesium.Math.toDegrees(rect.east);
+      if (west < 0) west += 360;
+      if (east < 0) east += 360;
+      const inGale =
+        north >= GALE_DEM_REGION.minLat &&
+        south <= GALE_DEM_REGION.maxLat &&
+        east >= GALE_DEM_REGION.minLonEast &&
+        west <= GALE_DEM_REGION.maxLonEast;
+      return inGale ? level <= 15 : level <= 9;
+    },
+    loadTileDataAvailability() {
+      return undefined;
+    },
+    requestTileGeometry(x: number, y: number, level: number) {
+      const key = `${level}:${x}:${y}`;
+      const cached = tileCache.get(key);
+      if (cached) return cached;
+
+      const rect = baseProvider.tilingScheme.tileXYToRectangle(x, y, level);
+      const south = Cesium.Math.toDegrees(rect.south);
+      const north = Cesium.Math.toDegrees(rect.north);
+      let west = Cesium.Math.toDegrees(rect.west);
+      let east = Cesium.Math.toDegrees(rect.east);
+      if (west < 0) west += 360;
+      if (east < 0) east += 360;
+
+      const inGale =
+        level >= 8 &&
+        north >= GALE_DEM_REGION.minLat &&
+        south <= GALE_DEM_REGION.maxLat &&
+        east >= GALE_DEM_REGION.minLonEast &&
+        west <= GALE_DEM_REGION.maxLonEast &&
+        west < east &&
+        south < north;
+
+      if (!inGale) {
+        return baseProvider.requestTileGeometry(x, y, level);
+      }
+      if (pendingFetches >= 6) {
+        return undefined;
+      }
+
+      pendingFetches += 1;
+      const gridSize = 33;
+      const qs = new URLSearchParams({
+        min_lat: south.toFixed(6),
+        max_lat: north.toFixed(6),
+        min_lon: west.toFixed(6),
+        max_lon: east.toFixed(6),
+        grid_size: String(gridSize),
+      });
+
+      const promise = fetch(`${API_BASE_URL}/terrain/mesh/heightgrid?${qs.toString()}`, {
+        signal,
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            return new Float32Array(gridSize * gridSize);
+          }
+          const payload = (await res.json()) as {
+            grid_rows: number;
+            grid_cols: number;
+            elevations_m: Array<number | null>;
+          };
+          const out = new Float32Array(payload.grid_rows * payload.grid_cols);
+          for (let i = 0; i < out.length; i += 1) {
+            const h = payload.elevations_m[i];
+            out[i] = h != null && Number.isFinite(h) ? h : 0;
+          }
+          return out;
+        })
+        .catch(() => new Float32Array(gridSize * gridSize))
+        .then((floatBuf) => {
+          pendingFetches = Math.max(0, pendingFetches - 1);
+          return new Cesium.HeightmapTerrainData({
+            buffer: floatBuf,
+            width: gridSize,
+            height: gridSize,
+            childTileMask: level < 15 ? 15 : 0,
+            structure: {
+              heightScale: 1,
+              heightOffset: 0,
+              elementsPerHeight: 1,
+              stride: 1,
+            },
+          });
+        });
+
+      tileCache.set(key, promise);
+      if (tileCache.size > 256) {
+        const oldest = tileCache.keys().next().value;
+        if (oldest !== undefined) tileCache.delete(oldest);
+      }
+      return promise;
+    },
+  };
+  return customProvider;
+}
+
 export function MarsGlobeViewer() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<CesiumTypes.Viewer | null>(null);
@@ -21,6 +166,8 @@ export function MarsGlobeViewer() {
   const ellipsoidRef = useRef<CesiumTypes.Ellipsoid | null>(null);
   const managedLayersRef = useRef<Record<string, ManagedImageryLayer>>({});
   const abortControllerRef = useRef<AbortController | null>(null);
+  const lastReportedRenderedRef = useRef<Record<string, boolean>>({});
+  const reportedErrorRef = useRef<Record<string, string>>({});
 
   const [viewerReady, setViewerReady] = useState(false);
   const [viewerError, setViewerError] = useState<string | null>(null);
@@ -32,28 +179,27 @@ export function MarsGlobeViewer() {
     scaleLabel: string;
   }>({ altitudeKm: 0, headingDeg: 0, scaleLabel: "unavailable" });
 
-  const {
-    availableLayers,
-    layerStates,
-    layerOrder,
-    markLayerRendered,
-    recordTileError,
-    clearTileErrors,
-  } = useLayerStore();
+  const availableLayers = useLayerStore((s) => s.availableLayers);
+  const layerStates = useLayerStore((s) => s.layerStates);
+  const layerOrder = useLayerStore((s) => s.layerOrder);
 
-  const {
-    selectedDestination,
-    localizationStatus,
-    compositionCandidates,
-    selectedCandidateId,
-    evaluateDestination,
-  } = useMissionStore();
+  const selectedDestination = useMissionStore((s) => s.selectedDestination);
+  const localizationStatus = useMissionStore((s) => s.localizationStatus);
+  const compositionCandidates = useMissionStore((s) => s.compositionCandidates);
+  const selectedCandidateId = useMissionStore((s) => s.selectedCandidateId);
+  const evaluateDestination = useMissionStore((s) => s.evaluateDestination);
+
+  const activeRoute = useRoutingStore((s) => s.activeRoute);
+  const startPoint = useRoutingStore((s) => s.startPoint);
+  const destinationPoint = useRoutingStore((s) => s.destinationPoint);
+  const selectedWaypointSeq = useRoutingStore((s) => s.selectedWaypointSeq);
 
   // Initialize CesiumJS Mars Globe once
   useEffect(() => {
     let destroyed = false;
     let handler: CesiumTypes.ScreenSpaceEventHandler | null = null;
     let removeCameraListener: (() => void) | null = null;
+    const terrainAbortController = new AbortController();
 
     async function initCesium() {
       if (!containerRef.current) return;
@@ -79,10 +225,16 @@ export function MarsGlobeViewer() {
         const marsEllipsoid = new Cesium.Ellipsoid(3396190.0, 3396190.0, 3376200.0);
         ellipsoidRef.current = marsEllipsoid;
 
+        const demTerrainProvider = createMarscopeDemTerrainProvider(
+          Cesium,
+          marsEllipsoid,
+          terrainAbortController.signal
+        );
+
         const viewer = new Cesium.Viewer(containerRef.current, {
           globe: new Cesium.Globe(marsEllipsoid),
           baseLayer: false,
-          terrainProvider: new Cesium.EllipsoidTerrainProvider({ ellipsoid: marsEllipsoid }),
+          terrainProvider: demTerrainProvider,
           geocoder: false,
           homeButton: false,
           sceneModePicker: false,
@@ -196,6 +348,14 @@ export function MarsGlobeViewer() {
               ? String((picked.id as { id: unknown }).id)
               : null;
 
+          if (pickedEntityId && pickedEntityId.startsWith("waypoint:")) {
+            const seq = Number(pickedEntityId.slice("waypoint:".length));
+            if (Number.isFinite(seq)) {
+              useRoutingStore.getState().selectWaypoint(seq, false);
+              return;
+            }
+          }
+
           if (pickedEntityId && pickedEntityId.startsWith("candidate:")) {
             const candidateId = pickedEntityId.slice("candidate:".length);
             const storeState = useMissionStore.getState();
@@ -224,7 +384,7 @@ export function MarsGlobeViewer() {
           evaluateDestination(lat, lon, undefined, controller.signal);
         }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
-        viewer.scene.screenSpaceCameraController.minimumZoomDistance = 250;
+        viewer.scene.screenSpaceCameraController.minimumZoomDistance = 150;
         viewer.scene.screenSpaceCameraController.maximumZoomDistance = 30000000;
         viewer.scene.requestRender();
 
@@ -239,6 +399,7 @@ export function MarsGlobeViewer() {
 
     return () => {
       destroyed = true;
+      terrainAbortController.abort();
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
@@ -309,18 +470,34 @@ export function MarsGlobeViewer() {
         });
 
         provider.errorEvent.addEventListener((tileErr) => {
-          recordTileError(lid, tileErr?.message || "Tile load failed");
+          const msg = tileErr?.message || "Tile load failed";
+          if (reportedErrorRef.current[lid] === msg) return;
+          reportedErrorRef.current[lid] = msg;
+          queueMicrotask(() => {
+            useLayerStore.getState().recordTileError(lid, msg);
+          });
         });
 
         const cesiumLayer = imageryCollection.addImageryProvider(provider);
         managed = { cesiumLayer, endpoint: layer.rendering_endpoint };
         managedLayersRef.current[lid] = managed;
-        clearTileErrors(lid);
+        if (reportedErrorRef.current[lid]) {
+          delete reportedErrorRef.current[lid];
+          queueMicrotask(() => {
+            useLayerStore.getState().clearTileErrors(lid);
+          });
+        }
       }
 
       managed.cesiumLayer.show = state.visible;
       managed.cesiumLayer.alpha = state.opacity;
-      markLayerRendered(lid, state.visible);
+      if (lastReportedRenderedRef.current[lid] !== state.visible) {
+        lastReportedRenderedRef.current[lid] = state.visible;
+        const visibleSnap = state.visible;
+        queueMicrotask(() => {
+          useLayerStore.getState().markLayerRendered(lid, visibleSnap);
+        });
+      }
     });
 
     // Apply exact z-index stack order in Cesium ImageryLayerCollection
@@ -331,7 +508,7 @@ export function MarsGlobeViewer() {
       }
     });
     viewer.scene.requestRender();
-  }, [viewerReady, availableLayers, layerStates, layerOrder, markLayerRendered, recordTileError, clearTileErrors]);
+  }, [viewerReady, availableLayers, layerStates, layerOrder]);
 
   // Sync Destination, Manual Localization & Composition Candidate Markers on Globe
   useEffect(() => {
@@ -470,6 +647,140 @@ export function MarsGlobeViewer() {
     });
   }, [viewerReady, selectedCandidateId, compositionCandidates]);
 
+  // Sync Active Route, Waypoints, Start/Destination markers on Cesium Mars Globe
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    const Cesium = cesiumRef.current;
+    const marsEllipsoid = ellipsoidRef.current;
+    if (!viewerReady || !viewer || viewer.isDestroyed() || !Cesium || !marsEllipsoid) return;
+
+    let routeSource = viewer.dataSources.getByName("marscope-route")[0];
+    if (!routeSource) {
+      routeSource = new Cesium.CustomDataSource("marscope-route");
+      void viewer.dataSources.add(routeSource);
+    }
+    const entities = routeSource.entities;
+    entities.removeAll();
+
+    const toLon180 = (lonEast: number) => (lonEast > 180 ? lonEast - 360 : lonEast);
+
+    if (startPoint) {
+      entities.add({
+        id: "route-start",
+        position: marsEllipsoid.cartographicToCartesian(
+          Cesium.Cartographic.fromDegrees(toLon180(startPoint.lon_east), startPoint.lat, 0)
+        ),
+        point: {
+          pixelSize: 12,
+          color: Cesium.Color.fromCssColorString("#10b981"),
+          outlineColor: Cesium.Color.WHITE,
+          outlineWidth: 2,
+          heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+        },
+        label: {
+          text: `START: ${startPoint.label || "Origin"}`,
+          font: "10px monospace",
+          fillColor: Cesium.Color.fromCssColorString("#a7f3d0"),
+          backgroundColor: Cesium.Color.fromCssColorString("#0b0d13D9"),
+          showBackground: true,
+          pixelOffset: new Cesium.Cartesian2(0, -18),
+          heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+        },
+      });
+    }
+
+    if (destinationPoint) {
+      entities.add({
+        id: "route-destination",
+        position: marsEllipsoid.cartographicToCartesian(
+          Cesium.Cartographic.fromDegrees(toLon180(destinationPoint.lon_east), destinationPoint.lat, 0)
+        ),
+        point: {
+          pixelSize: 12,
+          color: Cesium.Color.fromCssColorString("#f43f5e"),
+          outlineColor: Cesium.Color.WHITE,
+          outlineWidth: 2,
+          heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+        },
+        label: {
+          text: `DEST: ${destinationPoint.label || "Objective"}`,
+          font: "10px monospace",
+          fillColor: Cesium.Color.fromCssColorString("#fecdd3"),
+          backgroundColor: Cesium.Color.fromCssColorString("#0b0d13D9"),
+          showBackground: true,
+          pixelOffset: new Cesium.Cartesian2(0, -18),
+          heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+        },
+      });
+    }
+
+    if (activeRoute && activeRoute.vertices.length >= 2) {
+      const returnLegStartSeq =
+        activeRoute.legs.find((l) => l.is_return_leg)?.vertex_start_seq ?? Number.POSITIVE_INFINITY;
+
+      const outboundPositions = activeRoute.vertices
+        .filter((v) => v.seq <= returnLegStartSeq)
+        .map((v) =>
+          marsEllipsoid.cartographicToCartesian(
+            Cesium.Cartographic.fromDegrees(toLon180(v.lon_east), v.lat, 0)
+          )
+        );
+      if (outboundPositions.length >= 2) {
+        entities.add({
+          id: "route-polyline-outbound",
+          polyline: {
+            positions: outboundPositions,
+            width: 3.5,
+            clampToGround: true,
+            material: Cesium.Color.fromCssColorString("#38bdf8"),
+          },
+        });
+      }
+
+      const returnPositions = activeRoute.vertices
+        .filter((v) => v.seq >= returnLegStartSeq)
+        .map((v) =>
+          marsEllipsoid.cartographicToCartesian(
+            Cesium.Cartographic.fromDegrees(toLon180(v.lon_east), v.lat, 0)
+          )
+        );
+      if (returnPositions.length >= 2) {
+        entities.add({
+          id: "route-polyline-return",
+          polyline: {
+            positions: returnPositions,
+            width: 3,
+            clampToGround: true,
+            material: new Cesium.PolylineDashMaterialProperty({
+              color: Cesium.Color.fromCssColorString("#fb923c"),
+            }),
+          },
+        });
+      }
+
+      activeRoute.vertices
+        .filter((v) => v.is_stop || selectedWaypointSeq === v.seq)
+        .forEach((v) => {
+          const isSelected = selectedWaypointSeq === v.seq;
+          entities.add({
+            id: `waypoint:${v.seq}`,
+            position: marsEllipsoid.cartographicToCartesian(
+              Cesium.Cartographic.fromDegrees(toLon180(v.lon_east), v.lat, 0)
+            ),
+            point: {
+              pixelSize: isSelected ? 13 : 9,
+              color: Cesium.Color.fromCssColorString(isSelected ? "#fde047" : "#38bdf8"),
+              outlineColor: Cesium.Color.fromCssColorString("#0b0d13"),
+              outlineWidth: isSelected ? 2.5 : 1.5,
+              heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+            },
+          });
+        });
+    }
+
+    viewer.scene.requestRender();
+  }, [viewerReady, activeRoute, startPoint, destinationPoint, selectedWaypointSeq]);
+
   // Camera control handlers
   const handleZoom = (factor: number) => {
     const viewer = viewerRef.current;
@@ -506,6 +817,24 @@ export function MarsGlobeViewer() {
       ),
       orientation: { heading: 0.0, pitch: -Cesium.Math.PI_OVER_TWO, roll: 0.0 },
       duration: 1.2,
+      complete: () => viewer.scene.requestRender(),
+    });
+  };
+
+  const handleFocusRouteOrRegion = () => {
+    const viewer = viewerRef.current;
+    const Cesium = cesiumRef.current;
+    const marsEllipsoid = ellipsoidRef.current;
+    if (!viewer || !Cesium || !marsEllipsoid) return;
+    const targetLat = activeRoute?.vertices[0]?.lat ?? startPoint?.lat ?? -4.749;
+    const targetLonRaw = activeRoute?.vertices[0]?.lon_east ?? startPoint?.lon_east ?? 137.397;
+    const targetLon = targetLonRaw > 180 ? targetLonRaw - 360 : targetLonRaw;
+    viewer.camera.flyTo({
+      destination: marsEllipsoid.cartographicToCartesian(
+        Cesium.Cartographic.fromDegrees(targetLon, targetLat, 8500)
+      ),
+      orientation: { heading: 0.0, pitch: Cesium.Math.toRadians(-52), roll: 0.0 },
+      duration: 1.1,
       complete: () => viewer.scene.requestRender(),
     });
   };
@@ -571,11 +900,20 @@ export function MarsGlobeViewer() {
         <button
           onClick={handleFocusDestination}
           disabled={!selectedDestination}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] text-[11px] font-mono text-cyan-300 hover:bg-[#161c2b] transition-colors"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] text-[11px] font-mono text-cyan-300 hover:bg-[#161c2b] transition-colors disabled:opacity-40"
           title="Center camera on the selected destination"
         >
           <Crosshair className="w-3.5 h-3.5" />
           <span>Focus destination</span>
+        </button>
+
+        <button
+          onClick={handleFocusRouteOrRegion}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] text-[11px] font-mono text-emerald-300 hover:bg-[#161c2b] transition-colors"
+          title="Fly camera obliquely into Gale Crater / Active Route DEM zone"
+        >
+          <RouteIcon className="w-3.5 h-3.5" />
+          <span>{activeRoute ? "Focus Route" : "Focus Gale DEM"}</span>
         </button>
       </div>
 

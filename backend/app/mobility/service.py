@@ -90,7 +90,7 @@ class HumanMobilityService:
             processing_version=PROCESSING_VERSION,
             traversal_model_id=TRAVERSAL_MODEL_ID,
             traversal_model_version=TRAVERSAL_MODEL_VERSION,
-            route_optimization_enabled=False,
+            route_optimization_enabled=True,
             safety_certification_enabled=False,
             active_dem_dataset_id=active_id,
             available_dem_count=len(inventory),

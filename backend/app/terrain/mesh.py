@@ -1,0 +1,922 @@
+"""
+MARSCOPE Real 3D Terrain Mesh Tile & Ortho/Derivative Texture Service
+Martian Surface Intelligence & Exploration System
+
+Generates hierarchical LOD heightfield mesh tiles, exact neighbor-stitched boundary
+vertices, explicit nodata validity masks (zero silent gap interpolation), Cesium
+HeightmapTerrainData grids, and georeferenced RGBA overlay/ortho textures directly
+from verified NASA MOLA and HiRISE Stereo DTM datasets.
+"""
+
+from __future__ import annotations
+
+from collections import OrderedDict
+import io
+import math
+import threading
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+from PIL import Image
+from pydantic import BaseModel, Field
+import rasterio
+from rasterio.enums import Resampling
+from rasterio.vrt import WarpedVRT
+
+from app.geospatial.crs import MARS_EQUATORIAL_RADIUS_M, angular_displacement_to_metric
+from app.ingestion.catalog import DatasetCatalogService
+from app.ingestion.pds_label import extract_pds3_metadata
+from app.mobility.coverage import _resolve_raw_dem_open_path
+from app.mobility.resolution import evaluate_dem_resolution_suitability
+from app.mobility.terrain_features import mars_great_circle_distance_meters
+from app.schemas.dataset import Dataset, DatasetLifecycleStatus
+from app.terrain.roughness import calculate_roughness_tri_with_metadata
+from app.terrain.slope import calculate_slope
+
+
+DEFAULT_GALE_STUDY_BOUNDS: Dict[str, float] = {
+    "min_lat": -5.5,
+    "max_lat": -4.3,
+    "min_lon": 137.2,
+    "max_lon": 138.0,
+}
+
+# Recommended default operational windows per high-res HiRISE DTM covering Curiosity + Boxwork traverse
+HIRISE_DEFAULT_FOCUS_BOUNDS: Dict[str, Dict[str, float]] = {
+    "hirise_dteec_009149_1750": {
+        "min_lat": -4.795,
+        "max_lat": -4.685,
+        "min_lon": 137.360,
+        "max_lon": 137.450,
+    },
+    "hirise_dteec_040770_1755": {
+        "min_lat": -4.765,
+        "max_lat": -4.585,
+        "min_lon": 137.340,
+        "max_lon": 137.440,
+    },
+}
+
+PAIRED_ORTHO_MAP: Dict[str, str] = {
+    "hirise_dteec_009149_1750": "hirise_psp_009149_1750_ortho",
+    "hirise_dteec_040770_1755": "hirise_esp_040770_1755_ortho",
+}
+
+MARS_GEOG_CRS = rasterio.crs.CRS.from_proj4(
+    f"+proj=longlat +a={MARS_EQUATORIAL_RADIUS_M} +b={MARS_EQUATORIAL_RADIUS_M} +no_defs"
+)
+
+
+class MeshDemSummary(BaseModel):
+    dataset_id: str
+    product_id: str
+    product_title: str
+    native_resolution_m: Optional[float] = None
+    ortho_dataset_id: Optional[str] = None
+    bounds: Dict[str, float]
+    recommended_focus_bounds: Dict[str, float]
+    local_slope_suitable: bool = False
+
+
+class MeshLodLevel(BaseModel):
+    lod: int
+    tiles_x: int
+    tiles_y: int
+    tile_grid_cols: int
+    tile_grid_rows: int
+    approx_vertex_spacing_m: float
+
+
+class MeshTileDescriptor(BaseModel):
+    tile_id: str
+    lod: int
+    row: int
+    col: int
+    bounds: Dict[str, float]
+    grid_rows: int
+    grid_cols: int
+    approx_vertex_spacing_m: float
+
+
+class TerrainMeshManifestResponse(BaseModel):
+    dataset_id: str
+    product_id: str
+    product_title: str
+    crs: str = "IAU2000:49900"
+    vertical_units: str = "meters"
+    vertical_datum: str
+    native_resolution_m: Optional[float] = None
+    ortho_dataset_id: Optional[str] = None
+    requested_bounds: Dict[str, float]
+    requested_bounds_modified: bool = False
+    dataset_bounds: Dict[str, float]
+    origin: Dict[str, float]
+    physical_extent_m: Dict[str, float]
+    lod_levels: List[MeshLodLevel]
+    tiles: List[MeshTileDescriptor]
+    available_dems: List[MeshDemSummary]
+    resolution_suitability: Dict[str, Any] = Field(default_factory=dict)
+
+
+class TerrainMeshTileResponse(BaseModel):
+    tile_id: str
+    dataset_id: str
+    product_id: str
+    crs: str = "IAU2000:49900"
+    vertical_units: str = "meters"
+    bounds: Dict[str, float]
+    origin: Dict[str, float]
+    local_bounds_m: Dict[str, float]
+    grid_rows: int
+    grid_cols: int
+    sample_spacing_m: Dict[str, float]
+    native_resolution_m: Optional[float] = None
+    elevations_m: List[Optional[float]]
+    valid_mask: List[int]
+    slope_deg: Optional[List[Optional[float]]] = None
+    roughness_tri_m: Optional[List[Optional[float]]] = None
+    valid_vertex_count: int
+    nodata_vertex_count: int
+    elevation_min_m: Optional[float] = None
+    elevation_max_m: Optional[float] = None
+    slope_max_deg: Optional[float] = None
+    generation_ms: float
+
+
+class HeightGridResponse(BaseModel):
+    dataset_id: str
+    product_id: str
+    available: bool
+    crs: str = "IAU2000:49900"
+    vertical_units: str = "meters"
+    bounds: Dict[str, float]
+    grid_rows: int
+    grid_cols: int
+    valid_fraction: float
+    nodata_fill_value: float = 0.0
+    elevations_m: List[Optional[float]]
+    min_elevation_m: Optional[float] = None
+    max_elevation_m: Optional[float] = None
+
+
+class TerrainMeshService:
+    """Thread-safe, memory-bounded DEM mesh & overlay renderer."""
+
+    def __init__(self, catalog_service: DatasetCatalogService, raw_dir, max_cache_items: int = 72):
+        self.catalog_service = catalog_service
+        self.raw_dir = raw_dir
+        self._max_cache_items = max_cache_items
+        self._tile_cache: "OrderedDict[str, Any]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def _cache_get(self, key: str) -> Optional[Any]:
+        with self._lock:
+            val = self._tile_cache.get(key)
+            if val is not None:
+                self._tile_cache.move_to_end(key)
+            return val
+
+    def _cache_put(self, key: str, value: Any) -> None:
+        with self._lock:
+            self._tile_cache[key] = value
+            self._tile_cache.move_to_end(key)
+            while len(self._tile_cache) > self._max_cache_items:
+                self._tile_cache.popitem(last=False)
+
+    def clear_cache(self) -> None:
+        with self._lock:
+            self._tile_cache.clear()
+
+    def list_available_dem_summaries(self) -> List[MeshDemSummary]:
+        datasets = self.catalog_service.list_datasets()
+        summaries: List[MeshDemSummary] = []
+        for ds in datasets:
+            if "DEM" not in ds.product_type.upper():
+                continue
+            try:
+                open_path, _ = _resolve_raw_dem_open_path(ds, self.raw_dir)
+                if not open_path.exists():
+                    continue
+            except FileNotFoundError:
+                continue
+
+            ds_bounds = {
+                "min_lat": ds.coverage.min_latitude,
+                "max_lat": ds.coverage.max_latitude,
+                "min_lon": ds.coverage.min_longitude,
+                "max_lon": ds.coverage.max_longitude,
+            }
+            focus = HIRISE_DEFAULT_FOCUS_BOUNDS.get(ds.id) or {
+                "min_lat": max(ds_bounds["min_lat"], DEFAULT_GALE_STUDY_BOUNDS["min_lat"]),
+                "max_lat": min(ds_bounds["max_lat"], DEFAULT_GALE_STUDY_BOUNDS["max_lat"]),
+                "min_lon": max(ds_bounds["min_lon"], DEFAULT_GALE_STUDY_BOUNDS["min_lon"]),
+                "max_lon": min(ds_bounds["max_lon"], DEFAULT_GALE_STUDY_BOUNDS["max_lon"]),
+            }
+            if focus["min_lat"] >= focus["max_lat"] or focus["min_lon"] >= focus["max_lon"]:
+                focus = dict(ds_bounds)
+            suit = evaluate_dem_resolution_suitability(
+                native_resolution_m=ds.horizontal_resolution_meters,
+                effective_resolution_m=ds.horizontal_resolution_meters,
+                dem_available=True,
+            )
+            ortho_id = PAIRED_ORTHO_MAP.get(ds.id)
+            if ortho_id:
+                ortho_ds = self.catalog_service.get_dataset(ortho_id)
+                if not ortho_ds or not ortho_ds.local_file_path:
+                    ortho_id = None
+            summaries.append(
+                MeshDemSummary(
+                    dataset_id=ds.id,
+                    product_id=ds.product_id,
+                    product_title=ds.product_title,
+                    native_resolution_m=ds.horizontal_resolution_meters,
+                    ortho_dataset_id=ortho_id,
+                    bounds=ds_bounds,
+                    recommended_focus_bounds=focus,
+                    local_slope_suitable=suit["local_slope_analysis"].supported,
+                )
+            )
+
+        # Highest spatial resolution first so HiRISE DTMs lead
+        summaries.sort(key=lambda s: s.native_resolution_m if s.native_resolution_m is not None else 1e9)
+        return summaries
+
+    def resolve_dataset(self, dataset_id: Optional[str] = None) -> Dataset:
+        if dataset_id:
+            ds = self.catalog_service.get_dataset(dataset_id)
+            if not ds:
+                raise FileNotFoundError(f"DEM dataset '{dataset_id}' not found in catalog.")
+            return ds
+        avail = self.list_available_dem_summaries()
+        if not avail:
+            raise FileNotFoundError("No locally downloaded DEM datasets available for 3D terrain mesh generation.")
+        preferred = self.catalog_service.get_dataset(avail[0].dataset_id)
+        if not preferred:
+            raise FileNotFoundError("Preferred DEM dataset could not be resolved.")
+        return preferred
+
+    @staticmethod
+    def _parse_tile_id(tile_id: str) -> Tuple[int, int, int]:
+        # Expected format: L{lod}_R{row}_C{col}
+        parts = tile_id.strip().upper().split("_")
+        if len(parts) != 3 or not (parts[0].startswith("L") and parts[1].startswith("R") and parts[2].startswith("C")):
+            raise ValueError(f"Invalid tile_id '{tile_id}'. Expected format L<lod>_R<row>_C<col>.")
+        lod = int(parts[0][1:])
+        row = int(parts[1][1:])
+        col = int(parts[2][1:])
+        if lod < 0 or lod > 5 or row < 0 or col < 0:
+            raise ValueError(f"Out-of-range tile coordinates in '{tile_id}'.")
+        return lod, row, col
+
+    @staticmethod
+    def _partition_edges(min_v: float, max_v: float, n: int) -> List[float]:
+        # Bit-exact shared interior edges across adjacent tiles
+        return [min_v + (max_v - min_v) * (k / float(n)) for k in range(n + 1)]
+
+    def get_mesh_manifest(
+        self,
+        dataset_id: Optional[str] = None,
+        min_lat: Optional[float] = None,
+        max_lat: Optional[float] = None,
+        min_lon: Optional[float] = None,
+        max_lon: Optional[float] = None,
+        max_lod: int = 2,
+        tile_grid_size: int = 65,
+    ) -> TerrainMeshManifestResponse:
+        ds = self.resolve_dataset(dataset_id)
+        open_path, _ = _resolve_raw_dem_open_path(ds, self.raw_dir)
+        if not open_path.exists():
+            raise FileNotFoundError(f"DEM binary missing locally for '{ds.id}'.")
+
+        ds_bounds = {
+            "min_lat": ds.coverage.min_latitude,
+            "max_lat": ds.coverage.max_latitude,
+            "min_lon": ds.coverage.min_longitude,
+            "max_lon": ds.coverage.max_longitude,
+        }
+        has_explicit = None not in (min_lat, max_lat, min_lon, max_lon)
+        if has_explicit:
+            req_bounds = {
+                "min_lat": float(min_lat),
+                "max_lat": float(max_lat),
+                "min_lon": float(min_lon),
+                "max_lon": float(max_lon),
+            }
+            if req_bounds["min_lat"] >= req_bounds["max_lat"] or req_bounds["min_lon"] >= req_bounds["max_lon"]:
+                raise ValueError("Invalid study bounds: min_lat < max_lat and min_lon < max_lon required.")
+            # Verify overlap without silently mutating requested_bounds
+            if (
+                req_bounds["max_lat"] <= ds_bounds["min_lat"]
+                or req_bounds["min_lat"] >= ds_bounds["max_lat"]
+                or req_bounds["max_lon"] <= ds_bounds["min_lon"]
+                or req_bounds["min_lon"] >= ds_bounds["max_lon"]
+            ):
+                raise ValueError(
+                    f"Requested bounds {req_bounds} do not overlap DEM '{ds.id}' footprint {ds_bounds}."
+                )
+        else:
+            req_bounds = HIRISE_DEFAULT_FOCUS_BOUNDS.get(ds.id) or {
+                "min_lat": max(ds_bounds["min_lat"], DEFAULT_GALE_STUDY_BOUNDS["min_lat"]),
+                "max_lat": min(ds_bounds["max_lat"], DEFAULT_GALE_STUDY_BOUNDS["max_lat"]),
+                "min_lon": max(ds_bounds["min_lon"], DEFAULT_GALE_STUDY_BOUNDS["min_lon"]),
+                "max_lon": min(ds_bounds["max_lon"], DEFAULT_GALE_STUDY_BOUNDS["max_lon"]),
+            }
+            if req_bounds["min_lat"] >= req_bounds["max_lat"] or req_bounds["min_lon"] >= req_bounds["max_lon"]:
+                req_bounds = dict(ds_bounds)
+
+        center_lat = 0.5 * (req_bounds["min_lat"] + req_bounds["max_lat"])
+        center_lon = 0.5 * (req_bounds["min_lon"] + req_bounds["max_lon"])
+        width_m, height_m = angular_displacement_to_metric(
+            center_lat,
+            req_bounds["max_lon"] - req_bounds["min_lon"],
+            req_bounds["max_lat"] - req_bounds["min_lat"],
+        )
+
+        # Build LOD descriptors: LOD 0 = 1x1, LOD 1 = 2x2, LOD 2 = 4x4
+        tile_grid_size = max(17, min(129, int(tile_grid_size)))
+        lod_levels: List[MeshLodLevel] = []
+        tiles: List[MeshTileDescriptor] = []
+        bounded_max_lod = max(0, min(3, int(max_lod)))
+
+        for lod in range(bounded_max_lod + 1):
+            n_div = 1 << lod
+            segs = tile_grid_size - 1
+            spacing_x = width_m / float(n_div * segs)
+            spacing_y = height_m / float(n_div * segs)
+            approx_spacing = 0.5 * (spacing_x + spacing_y)
+            lod_levels.append(
+                MeshLodLevel(
+                    lod=lod,
+                    tiles_x=n_div,
+                    tiles_y=n_div,
+                    tile_grid_cols=tile_grid_size,
+                    tile_grid_rows=tile_grid_size,
+                    approx_vertex_spacing_m=round(approx_spacing, 3),
+                )
+            )
+            lon_edges = self._partition_edges(req_bounds["min_lon"], req_bounds["max_lon"], n_div)
+            # Row 0 is North (top), increasing Southward matching standard raster ordering
+            lat_edges_ns = [
+                req_bounds["max_lat"] - (req_bounds["max_lat"] - req_bounds["min_lat"]) * (r / float(n_div))
+                for r in range(n_div + 1)
+            ]
+            for r in range(n_div):
+                for c in range(n_div):
+                    tiles.append(
+                        MeshTileDescriptor(
+                            tile_id=f"L{lod}_R{r}_C{c}",
+                            lod=lod,
+                            row=r,
+                            col=c,
+                            bounds={
+                                "min_lat": lat_edges_ns[r + 1],
+                                "max_lat": lat_edges_ns[r],
+                                "min_lon": lon_edges[c],
+                                "max_lon": lon_edges[c + 1],
+                            },
+                            grid_rows=tile_grid_size,
+                            grid_cols=tile_grid_size,
+                            approx_vertex_spacing_m=round(approx_spacing, 3),
+                        )
+                    )
+
+        ortho_id = PAIRED_ORTHO_MAP.get(ds.id)
+        if ortho_id:
+            ortho_ds = self.catalog_service.get_dataset(ortho_id)
+            if not ortho_ds or not ortho_ds.local_file_path:
+                ortho_id = None
+
+        suit = evaluate_dem_resolution_suitability(
+            native_resolution_m=ds.horizontal_resolution_meters,
+            effective_resolution_m=ds.horizontal_resolution_meters,
+            dem_available=True,
+        )
+        suit_dump = {k: v.model_dump() for k, v in suit.items()}
+
+        return TerrainMeshManifestResponse(
+            dataset_id=ds.id,
+            product_id=ds.product_id,
+            product_title=ds.product_title,
+            vertical_datum=ds.calibration_status,
+            native_resolution_m=ds.horizontal_resolution_meters,
+            ortho_dataset_id=ortho_id,
+            requested_bounds=req_bounds,
+            requested_bounds_modified=False,
+            dataset_bounds=ds_bounds,
+            origin={"lat": round(center_lat, 7), "lon_east": round(center_lon, 7)},
+            physical_extent_m={"width_m": round(width_m, 2), "height_m": round(height_m, 2)},
+            lod_levels=lod_levels,
+            tiles=tiles,
+            available_dems=self.list_available_dem_summaries(),
+            resolution_suitability=suit_dump,
+        )
+
+    @staticmethod
+    def _sample_dem_grid(
+        reader: Any,
+        nodata_val: float,
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+        grid_rows: int,
+        grid_cols: int,
+    ) -> Tuple[np.ndarray, float, float]:
+        """
+        Sample exact vertex coordinates row-major (North->South, West->East) using bilinear
+        interpolation across 4 valid source neighbors (or exact nearest fallback ONLY on edges
+        if center pixel itself is valid). Because shared edges evaluate at identical (lon, lat)
+        coordinates on identical raster pixels, neighboring tiles stitch with zero cracks!
+        Any sample outside the footprint or missing valid neighbors remains NaN.
+        """
+        # Pad 1 ring outward for derivative kernel edge stitching across neighbor tiles
+        d_lon = (max_lon - min_lon) / float(max(1, grid_cols - 1))
+        d_lat = (max_lat - min_lat) / float(max(1, grid_rows - 1))
+
+        p_rows = grid_rows + 2
+        p_cols = grid_cols + 2
+        lons = np.array([min_lon + (c - 1) * d_lon for c in range(p_cols)], dtype=np.float64)
+        lats = np.array([max_lat - (r - 1) * d_lat for r in range(p_rows)], dtype=np.float64)
+
+        rb = reader.bounds
+        q_lons = np.where((rb.right > 180.0) & (lons < 0.0), lons + 360.0, lons)
+
+        # Compute bounding pixel window covering padded grid + 2px interpolation margin
+        inv_t = ~reader.transform
+        c_min_f, r_max_f = inv_t @ (float(np.min(q_lons)), float(np.min(lats)))
+        c_max_f, r_min_f = inv_t @ (float(np.max(q_lons)), float(np.max(lats)))
+
+        c0_raw = int(math.floor(min(c_min_f, c_max_f))) - 2
+        c1_raw = int(math.ceil(max(c_min_f, c_max_f))) + 3
+        r0_raw = int(math.floor(min(r_min_f, r_max_f))) - 2
+        r1_raw = int(math.ceil(max(r_min_f, r_max_f))) + 3
+
+        out = np.full((p_rows, p_cols), np.nan, dtype=np.float64)
+        center_lat = 0.5 * (min_lat + max_lat)
+        dx_m, dy_m = angular_displacement_to_metric(center_lat, d_lon, d_lat)
+
+        if c1_raw <= 0 or r1_raw <= 0 or c0_raw >= int(reader.width) or r0_raw >= int(reader.height):
+            return out, dx_m, dy_m
+
+        # Compute global aligned stride from desired sample spacing vs raster pixel size
+        # so adjacent tiles at the same LOD align to the exact same coarse pixel lattice!
+        res_x, res_y = abs(float(reader.res[0])), abs(float(reader.res[1]))
+        stride = max(1, int(math.floor(0.5 * min(d_lon / max(1e-12, res_x), d_lat / max(1e-12, res_y)))))
+        if stride > 1:
+            # Cap raw stride only if window would still be tiny anyway
+            c0 = max(0, (c0_raw // stride) * stride)
+            r0 = max(0, (r0_raw // stride) * stride)
+            max_c = min(int(reader.width), ((c1_raw + stride - 1) // stride) * stride)
+            max_r = min(int(reader.height), ((r1_raw + stride - 1) // stride) * stride)
+            # Trim to exact integer multiple of stride inside raster bounds
+            out_w = (max_c - c0) // stride
+            out_h = (max_r - r0) // stride
+            if out_w < 2 or out_h < 2:
+                stride = 1
+        if stride <= 1:
+            c0 = max(0, c0_raw)
+            c1 = min(int(reader.width), c1_raw)
+            r0 = max(0, r0_raw)
+            r1 = min(int(reader.height), r1_raw)
+            out_w = c1 - c0
+            out_h = r1 - r0
+            if out_h <= 0 or out_w <= 0:
+                return out, dx_m, dy_m
+            win = rasterio.windows.Window(c0, r0, out_w, out_h)
+            patch = reader.read(1, window=win).astype(np.float64)
+            patch_inv = ~reader.window_transform(win)
+        else:
+            c1 = c0 + out_w * stride
+            r1 = r0 + out_h * stride
+            win = rasterio.windows.Window(c0, r0, out_w * stride, out_h * stride)
+            patch = reader.read(
+                1,
+                window=win,
+                out_shape=(out_h, out_w),
+                resampling=Resampling.nearest,
+            ).astype(np.float64)
+            w_left, w_bottom, w_right, w_top = rasterio.windows.bounds(win, reader.transform)
+            patch_inv = ~rasterio.transform.from_bounds(w_left, w_bottom, w_right, w_top, out_w, out_h)
+
+        valid_patch = np.isfinite(patch) & (patch != float(nodata_val)) & (patch > -32000.0)
+        patch_clean = np.where(valid_patch, patch, np.nan)
+        ph, pw = patch_clean.shape
+
+        # Vectorized fractional pixel coordinates (pixel centers are at +0.5)
+        col_coords, _ = patch_inv @ (q_lons, np.full_like(q_lons, center_lat))
+        _, row_coords = patch_inv @ (np.full_like(lats, q_lons[0]), lats)
+
+        # In-bounds mask
+        c_grid = np.broadcast_to(col_coords[None, :], (p_rows, p_cols)) - 0.5
+        r_grid = np.broadcast_to(row_coords[:, None], (p_rows, p_cols)) - 0.5
+
+        c_i0 = np.floor(c_grid).astype(np.int64)
+        r_i0 = np.floor(r_grid).astype(np.int64)
+        dc = c_grid - c_i0
+        dr = r_grid - r_i0
+
+        in_bilinear = (r_i0 >= 0) & (r_i0 + 1 < ph) & (c_i0 >= 0) & (c_i0 + 1 < pw)
+        if np.any(in_bilinear):
+            rr = r_i0[in_bilinear]
+            cc = c_i0[in_bilinear]
+            drc = dr[in_bilinear]
+            dcc = dc[in_bilinear]
+            z00 = patch_clean[rr, cc]
+            z01 = patch_clean[rr, cc + 1]
+            z10 = patch_clean[rr + 1, cc]
+            z11 = patch_clean[rr + 1, cc + 1]
+            all4 = np.isfinite(z00) & np.isfinite(z01) & np.isfinite(z10) & np.isfinite(z11)
+            vals = np.where(
+                all4,
+                z00 * (1.0 - drc) * (1.0 - dcc)
+                + z01 * (1.0 - drc) * dcc
+                + z10 * drc * (1.0 - dcc)
+                + z11 * drc * dcc,
+                np.nan,
+            )
+            # If on swath border where nearest pixel itself is valid, fall back to nearest
+            nearest_r = np.rint(r_grid[in_bilinear]).astype(np.int64)
+            nearest_c = np.rint(c_grid[in_bilinear]).astype(np.int64)
+            z_near = patch_clean[nearest_r, nearest_c]
+            out[in_bilinear] = np.where(all4, vals, z_near)
+
+        # Outer edge pixels strictly touching raster edge
+        c_near = np.rint(c_grid).astype(np.int64)
+        r_near = np.rint(r_grid).astype(np.int64)
+        edge_only = (~in_bilinear) & (r_near >= 0) & (r_near < ph) & (c_near >= 0) & (c_near < pw)
+        if np.any(edge_only):
+            out[edge_only] = patch_clean[r_near[edge_only], c_near[edge_only]]
+
+        return out, dx_m, dy_m
+
+    def get_mesh_tile(
+        self,
+        tile_id: str,
+        dataset_id: Optional[str] = None,
+        min_lat: Optional[float] = None,
+        max_lat: Optional[float] = None,
+        min_lon: Optional[float] = None,
+        max_lon: Optional[float] = None,
+        origin_lat: Optional[float] = None,
+        origin_lon_east: Optional[float] = None,
+        grid_size: int = 65,
+        include_derivatives: bool = True,
+    ) -> TerrainMeshTileResponse:
+        t0 = time.perf_counter()
+        ds = self.resolve_dataset(dataset_id)
+        open_path, lbl_path = _resolve_raw_dem_open_path(ds, self.raw_dir)
+        if not open_path.exists():
+            raise FileNotFoundError(f"DEM binary missing locally for '{ds.id}'.")
+
+        grid_size = max(9, min(129, int(grid_size)))
+        if tile_id.lower() == "custom":
+            if None in (min_lat, max_lat, min_lon, max_lon):
+                raise ValueError("Custom mesh tile requires min_lat, max_lat, min_lon, max_lon.")
+            tile_bounds = {
+                "min_lat": float(min_lat),
+                "max_lat": float(max_lat),
+                "min_lon": float(min_lon),
+                "max_lon": float(max_lon),
+            }
+            if tile_bounds["min_lat"] >= tile_bounds["max_lat"] or tile_bounds["min_lon"] >= tile_bounds["max_lon"]:
+                raise ValueError("Invalid tile bounds.")
+            manifest_origin_lat = float(origin_lat) if origin_lat is not None else 0.5 * (tile_bounds["min_lat"] + tile_bounds["max_lat"])
+            manifest_origin_lon = float(origin_lon_east) if origin_lon_east is not None else 0.5 * (tile_bounds["min_lon"] + tile_bounds["max_lon"])
+        else:
+            lod, row, col = self._parse_tile_id(tile_id)
+            n_div = 1 << lod
+            if row >= n_div or col >= n_div:
+                raise ValueError(f"Tile row/col ({row},{col}) out of range for LOD {lod} ({n_div}x{n_div}).")
+            manifest = self.get_mesh_manifest(
+                dataset_id=ds.id,
+                min_lat=min_lat,
+                max_lat=max_lat,
+                min_lon=min_lon,
+                max_lon=max_lon,
+                max_lod=max(lod, 2),
+                tile_grid_size=grid_size,
+            )
+            match = next((t for t in manifest.tiles if t.tile_id == tile_id.upper()), None)
+            if not match:
+                raise ValueError(f"Tile '{tile_id}' not found in manifest.")
+            tile_bounds = match.bounds
+            manifest_origin_lat = float(origin_lat) if origin_lat is not None else manifest.origin["lat"]
+            manifest_origin_lon = float(origin_lon_east) if origin_lon_east is not None else manifest.origin["lon_east"]
+
+        cache_key = (
+            f"tile:{ds.id}:{tile_id}:{tile_bounds['min_lat']:.7f}:{tile_bounds['max_lat']:.7f}:"
+            f"{tile_bounds['min_lon']:.7f}:{tile_bounds['max_lon']:.7f}:"
+            f"{manifest_origin_lat:.6f}:{manifest_origin_lon:.6f}:{grid_size}:{include_derivatives}"
+        )
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        lbl_meta = extract_pds3_metadata(lbl_path) if (lbl_path and lbl_path.exists()) else {}
+        with rasterio.open(open_path) as src:
+            nodata_val = src.nodata
+            if nodata_val is None and lbl_meta.get("missing_constant") is not None:
+                try:
+                    nodata_val = float(lbl_meta["missing_constant"])
+                except (TypeError, ValueError):
+                    nodata_val = -32768.0
+            elif nodata_val is None:
+                nodata_val = -32768.0
+
+            if src.crs and src.crs.is_projected:
+                with WarpedVRT(src, crs=MARS_GEOG_CRS) as vrt:
+                    padded_z, dx_m, dy_m = self._sample_dem_grid(
+                        vrt,
+                        nodata_val,
+                        tile_bounds["min_lat"],
+                        tile_bounds["max_lat"],
+                        tile_bounds["min_lon"],
+                        tile_bounds["max_lon"],
+                        grid_size,
+                        grid_size,
+                    )
+            else:
+                padded_z, dx_m, dy_m = self._sample_dem_grid(
+                    src,
+                    nodata_val,
+                    tile_bounds["min_lat"],
+                    tile_bounds["max_lat"],
+                    tile_bounds["min_lon"],
+                    tile_bounds["max_lon"],
+                    grid_size,
+                    grid_size,
+                )
+
+        center_z = padded_z[1:-1, 1:-1]
+        valid_bool = np.isfinite(center_z)
+        valid_count = int(np.count_nonzero(valid_bool))
+        nodata_count = int(center_z.size - valid_count)
+
+        slope_list: Optional[List[Optional[float]]] = None
+        tri_list: Optional[List[Optional[float]]] = None
+        slope_max: Optional[float] = None
+        if include_derivatives:
+            padded_nodata = ~np.isfinite(padded_z)
+            slope_pad, _ = calculate_slope(padded_z, dx_m, dy_m, nodata_mask=padded_nodata)
+            tri_pad, _ = calculate_roughness_tri_with_metadata(padded_z, dx_m, dy_m, nodata_mask=padded_nodata)
+            slope_core = slope_pad[1:-1, 1:-1]
+            tri_core = tri_pad[1:-1, 1:-1]
+            slope_flat = slope_core.ravel()
+            tri_flat = tri_core.ravel()
+            slope_list = [round(float(v), 3) if np.isfinite(v) else None for v in slope_flat]
+            tri_list = [round(float(v), 3) if np.isfinite(v) else None for v in tri_flat]
+            s_fin = slope_flat[np.isfinite(slope_flat)]
+            if s_fin.size > 0:
+                slope_max = round(float(np.max(s_fin)), 3)
+
+        # Local tangent-plane East/North meters relative to region origin (exact Mars sphere radius)
+        west_dx, north_dy = angular_displacement_to_metric(
+            manifest_origin_lat,
+            tile_bounds["min_lon"] - manifest_origin_lon,
+            tile_bounds["max_lat"] - manifest_origin_lat,
+        )
+        east_dx, south_dy = angular_displacement_to_metric(
+            manifest_origin_lat,
+            tile_bounds["max_lon"] - manifest_origin_lon,
+            tile_bounds["min_lat"] - manifest_origin_lat,
+        )
+        # Preserve exact sign for East/North offset from origin
+        d_lon_w = tile_bounds["min_lon"] - manifest_origin_lon
+        d_lon_e = tile_bounds["max_lon"] - manifest_origin_lon
+        d_lat_s = tile_bounds["min_lat"] - manifest_origin_lat
+        d_lat_n = tile_bounds["max_lat"] - manifest_origin_lat
+        m_per_deg_lon = MARS_EQUATORIAL_RADIUS_M * math.cos(math.radians(manifest_origin_lat)) * math.pi / 180.0
+        m_per_deg_lat = MARS_EQUATORIAL_RADIUS_M * math.pi / 180.0
+        local_bounds_m = {
+            "min_east_m": round(d_lon_w * m_per_deg_lon, 3),
+            "max_east_m": round(d_lon_e * m_per_deg_lon, 3),
+            "min_north_m": round(d_lat_s * m_per_deg_lat, 3),
+            "max_north_m": round(d_lat_n * m_per_deg_lat, 3),
+        }
+
+        flat_z = center_z.ravel()
+        elev_list = [round(float(v), 3) if np.isfinite(v) else None for v in flat_z]
+        mask_list = [1 if np.isfinite(v) else 0 for v in flat_z]
+        z_valid = flat_z[valid_bool.ravel()]
+        z_min = round(float(np.min(z_valid)), 3) if z_valid.size > 0 else None
+        z_max = round(float(np.max(z_valid)), 3) if z_valid.size > 0 else None
+
+        resp = TerrainMeshTileResponse(
+            tile_id=tile_id.upper() if tile_id.lower() != "custom" else "CUSTOM",
+            dataset_id=ds.id,
+            product_id=ds.product_id,
+            bounds=tile_bounds,
+            origin={"lat": round(manifest_origin_lat, 7), "lon_east": round(manifest_origin_lon, 7)},
+            local_bounds_m=local_bounds_m,
+            grid_rows=grid_size,
+            grid_cols=grid_size,
+            sample_spacing_m={"dx_m": round(dx_m, 3), "dy_m": round(dy_m, 3)},
+            native_resolution_m=ds.horizontal_resolution_meters,
+            elevations_m=elev_list,
+            valid_mask=mask_list,
+            slope_deg=slope_list,
+            roughness_tri_m=tri_list,
+            valid_vertex_count=valid_count,
+            nodata_vertex_count=nodata_count,
+            elevation_min_m=z_min,
+            elevation_max_m=z_max,
+            slope_max_deg=slope_max,
+            generation_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+        )
+        self._cache_put(cache_key, resp)
+        return resp
+
+    def get_heightgrid(
+        self,
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+        dataset_id: Optional[str] = None,
+        grid_size: int = 65,
+    ) -> HeightGridResponse:
+        """
+        Return real DEM elevations for a Cesium terrain tile bounding box without
+        fabricating heights outside local DEM coverage.
+        """
+        ds = self.resolve_dataset(dataset_id)
+        if (
+            max_lat <= ds.coverage.min_latitude
+            or min_lat >= ds.coverage.max_latitude
+            or max_lon <= ds.coverage.min_longitude
+            or min_lon >= ds.coverage.max_longitude
+        ):
+            return HeightGridResponse(
+                dataset_id=ds.id,
+                product_id=ds.product_id,
+                available=False,
+                bounds={"min_lat": min_lat, "max_lat": max_lat, "min_lon": min_lon, "max_lon": max_lon},
+                grid_rows=0,
+                grid_cols=0,
+                valid_fraction=0.0,
+                elevations_m=[],
+            )
+
+        tile = self.get_mesh_tile(
+            tile_id="custom",
+            dataset_id=ds.id,
+            min_lat=min_lat,
+            max_lat=max_lat,
+            min_lon=min_lon,
+            max_lon=max_lon,
+            grid_size=max(9, min(65, int(grid_size))),
+            include_derivatives=False,
+        )
+        valid_frac = tile.valid_vertex_count / float(max(1, len(tile.elevations_m)))
+        return HeightGridResponse(
+            dataset_id=ds.id,
+            product_id=ds.product_id,
+            available=(tile.valid_vertex_count > 0),
+            bounds=tile.bounds,
+            grid_rows=tile.grid_rows,
+            grid_cols=tile.grid_cols,
+            valid_fraction=round(valid_frac, 4),
+            elevations_m=tile.elevations_m,
+            min_elevation_m=tile.elevation_min_m,
+            max_elevation_m=tile.elevation_max_m,
+        )
+
+    def render_region_texture_png(
+        self,
+        dataset_id: str,
+        overlay: str,
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+        size: int = 512,
+    ) -> bytes:
+        """
+        Render a georeferenced RGBA PNG texture clipped strictly to (min_lat, max_lat, min_lon, max_lon)
+        for draping real HiRISE orthoimagery or derived elevation/slope/roughness layers onto 3D mesh tiles.
+        """
+        size = max(64, min(1024, int(size)))
+        overlay_l = overlay.strip().lower()
+        if overlay_l not in {"ortho", "elevation", "slope", "roughness"}:
+            raise ValueError(f"Unsupported texture overlay '{overlay}'.")
+
+        cache_key = f"tex:{dataset_id}:{overlay_l}:{min_lat:.7f}:{max_lat:.7f}:{min_lon:.7f}:{max_lon:.7f}:{size}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        target_ds_id = dataset_id
+        if overlay_l == "ortho":
+            mapped = PAIRED_ORTHO_MAP.get(dataset_id)
+            if mapped:
+                target_ds_id = mapped
+
+        ds = self.catalog_service.get_dataset(target_ds_id)
+        if not ds:
+            raise FileNotFoundError(f"Texture dataset '{target_ds_id}' not found.")
+        open_path, lbl_path = _resolve_raw_dem_open_path(ds, self.raw_dir)
+        if not open_path.exists():
+            raise FileNotFoundError(f"Raster file missing locally for '{ds.id}'.")
+
+        if overlay_l == "ortho":
+            with rasterio.open(open_path) as src:
+                def _read_ortho(reader: Any) -> np.ndarray:
+                    rb = reader.bounds
+                    q_min_lon = min_lon + 360.0 if (rb.right > 180.0 and min_lon < 0.0) else min_lon
+                    q_max_lon = max_lon + 360.0 if (rb.right > 180.0 and max_lon < 0.0) else max_lon
+                    i_left = max(rb.left, q_min_lon)
+                    i_right = min(rb.right, q_max_lon)
+                    i_bottom = max(rb.bottom, min_lat)
+                    i_top = min(rb.top, max_lat)
+                    rgba = np.zeros((size, size, 4), dtype=np.uint8)
+                    if i_left >= i_right or i_bottom >= i_top:
+                        return rgba
+                    win = rasterio.windows.from_bounds(i_left, i_bottom, i_right, i_top, reader.transform)
+                    c0 = int(round(((i_left - q_min_lon) / max(1e-9, q_max_lon - q_min_lon)) * size))
+                    c1 = int(round(((i_right - q_min_lon) / max(1e-9, q_max_lon - q_min_lon)) * size))
+                    r0 = int(round(((max_lat - i_top) / max(1e-9, max_lat - min_lat)) * size))
+                    r1 = int(round(((max_lat - i_bottom) / max(1e-9, max_lat - min_lat)) * size))
+                    c0, c1 = max(0, min(size, c0)), max(0, min(size, c1))
+                    r0, r1 = max(0, min(size, r0)), max(0, min(size, r1))
+                    tw, th = max(1, c1 - c0), max(1, r1 - r0)
+                    band = reader.read(1, window=win, out_shape=(th, tw), resampling=Resampling.bilinear)
+                    # Mask out completely black swath corners (DN == 0)
+                    alpha = np.where(band > 0, 255, 0).astype(np.uint8)
+                    # Subtle contrast & warm Martian mineral tint preservation (monochrome -> neutral warm)
+                    val = np.clip(band, 0, 255).astype(np.uint8)
+                    rgba[r0 : r0 + th, c0 : c0 + tw, 0] = val
+                    rgba[r0 : r0 + th, c0 : c0 + tw, 1] = np.clip(val * 0.92, 0, 255).astype(np.uint8)
+                    rgba[r0 : r0 + th, c0 : c0 + tw, 2] = np.clip(val * 0.84, 0, 255).astype(np.uint8)
+                    rgba[r0 : r0 + th, c0 : c0 + tw, 3] = alpha
+                    return rgba
+
+                if src.crs and src.crs.is_projected:
+                    with WarpedVRT(src, crs=MARS_GEOG_CRS) as vrt:
+                        rgba = _read_ortho(vrt)
+                else:
+                    rgba = _read_ortho(src)
+        else:
+            # Sample mesh grid at texture resolution (max 129 for derivative ramp) cleanly
+            tex_grid = min(129, max(65, size // 2))
+            tile = self.get_mesh_tile(
+                tile_id="custom",
+                dataset_id=ds.id,
+                min_lat=min_lat,
+                max_lat=max_lat,
+                min_lon=min_lon,
+                max_lon=max_lon,
+                grid_size=tex_grid,
+                include_derivatives=(overlay_l != "elevation"),
+            )
+            arr_vals = (
+                tile.elevations_m
+                if overlay_l == "elevation"
+                else (tile.slope_deg if overlay_l == "slope" else tile.roughness_tri_m)
+            ) or tile.elevations_m
+            arr = np.array([float(v) if v is not None else np.nan for v in arr_vals], dtype=np.float64).reshape(
+                (tex_grid, tex_grid)
+            )
+            rgba_small = np.zeros((tex_grid, tex_grid, 4), dtype=np.uint8)
+            fin = np.isfinite(arr)
+            if np.any(fin):
+                if overlay_l == "slope":
+                    # 0 deg = emerald (#22c55e) -> 15 deg = amber (#f59e0b) -> 25+ deg = red (#ef4444)
+                    v = np.clip(np.where(fin, arr, 0.0), 0.0, 35.0)
+                    t1 = np.clip(v / 15.0, 0.0, 1.0)
+                    t2 = np.clip((v - 15.0) / 10.0, 0.0, 1.0)
+                    r_ch = np.where(v <= 15.0, 34 + t1 * (245 - 34), 245 + t2 * (239 - 245))
+                    g_ch = np.where(v <= 15.0, 197 + t1 * (158 - 197), 158 + t2 * (68 - 158))
+                    b_ch = np.where(v <= 15.0, 94 + t1 * (11 - 94), 11 + t2 * (68 - 11))
+                elif overlay_l == "roughness":
+                    vmin = float(np.nanmin(arr))
+                    vmax = max(vmin + 0.5, float(np.nanpercentile(arr[fin], 98)))
+                    t = np.clip((np.where(fin, arr, vmin) - vmin) / (vmax - vmin), 0.0, 1.0)
+                    r_ch = 20 + t * 215
+                    g_ch = 180 - t * 90
+                    b_ch = 210 - t * 40
+                else:
+                    # Elevation hypsometric tint: deep slate/blue -> ochre -> pale crest
+                    vmin = float(np.nanmin(arr))
+                    vmax = max(vmin + 1.0, float(np.nanmax(arr)))
+                    t = np.clip((np.where(fin, arr, vmin) - vmin) / (vmax - vmin), 0.0, 1.0)
+                    r_ch = 45 + t * 195
+                    g_ch = 70 + np.sin(t * math.pi) * 90 + t * 70
+                    b_ch = 140 - t * 65
+                rgba_small[..., 0] = np.clip(r_ch, 0, 255).astype(np.uint8)
+                rgba_small[..., 1] = np.clip(g_ch, 0, 255).astype(np.uint8)
+                rgba_small[..., 2] = np.clip(b_ch, 0, 255).astype(np.uint8)
+                rgba_small[..., 3] = np.where(fin, 255, 0).astype(np.uint8)
+
+            img = Image.fromarray(rgba_small, mode="RGBA").resize((size, size), resample=Image.Resampling.BILINEAR)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            png_bytes = buf.getvalue()
+            self._cache_put(cache_key, png_bytes)
+            return png_bytes
+
+        buf = io.BytesIO()
+        Image.fromarray(rgba, mode="RGBA").save(buf, format="PNG")
+        png_bytes = buf.getvalue()
+        self._cache_put(cache_key, png_bytes)
+        return png_bytes

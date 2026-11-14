@@ -141,7 +141,7 @@ All endpoints are served under the `/api` prefix by the FastAPI backend. Standar
 ## 6. Prompt 8 Human Mobility Intelligence Endpoints (`/api/mobility/*`)
 
 ### `GET /api/mobility/status`
-- **Description:** Returns DEM inventory, download/processing status, per-scale resolution suitability (`regional_elevation_analysis`, `local_slope_analysis`, `regional_roughness_analysis`, `small_scale_obstacle_detection`), and explicit confirmation that `route_optimization_enabled = false` and `safety_certification_enabled = false`.
+- **Description:** Returns DEM inventory, download/processing status, per-scale resolution suitability (`regional_elevation_analysis`, `local_slope_analysis`, `regional_roughness_analysis`, `small_scale_obstacle_detection`) annotated with `policy_id`, `policy_version`, `threshold_classification`, and `threshold_rationale` (`backend/app/mobility/policies/resolution_v1.json`), and explicit flags `route_optimization_enabled = true` and `safety_certification_enabled = false`.
 
 ### `GET /api/mobility/terrain/features`
 - **Description:** Extracts windowed elevation (`meters`), Horn `3x3` slope (`degrees`), compass aspect (`[0, 360)` clockwise from North; flat cells undefined), and metric TRI roughness (`meters`) over `[min_lat, max_lat, min_lon, max_lon]`. Never enlarges requested bounds; raises HTTP `422` with a structured `InsufficientCoverageReport` if the window intersects fewer than `3x3` whole source pixels.
@@ -160,6 +160,44 @@ All endpoints are served under the `/api` prefix by the FastAPI backend. Standar
 
 ### `GET /api/mobility/cost-surface/metadata`
 - **Description:** Computes and returns a spatially explicit `CostSurfaceSummary` over `[min_lat, max_lat, min_lon, max_lon]` for a given `dataset_id` and `scenario_id`, preserving `null` cost on unknown/no-data terrain and distinguishing `explicit_scenario_exclusion` without emitting `"safe"` or `"unsafe"` labels.
-# Resolution suitability response provenance
 
-Each `ResolutionSuitabilityAssessment` now includes `policy_id`, `policy_version`, `threshold_classification`, and `threshold_rationale`, sourced from `backend/app/mobility/policies/resolution_v1.json`. These fields annotate the existing mobility responses; they do not change route or raster processing. A passing resolution screen is not a feature-detection guarantee. There is no `/api/imagery/*` or panorama product API in this build.
+---
+
+## 7. Prompt 11 3D Terrain Mesh & Ortho Texture Endpoints (`/api/terrain/*`)
+
+### `GET /api/terrain/mesh/manifest`
+- **Query Params:** `dataset_id` (optional, defaults to highest-res local DEM), optional bbox (`min_lat`, `max_lat`, `min_lon`, `max_lon`), `max_lod` (`0..3`, default `2`), `tile_grid_size` (`17..129`, default `65`).
+- **Response (`TerrainMeshManifestResponse`):** Dataset metadata, native resolution (`m/px`), `origin_lat`/`origin_lon_east`, valid elevation bounds (`min_elevation_m`, `max_elevation_m`, `reference_elevation_m`), planetary radius (`3,396,190.0 m`), paired local ortho dataset ID, and LOD tile descriptors (`tile_id`, `lod`, `bounds`, `grid_rows`, `grid_cols`).
+
+### `GET /api/terrain/mesh/tiles/{tile_id}`
+- **Response (`TerrainMeshTileResponse`):** Metric ENU vertex arrays (`east_m`, `north_m`, `elevations_m`), strict `valid_mask` (`0` = NoData / outside swath, `1` = valid source pixel), `normals` (`nx, ny, nz`), and optional slope/TRI arrays. Seam vertices share deterministic edge coordinates across neighboring tiles.
+
+### `GET /api/terrain/mesh/heightgrid`
+- **Query Params:** Required `min_lat`, `max_lat`, `min_lon`, `max_lon`; optional `dataset_id`, `grid_size` (`9..65`, default `33`).
+- **Response (`HeightGridResponse`):** Compact regular elevation matrix (`grid_rows`, `grid_cols`, `elevations_m`, `valid_count`) consumed by CesiumJS `HeightmapTerrainData` (`createMarscopeDemTerrainProvider()`).
+
+### `GET /api/terrain/ortho/{dataset_id}/texture`
+- **Query Params:** `overlay` (`ortho | elevation | slope | roughness`), `min_lat`, `max_lat`, `min_lon`, `max_lon`, `size` (`64..1024`, default `512`).
+- **Response:** `image/png` (`Cache-Control: public, max-age=3600`) co-registered exactly to the requested tile bounds.
+
+---
+
+## 8. Prompt 11 Science-Aware Route Computation & Navigation Endpoints (`/api/routing/*`)
+
+### `GET /api/routing/status`
+- **Description:** Returns available local routing DEMs, supported modes (`conservative`, `balanced`, `science_priority`), supported algorithms (`astar`, `dijkstra`), active constraints policy, and `safety_certification_enabled = false`.
+
+### `POST /api/routing/validate` & `POST /api/routing/compute`
+- **Request (`RouteComputeRequest`):** `dataset_id`, `start` & `destination` (`lat`, `lon_east`, optional `label`), `target_ids`, `custom_waypoints`, `mode`, `algorithm`, and `constraints` (`max_slope_deg`, optional `walking_speed_m_per_s` defaulting `null`, `max_eva_duration_hours`, `return_reserve_fraction`, `return_to_start`, `enforce_budget`, `astronaut_total_mass_kg`, `snap_radius_m`).
+- **Response (`RouteComputeResponse`):** `route_id`, deterministic `route_signature`, `effective_slope_limit_deg`, `assumption_classification`, `total_horizontal_distance_m`, `total_surface_distance_m`, `total_elevation_gain_m`, `total_elevation_loss_m`, raw-cell `mean_slope_deg`/`max_slope_deg`/`mean_roughness_tri_m`, optional `estimated_duration_seconds` (`null` unless user declares walking speed), `gravitational_climb_work_joules` ($m \cdot g_{\text{Mars}} \cdot \Delta h$), `budget_diagnostic`, `snap_diagnostics`, `simplification_diagnostic`, `science_targets_reached`, `corridor_evidence_hits_within_150m`, `vertices`, `instructions` (True North `°T` & Equirectangular Grid North `°G`), `resolution_suitability`, and explicit `limitations`. Raises HTTP `422` (`RoutePlanningError`) on unfeasible terrain, slope/NoData barriers, or enforced budget overflow.
+
+### `POST /api/routing/compare`
+- **Description:** Evaluates `conservative`, `balanced`, and `science_priority` modes over identical DEM graph & user constraints (`RouteCompareResponse`), returning feasible routes and explicit `error_reason` for any rejected mode.
+
+### `GET /api/routing/{route_id}`, `/instructions`, `/profile`, `/geojson`
+- **Description:** Retrieves cached route computation details, turn-by-turn navigation steps, 3D elevation profile vertices, or an OGC GeoJSON `FeatureCollection` (`LineString` traverse + `Point` stop features, IAU2000 Mars coordinates) for external GIS export.
+
+---
+
+## 9. NASA Imagery Catalogue Endpoints (`/api/imagery/*`)
+- **Routes:** `GET /api/imagery/status`, `/datasets`, `/search` (PDS Imaging Atlas), `/ode-search` (ODE REST), `/products/{product_id}`, `/products/{product_id}/label`, `POST /api/imagery/products/{product_id}/acquire`, `GET /api/imagery/products/{product_id}/acquisition`, `/eligibility`, `/panoramas`, `/coverage`. Persisted products live in `datasets/catalog/imagery_products/catalog.json` with unverified rights/panorama eligibility kept explicit.

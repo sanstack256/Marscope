@@ -12,6 +12,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@types/three": "^0.187.0",
     "cesium": "^1.147.0",
     "lucide-react": "^1.72.0",
     "maplibre-gl": "^6.18.0",
@@ -19,6 +20,7 @@
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "recharts": "^3.10.1",
+    "three": "^0.187.0",
     "zustand": "^5.1.0"
   },
   "devDependencies": {

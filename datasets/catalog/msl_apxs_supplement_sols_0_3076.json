@@ -1,0 +1,70 @@
+{
+  "id": "msl_apxs_supplement_sols_0_3076",
+  "product_id": "DS01_2021JE007171R",
+  "product_title": "NASA PDS4 MSL APXS Elemental & Oxide Composition Supplement (Sols 46-3076)",
+  "product_type": "COMPOSITION / APXS Calibrated Oxide & Trace Element Table",
+  "mission": "Mars Science Laboratory (MSL)",
+  "instrument": "Alpha Particle X-ray Spectrometer (APXS)",
+  "source_archive": "NASA PDS Geosciences Node",
+  "original_product_url": "https://pds-geosciences.wustl.edu/msl/urn-nasa-pds-msl_apxs_supplement_sols_0_3076/data/ds01_2021je007171r.csv",
+  "original_label_url": "https://pds-geosciences.wustl.edu/msl/urn-nasa-pds-msl_apxs_supplement_sols_0_3076/data/ds01_2021je007171r.xml",
+  "doi_or_pds_id": "urn:nasa:pds:msl_apxs_supplement_sols_0_3076:data:ds01_2021je007171r",
+  "license": "NASA Public Domain / US Govt Open",
+  "attribution": "NASA/JPL/University of Guelph APXS Team (Berger et al., 2022 DOI:10.1029/2021JE007171)",
+  "acquisition_timestamp": null,
+  "observation_sol": null,
+  "processing_level": "Calibrated Derived (RGFit_v2)",
+  "calibration_status": "Calibrated major oxides (wt%) & trace elements Ni/Zn/Br (ppm) with 1-sigma precision errors",
+  "coverage": {
+    "min_latitude": -5.6,
+    "max_latitude": -4.2,
+    "min_longitude": 137.0,
+    "max_longitude": 137.8,
+    "center_latitude": -4.65,
+    "center_longitude": 137.42,
+    "longitude_range": "[0, 360]"
+  },
+  "coordinate_reference_system": "MARS:GALE_EQUIRECTANGULAR",
+  "latitude_convention": "Planetocentric",
+  "longitude_direction": "East",
+  "map_projection": "Gale Crater Equirectangular (Northing_m, Easting_m)",
+  "planetary_radii_m": null,
+  "horizontal_resolution_meters": null,
+  "vertical_resolution_meters": null,
+  "units": "wt% / ppm",
+  "nodata_value": null,
+  "data_format": "PDS4 Delimited CSV + XML Label",
+  "file_size_bytes": null,
+  "sha256_checksum": null,
+  "status": "discovered",
+  "verification": {
+    "archive_availability": "unverified",
+    "product_discovery": "verified",
+    "metadata_verification": "unverified",
+    "license_verification": "verified",
+    "coverage_verification": "unverified",
+    "download_verification": "unverified",
+    "processing_verification": "not_applicable",
+    "field_verification": {
+      "units": "verified",
+      "license": "verified"
+    },
+    "evidence_notes": [
+      "PDS4 APXS derived geochemical dataset; contains per-target Easting_m/Northing_m."
+    ],
+    "last_checked_utc": null
+  },
+  "failure_reason": null,
+  "quality_flags": [
+    "Calibrated Oxide/Element Composition"
+  ],
+  "known_limitations": [
+    "Contact arm measurements (~1.7 cm FOV); Ni=0 with err=0 represents below detection limit."
+  ],
+  "processing_history": [
+    "Registered via MslCuriositySourceAdapter"
+  ],
+  "local_file_path": null,
+  "local_label_path": null,
+  "processed_file_path": null
+}

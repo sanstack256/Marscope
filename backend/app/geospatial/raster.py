@@ -76,10 +76,13 @@ class RasterInspectionService:
         file_path: Path,
         band_index: int = 1,
         explicit_units: Optional[str] = None,
+        max_sample_pixels: int = 4_000_000,
     ) -> Dict[str, Any]:
         """
         Inspect a GeoTIFF or supported planetary raster, computing valid-pixel statistics
         and extracting documented CRS, pixel spacing, scale/offset, and unit metadata.
+        Large rasters (> max_sample_pixels) use nearest-neighbor decimated reads for stats
+        without inflating full-resolution arrays in RAM.
         """
         if not file_path.exists():
             raise FileNotFoundError(f"Raster file not found: {file_path}")
@@ -108,18 +111,36 @@ class RasterInspectionService:
                 src, file_path, band_index, explicit_units=explicit_units
             )
 
-            # Read raw band and build no-data mask
-            raw_data = src.read(band_index).astype(np.float64)
+            # Read raw band (bounded memory via nearest-neighbor decimation on huge rasters)
+            total_pixels = width * height
+            stats_sampled = False
+            sampling_stride = 1
+            if total_pixels > max_sample_pixels and max_sample_pixels > 0:
+                import math
+                from rasterio.enums import Resampling
+
+                sampling_stride = max(2, int(math.ceil(math.sqrt(total_pixels / float(max_sample_pixels)))))
+                out_h = max(1, height // sampling_stride)
+                out_w = max(1, width // sampling_stride)
+                raw_data = src.read(
+                    band_index,
+                    out_shape=(out_h, out_w),
+                    resampling=Resampling.nearest,
+                ).astype(np.float64)
+                stats_sampled = True
+            else:
+                raw_data = src.read(band_index).astype(np.float64)
+
             invalid_mask = ~np.isfinite(raw_data)
             if nodata is not None and np.isfinite(nodata):
                 invalid_mask = invalid_mask | (raw_data == float(nodata))
 
             scaled_data = np.where(invalid_mask, np.nan, raw_data * scale + offset)
             valid_pixels = scaled_data[~np.isnan(scaled_data)]
-            total_pixels = width * height
+            sampled_total = int(raw_data.size)
             valid_count = int(valid_pixels.size)
-            nodata_count = int(total_pixels - valid_count)
-            valid_pct = (valid_count / total_pixels * 100.0) if total_pixels > 0 else 0.0
+            nodata_count = int(sampled_total - valid_count)
+            valid_pct = (valid_count / sampled_total * 100.0) if sampled_total > 0 else 0.0
 
             if valid_count > 0:
                 stats = RasterBandStats(
@@ -167,4 +188,6 @@ class RasterInspectionService:
                 "band_tags": src.tags(band_index) or {},
                 "dataset_tags": src.tags() or {},
                 "stats": stats.model_dump(),
+                "stats_sampled": stats_sampled,
+                "stats_sampling_stride": sampling_stride,
             }

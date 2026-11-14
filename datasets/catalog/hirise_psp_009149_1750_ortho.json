@@ -1,0 +1,74 @@
+{
+  "id": "hirise_psp_009149_1750_ortho",
+  "product_id": "PSP_009149_1750_RED_C_01_ORTHO.JP2",
+  "product_title": "HiRISE Orthorectified Surface Image — Mount Sharp / Boxwork (1.01 m/px)",
+  "product_type": "IMAGE / Orthorectified Orbital Imagery",
+  "mission": "Mars Reconnaissance Orbiter (MRO)",
+  "instrument": "High Resolution Imaging Science Experiment (HiRISE)",
+  "source_archive": "NASA PDS / University of Arizona HiRISE DTM Archive",
+  "original_product_url": "https://hirise-pds.lpl.arizona.edu/PDS/DTM/PSP/ORB_009100_009199/PSP_009149_1750_PSP_009294_1750/PSP_009149_1750_RED_C_01_ORTHO.JP2",
+  "original_label_url": "https://hirise-pds.lpl.arizona.edu/PDS/DTM/PSP/ORB_009100_009199/PSP_009149_1750_PSP_009294_1750/PSP_009149_1750_RED_C_01_ORTHO.LBL",
+  "doi_or_pds_id": "MRO-M-HIRISE-5-DTM-V1.0:PSP_009149_1750_RED_C_01_ORTHO",
+  "license": "NASA Public Domain / US Govt Open",
+  "attribution": "NASA/JPL-Caltech/University of Arizona HiRISE Team",
+  "acquisition_timestamp": null,
+  "observation_sol": null,
+  "processing_level": "DTM-Orthorectified JP2 (1.01 m/px)",
+  "calibration_status": "Radiometrically stretched 8-bit greyscale registered to DTEEC_009149_1750",
+  "coverage": {
+    "min_latitude": -4.923097,
+    "max_latitude": -4.67618,
+    "min_longitude": 137.353332,
+    "max_longitude": 137.468529,
+    "center_latitude": -4.799639,
+    "center_longitude": 137.41093,
+    "longitude_range": "[0, 360]"
+  },
+  "coordinate_reference_system": "IAU2000:49900",
+  "latitude_convention": "Planetocentric",
+  "longitude_direction": "East",
+  "map_projection": "Equirectangular (central_meridian=137.41)",
+  "planetary_radii_m": {
+    "a": 3396190.0,
+    "b": 3396190.0,
+    "c": 3396190.0
+  },
+  "horizontal_resolution_meters": 1.0117,
+  "vertical_resolution_meters": null,
+  "units": "digital_number",
+  "nodata_value": null,
+  "data_format": "PDS3 .LBL + JPEG2000 (.JP2)",
+  "file_size_bytes": 34009144,
+  "sha256_checksum": "b6a530e185957b7633f0a9b20f3a66e373921dda98b81a7af797f19b34461bef",
+  "status": "downloaded",
+  "verification": {
+    "archive_availability": "verified",
+    "product_discovery": "verified",
+    "metadata_verification": "verified",
+    "license_verification": "verified",
+    "coverage_verification": "verified",
+    "download_verification": "verified",
+    "processing_verification": "unverified",
+    "field_verification": {
+      "resolution": "verified",
+      "crs": "verified",
+      "units": "verified",
+      "coverage": "verified",
+      "license": "verified"
+    },
+    "evidence_notes": [
+      "Verified downloaded file psp_009149_1750_red_c_01_ortho.jp2 (34009144 bytes, SHA-256=b6a530e18595...)",
+      "Verified PDS3 header psp_009149_1750_red_c_01_ortho.lbl"
+    ],
+    "last_checked_utc": "2026-11-14T14:28:36.420458Z"
+  },
+  "failure_reason": null,
+  "quality_flags": [],
+  "known_limitations": [],
+  "processing_history": [
+    "Catalog record discovered via HiriseSourceAdapter"
+  ],
+  "local_file_path": "raw/psp_009149_1750_red_c_01_ortho.jp2",
+  "local_label_path": "raw/psp_009149_1750_red_c_01_ortho.lbl",
+  "processed_file_path": null
+}

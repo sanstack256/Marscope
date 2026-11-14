@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from app.geospatial.crs import validate_mars_crs
 from app.ingestion.acquisition import AcquisitionService
+from app.ingestion.sources.hirise import HiriseSourceAdapter
 from app.ingestion.sources.mars_trek import MarsTrekSourceAdapter
 from app.ingestion.sources.msl_curiosity import MslCuriositySourceAdapter
 from app.ingestion.sources.pds_mola import PdsMolaSourceAdapter
@@ -26,6 +27,7 @@ class DatasetCatalogService:
         self._datasets: Dict[str, Dataset] = {}
         self._sources = [
             PdsMolaSourceAdapter(),
+            HiriseSourceAdapter(),
             MslCuriositySourceAdapter(),
             MarsTrekSourceAdapter(),
         ]

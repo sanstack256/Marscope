@@ -1,0 +1,70 @@
+{
+  "id": "msl_chemin_rocknest_rdr5",
+  "product_id": "CMA_404470826MIN00790050104CH11503P1",
+  "product_title": "NASA PDS3 MSL CheMin Quantitative Mineralogy RDR5 (Rocknest Scooped Soil, Sol 79)",
+  "product_type": "COMPOSITION / CheMin XRD Mineral Abundance Table",
+  "mission": "Mars Science Laboratory (MSL)",
+  "instrument": "Chemistry & Mineralogy X-Ray Diffractometer (CheMin)",
+  "source_archive": "NASA PDS Geosciences Node",
+  "original_product_url": "https://pds-geosciences.wustl.edu/msl/msl-m-chemin-4-rdr-v1/mslcmn_1xxx/data/rdr5/cma_404470826min00790050104ch11503p1.csv",
+  "original_label_url": "https://pds-geosciences.wustl.edu/msl/msl-m-chemin-4-rdr-v1/mslcmn_1xxx/data/rdr5/cma_404470826min00790050104ch11503p1.lbl",
+  "doi_or_pds_id": "MSL-M-CHEMIN-4-RDR-V1.0:CMA_404470826MIN00790050104CH11503P1",
+  "license": "NASA Public Domain / US Govt Open",
+  "attribution": "NASA/JPL/Ames CheMin Team",
+  "acquisition_timestamp": "2012-10-25T21:03:42Z",
+  "observation_sol": 79,
+  "processing_level": "Derived Mineral Abundance RDR5 (TOPAS Rietveld)",
+  "calibration_status": "Quantitative crystalline mineral weight% with 1-sigma estimated error",
+  "coverage": {
+    "min_latitude": -5.6,
+    "max_latitude": -4.2,
+    "min_longitude": 137.0,
+    "max_longitude": 137.8,
+    "center_latitude": -4.65,
+    "center_longitude": 137.42,
+    "longitude_range": "[0, 360]"
+  },
+  "coordinate_reference_system": "IAU2000:49900",
+  "latitude_convention": "Planetocentric",
+  "longitude_direction": "East",
+  "map_projection": "Point Sample (Requires RMC Waypoint Join)",
+  "planetary_radii_m": null,
+  "horizontal_resolution_meters": null,
+  "vertical_resolution_meters": null,
+  "units": "wt%",
+  "nodata_value": null,
+  "data_format": "PDS3 CSV + LBL + CHEMIN_MIN.FMT",
+  "file_size_bytes": null,
+  "sha256_checksum": null,
+  "status": "discovered",
+  "verification": {
+    "archive_availability": "unverified",
+    "product_discovery": "verified",
+    "metadata_verification": "unverified",
+    "license_verification": "verified",
+    "coverage_verification": "unverified",
+    "download_verification": "unverified",
+    "processing_verification": "not_applicable",
+    "field_verification": {
+      "units": "verified",
+      "license": "verified"
+    },
+    "evidence_notes": [
+      "Direct crystalline mineral XRD Rietveld table verified on PDS Geosciences."
+    ],
+    "last_checked_utc": null
+  },
+  "failure_reason": null,
+  "quality_flags": [
+    "Direct Mineral Detection (XRD)"
+  ],
+  "known_limitations": [
+    "Amorphous fraction (~27 wt% in Rocknest) estimated separately via FULLPAT."
+  ],
+  "processing_history": [
+    "Registered via MslCuriositySourceAdapter"
+  ],
+  "local_file_path": null,
+  "local_label_path": null,
+  "processed_file_path": null
+}

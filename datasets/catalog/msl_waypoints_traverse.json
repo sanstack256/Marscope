@@ -1,0 +1,70 @@
+{
+  "id": "msl_waypoints_traverse",
+  "product_id": "MSL_WAYPOINTS_MMGIS",
+  "product_title": "NASA/JPL Curiosity Rover Traverse Waypoints (RMC to IAU2000 Coordinates)",
+  "product_type": "LOCALIZATION / Rover Traverse Waypoints",
+  "mission": "Mars Science Laboratory (MSL)",
+  "instrument": "MSL Rover Localization",
+  "source_archive": "NASA/JPL MMGIS Curiosity Traverse Layer",
+  "original_product_url": "https://mars.nasa.gov/mmgis-maps/MSL/Layers/json/MSL_waypoints.json",
+  "original_label_url": null,
+  "doi_or_pds_id": "NASA:JPL:MSL_WAYPOINTS",
+  "license": "NASA Public Domain / US Govt Open",
+  "attribution": "NASA/JPL-Caltech",
+  "acquisition_timestamp": null,
+  "observation_sol": null,
+  "processing_level": "Derived Localization Reference",
+  "calibration_status": "SPICE / Bundle-adjusted rover traverse positions",
+  "coverage": {
+    "min_latitude": -5.6,
+    "max_latitude": -4.2,
+    "min_longitude": 137.0,
+    "max_longitude": 137.8,
+    "center_latitude": -4.65,
+    "center_longitude": 137.42,
+    "longitude_range": "[0, 360]"
+  },
+  "coordinate_reference_system": "IAU2000:49900",
+  "latitude_convention": "Planetocentric",
+  "longitude_direction": "East",
+  "map_projection": "Geographic + Gale Crater Equirectangular",
+  "planetary_radii_m": null,
+  "horizontal_resolution_meters": null,
+  "vertical_resolution_meters": null,
+  "units": "degrees / meters",
+  "nodata_value": null,
+  "data_format": "GeoJSON",
+  "file_size_bytes": null,
+  "sha256_checksum": null,
+  "status": "discovered",
+  "verification": {
+    "archive_availability": "unverified",
+    "product_discovery": "verified",
+    "metadata_verification": "unverified",
+    "license_verification": "verified",
+    "coverage_verification": "unverified",
+    "download_verification": "unverified",
+    "processing_verification": "not_applicable",
+    "field_verification": {
+      "crs": "verified",
+      "license": "verified"
+    },
+    "evidence_notes": [
+      "Authoritative JPL Curiosity RMC coordinate lookup reference."
+    ],
+    "last_checked_utc": null
+  },
+  "failure_reason": null,
+  "quality_flags": [
+    "Localization Reference"
+  ],
+  "known_limitations": [
+    "Rover mast/arm standoff offsets (~1-10 m) apply to instrument targets."
+  ],
+  "processing_history": [
+    "Registered via MslCuriositySourceAdapter"
+  ],
+  "local_file_path": null,
+  "local_label_path": null,
+  "processed_file_path": null
+}

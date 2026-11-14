@@ -74,9 +74,9 @@ def _legend_for_layer(layer_type: str, units: str, vmin: Optional[float], vmax: 
             min_value=vmin,
             max_value=vmax,
             stops=[
-                LayerLegendStop(value="0°", color="#22c55e", label="Level / Low Risk"),
+                LayerLegendStop(value="0°", color="#22c55e", label="Level Terrain"),
                 LayerLegendStop(value="15°", color="#f59e0b", label="Moderate Grade"),
-                LayerLegendStop(value="25°+", color="#ef4444", label="Critical Limit"),
+                LayerLegendStop(value="25°+", color="#ef4444", label="Steep Slope (>= 25°)"),
             ],
         )
     if layer_type == "roughness":
@@ -181,8 +181,17 @@ class LayerCatalogService:
                     renderable=bool(crs_ok and remote_verified),
                     rendering_endpoint=ds.original_product_url if (crs_ok and remote_verified) else None,
                     tile_scheme="geographic_wmts" if (crs_ok and remote_verified) else None,
-                    maximum_zoom=7,
-                    default_visible=(ds.id == "mars_trek_viking_color" and remote_verified),
+                    maximum_zoom=(
+                        16 if ("curiosity_hirise" in ds.id or "curiosity_hirise_mosaic" in ds.product_id.lower())
+                        else 12 if ("gale_ctx" in ds.id or "gale_ctx_blockadj" in ds.product_id.lower())
+                        else 10 if ("curiosity_ctx" in ds.id or "curiosity_ctx_mosaic" in ds.product_id.lower())
+                        else 8 if ("mola_hrsc" in ds.id or "mola_blend" in ds.product_id.lower())
+                        else 7
+                    ),
+                    default_visible=(
+                        ds.id in {"mars_trek_viking_color", "mars_trek_gale_ctx", "mars_trek_curiosity_hirise"}
+                        and remote_verified
+                    ),
                     default_opacity=1.0 if not is_topo_viz else 0.65,
                     known_limitations=ds.known_limitations,
                     unavailable_reason=(

@@ -17,9 +17,11 @@ from app.api import (
     mobility,
     observations,
     physics,
+    routing,
     sources,
     targets,
     terrain,
+    terrain_mesh,
 )
 
 api_router = APIRouter(prefix="/api")
@@ -28,7 +30,9 @@ api_router.include_router(health.router)
 api_router.include_router(imagery.router)
 api_router.include_router(datasets.router)
 api_router.include_router(terrain.router)
+api_router.include_router(terrain_mesh.router)
 api_router.include_router(mobility.router)
+api_router.include_router(routing.router)
 api_router.include_router(layers.router)
 api_router.include_router(observations.router)
 api_router.include_router(composition.router)

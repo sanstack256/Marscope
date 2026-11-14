@@ -1,0 +1,76 @@
+{
+  "id": "mars_trek_gale_ctx",
+  "product_id": "Gale_CTX_BlockAdj_dd",
+  "product_title": "NASA Mars Trek Gale Crater Block-Adjusted CTX Mosaic (~5 m/px)",
+  "product_type": "IMAGERY / Regional Context Mosaic",
+  "mission": "Mars Reconnaissance Orbiter (MRO)",
+  "instrument": "Context Camera (CTX)",
+  "source_archive": "NASA Solar System Treks (Mars Trek WMTS)",
+  "original_product_url": "https://trek.nasa.gov/tiles/Mars/EQ/Gale_CTX_BlockAdj_dd/1.0.0/default/default028mm/{z}/{y}/{x}.png",
+  "original_label_url": "https://trek.nasa.gov/tiles/Mars/EQ/Gale_CTX_BlockAdj_dd/1.0.0/WMTSCapabilities.xml",
+  "doi_or_pds_id": null,
+  "license": "NASA Public Domain / US Govt Open",
+  "attribution": "NASA/JPL/MSSS/USGS/Mars Trek",
+  "acquisition_timestamp": null,
+  "observation_sol": null,
+  "processing_level": "Block-Adjusted CTX Mosaic (PNG WMTS Zoom 0-12)",
+  "calibration_status": "Visual controlled orbital context mosaic",
+  "coverage": {
+    "min_latitude": -6.5733,
+    "max_latitude": -2.8078,
+    "min_longitude": 135.1843,
+    "max_longitude": 139.2413,
+    "center_latitude": -4.69055,
+    "center_longitude": 137.2128,
+    "longitude_range": "[-180, 180]"
+  },
+  "coordinate_reference_system": "IAU2000:49900",
+  "latitude_convention": "Planetocentric",
+  "longitude_direction": "East",
+  "map_projection": "Simple Cylindrical Equirectangular (OGC WMTS default028mm)",
+  "planetary_radii_m": {
+    "a": 3396190.0,
+    "b": 3376200.0,
+    "c": 3376200.0
+  },
+  "horizontal_resolution_meters": 5.0,
+  "vertical_resolution_meters": null,
+  "units": "RGBA digital imagery (visual context)",
+  "nodata_value": null,
+  "data_format": "OGC WMTS / PNG tiles (Zoom 0-12)",
+  "file_size_bytes": null,
+  "sha256_checksum": null,
+  "status": "available",
+  "verification": {
+    "archive_availability": "verified",
+    "product_discovery": "verified",
+    "metadata_verification": "verified",
+    "license_verification": "verified",
+    "coverage_verification": "verified",
+    "download_verification": "not_applicable",
+    "processing_verification": "not_applicable",
+    "field_verification": {
+      "crs": "verified",
+      "resolution": "verified",
+      "coverage": "verified"
+    },
+    "evidence_notes": [
+      "Gale Crater block-adjusted CTX WMTS endpoint (zoom 0..12).",
+      "Verified WMTSCapabilities.xml HTTP 200 and live tile HTTP 200 over Gale Crater."
+    ],
+    "last_checked_utc": "2026-11-14T14:28:36.420458Z"
+  },
+  "failure_reason": null,
+  "quality_flags": [
+    "Regional Gale Crater Context (~5 m/px)"
+  ],
+  "known_limitations": [
+    "Visual mosaic only; does not supply terrain height."
+  ],
+  "processing_history": [
+    "Catalog record discovered via MarsTrekSourceAdapter"
+  ],
+  "local_file_path": null,
+  "local_label_path": null,
+  "processed_file_path": null
+}

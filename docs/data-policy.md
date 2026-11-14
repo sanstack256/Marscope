@@ -69,3 +69,14 @@ Individual image records extend the dataset-level registry; they do not replace 
 Acquisition is restricted to HTTPS on the PDS Imaging host, capped at 2 GB, streamed to a temporary file, and atomically committed after nonempty and file-type checks. SHA-256 is always calculated; Atlas MD5 is compared when present. Existing products are reused only when their retrieval sidecar matches source URL and SHA-256; otherwise overwrite is refused. An HTTP 200 alone never means verified. Public archive access does not establish reuse rights; rights remain `unverified` pending product-specific terms.
 
 Original label files are retained. PDS3 ODL labels use the existing parser; PDS4 XML is retained and parsed without discarding source XML. Missing product, projection, coordinate, footprint, and rights metadata stays null or explicitly unverified. No panorama or geographic station is inferred from a dataset name.
+
+---
+
+## 6. Prompt 11 3D Terrain Mesh & Route Optimization Integrity Policy
+
+1. **No Procedural Terrain or Fabricated Elevation Filling:** Local 3D heightfield tiles (`/api/terrain/mesh/*`) and Cesium heightgrids (`/api/terrain/mesh/heightgrid`) sample directly from verified local NASA PDS/GeoTIFF DEMs (`hirise_dteec_009149_1750`, `hirise_dteec_040770_1755`, `mola_megt00n090hb`). Oblique HiRISE stereo swath corners and raster NoData pixels emit `valid_mask = 0` and are omitted from WebGL triangulation and routing graphs rather than filled with Perlin/procedural noise or interpolated across missing corners.
+2. **Honest Routing Assumptions & Non-Certification:**
+   - Walking speed defaults to `null` (`estimated_duration_seconds = null`) unless explicitly supplied by the user; any user-entered pace or EVA duration reserve is labeled `"User-Configured Planning Assumption (Unvalidated)"`.
+   - When `astronaut_total_mass_kg` is supplied, only deterministic Newtonian climb work ($\Delta PE = m \cdot g_{\text{Mars}} \cdot \Delta h$, $g_{\text{Mars}} = 3.72076\text{ m/s}^2$) is reported (`gravitational_climb_work_joules`).
+   - Oxygen ($\text{O}_2$) reserves, $\text{CO}_2$ scrubbing, suit battery state-of-charge, and metabolic calorie burn curves are strictly excluded and labeled `Not Modeled (Unvalidated)` in `/simulation` (`safety_certification_enabled = false`).
+3. **MSL Navcam Panorama Boundary Remains Active:** Prompt 11 delivers local DEM-derived 3D orbital/surface terrain and science-aware routing; rover panorama station rendering remains withheld until verified individual MSL Navcam products and labels are acquired.

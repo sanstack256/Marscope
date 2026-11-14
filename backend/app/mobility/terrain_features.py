@@ -13,7 +13,7 @@ Computes physical terrain properties strictly from verified DEM windows:
 
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import rasterio
 from rasterio.transform import xy as rio_xy
@@ -242,6 +242,7 @@ def extract_windowed_terrain_features(
         f"+proj=longlat +a={MARS_EQUATORIAL_RADIUS_M} +b={MARS_EQUATORIAL_RADIUS_M} +no_defs"
     )
     with rasterio.open(open_path) as src:
+        is_int_dtype = "int" in str(src.dtypes[0]).lower()
         nodata = src.nodata
         if nodata is None and lbl_meta.get("missing_constant") is not None:
             try:
@@ -251,15 +252,40 @@ def extract_windowed_terrain_features(
         elif nodata is None:
             nodata = -32768.0
 
+        max_win_pixels = 2_000_000
         if src.crs and src.crs.is_projected:
             with WarpedVRT(src, crs=rio_crs) as vrt:
-                dem_arr = vrt.read(1, window=win).astype(np.float64)
-                win_transform = vrt.window_transform(win)
-                w_left, w_bottom, w_right, w_top = rasterio.windows.bounds(win, vrt.transform)
+                win_px = int(win.width) * int(win.height)
+                if win_px > max_win_pixels:
+                    from rasterio.enums import Resampling
+                    stride = max(2, int(math.ceil(math.sqrt(win_px / float(max_win_pixels)))))
+                    out_h = max(3, int(win.height) // stride)
+                    out_w = max(3, int(win.width) // stride)
+                    dem_arr = vrt.read(1, window=win, out_shape=(out_h, out_w), resampling=Resampling.nearest).astype(np.float64)
+                    w_left, w_bottom, w_right, w_top = rasterio.windows.bounds(win, vrt.transform)
+                    win_transform = rasterio.transform.from_bounds(w_left, w_bottom, w_right, w_top, out_w, out_h)
+                    dx_m *= (float(win.width) / float(out_w))
+                    dy_m *= (float(win.height) / float(out_h))
+                else:
+                    dem_arr = vrt.read(1, window=win).astype(np.float64)
+                    win_transform = vrt.window_transform(win)
+                    w_left, w_bottom, w_right, w_top = rasterio.windows.bounds(win, vrt.transform)
         else:
-            dem_arr = src.read(1, window=win).astype(np.float64)
-            win_transform = src.window_transform(win)
-            w_left, w_bottom, w_right, w_top = rasterio.windows.bounds(win, src.transform)
+            win_px = int(win.width) * int(win.height)
+            if win_px > max_win_pixels:
+                from rasterio.enums import Resampling
+                stride = max(2, int(math.ceil(math.sqrt(win_px / float(max_win_pixels)))))
+                out_h = max(3, int(win.height) // stride)
+                out_w = max(3, int(win.width) // stride)
+                dem_arr = src.read(1, window=win, out_shape=(out_h, out_w), resampling=Resampling.nearest).astype(np.float64)
+                w_left, w_bottom, w_right, w_top = rasterio.windows.bounds(win, src.transform)
+                win_transform = rasterio.transform.from_bounds(w_left, w_bottom, w_right, w_top, out_w, out_h)
+                dx_m *= (float(win.width) / float(out_w))
+                dy_m *= (float(win.height) / float(out_h))
+            else:
+                dem_arr = src.read(1, window=win).astype(np.float64)
+                win_transform = src.window_transform(win)
+                w_left, w_bottom, w_right, w_top = rasterio.windows.bounds(win, src.transform)
 
     analysis_footprint_bounds = {
         "min_lat": float(w_bottom),
@@ -340,7 +366,7 @@ def extract_windowed_terrain_features(
         dx_meters=dx_m,
         dy_meters=dy_m,
         vertical_units="meters",
-        is_integer_dem=True,
+        is_integer_dem=is_int_dtype,
         sampling_method="nearest_whole_pixel_window",
     )
 
@@ -415,6 +441,7 @@ def compute_elevation_profile(
     )
 
     with rasterio.open(open_path) as src:
+        is_int_dtype = "int" in str(src.dtypes[0]).lower()
         nodata = src.nodata
         if nodata is None and lbl_meta.get("missing_constant") is not None:
             try:
@@ -446,7 +473,7 @@ def compute_elevation_profile(
                     continue
                 # Continuous pixel coordinates (r_f, c_f)
                 inv_t = ~reader.transform
-                c_f, r_f = inv_t * (lon_query, lat)
+                c_f, r_f = inv_t @ (lon_query, lat)
                 r_i = int(math.floor(r_f))
                 c_i = int(math.floor(c_f))
                 if r_i < 0 or r_i >= reader.height or c_i < 0 or c_i >= reader.width:
@@ -456,31 +483,36 @@ def compute_elevation_profile(
                     in_bounds_rows.append(r_i)
                     in_bounds_cols.append(c_i)
 
+            use_patch_sampling = False
             if in_bounds_rows and in_bounds_cols:
                 r0 = max(0, min(in_bounds_rows) - 2)
                 r1 = min(int(reader.height), max(in_bounds_rows) + 3)
                 c0 = max(0, min(in_bounds_cols) - 2)
                 c1 = min(int(reader.width), max(in_bounds_cols) + 3)
-                sub_win = rasterio.windows.Window(c0, r0, c1 - c0, r1 - r0)
-                sub_dem = reader.read(1, window=sub_win).astype(np.float64)
-                sub_valid = np.isfinite(sub_dem) & (sub_dem != float(nodata)) & (sub_dem > -32000.0)
-                sub_dem_clean = np.where(sub_valid, sub_dem, np.nan)
-                if sub_dem.shape[0] >= 3 and sub_dem.shape[1] >= 3:
-                    sub_nodata_mask = ~sub_valid
-                    sub_slope, _ = calculate_slope(sub_dem, dx_m, dy_m, nodata_mask=sub_nodata_mask)
-                    sub_aspect_raw = calculate_aspect(sub_dem, dx_m, dy_m, nodata_mask=sub_nodata_mask)
-                    sub_aspect = np.where(sub_aspect_raw == -1.0, np.nan, sub_aspect_raw)
-                    sub_tri, _ = calculate_roughness_tri_with_metadata(
-                        sub_dem,
-                        dx_m,
-                        dy_m,
-                        nodata_mask=sub_nodata_mask,
-                        neighborhood_radius_meters=roughness_radius_meters,
-                    )
+                bbox_pixels = (r1 - r0) * (c1 - c0)
+                if bbox_pixels > 1_000_000:
+                    use_patch_sampling = True
                 else:
-                    sub_slope = np.full_like(sub_dem, np.nan)
-                    sub_aspect = np.full_like(sub_dem, np.nan)
-                    sub_tri = np.full_like(sub_dem, np.nan)
+                    sub_win = rasterio.windows.Window(c0, r0, c1 - c0, r1 - r0)
+                    sub_dem = reader.read(1, window=sub_win).astype(np.float64)
+                    sub_valid = np.isfinite(sub_dem) & (sub_dem != float(nodata)) & (sub_dem > -32000.0)
+                    sub_dem_clean = np.where(sub_valid, sub_dem, np.nan)
+                    if sub_dem.shape[0] >= 3 and sub_dem.shape[1] >= 3:
+                        sub_nodata_mask = ~sub_valid
+                        sub_slope, _ = calculate_slope(sub_dem, dx_m, dy_m, nodata_mask=sub_nodata_mask)
+                        sub_aspect_raw = calculate_aspect(sub_dem, dx_m, dy_m, nodata_mask=sub_nodata_mask)
+                        sub_aspect = np.where(sub_aspect_raw == -1.0, np.nan, sub_aspect_raw)
+                        sub_tri, _ = calculate_roughness_tri_with_metadata(
+                            sub_dem,
+                            dx_m,
+                            dy_m,
+                            nodata_mask=sub_nodata_mask,
+                            neighborhood_radius_meters=roughness_radius_meters,
+                        )
+                    else:
+                        sub_slope = np.full_like(sub_dem, np.nan)
+                        sub_aspect = np.full_like(sub_dem, np.nan)
+                        sub_tri = np.full_like(sub_dem, np.nan)
             else:
                 r0 = c0 = 0
                 sub_dem_clean = np.empty((0, 0), dtype=np.float64)
@@ -505,30 +537,86 @@ def compute_elevation_profile(
                     continue
 
                 r_i, c_i, r_f, c_f = rc
-                lr = r_i - r0
-                lc = c_i - c0
-                z_raw = sub_dem_clean[lr, lc]
+                if use_patch_sampling:
+                    pr0 = max(0, r_i - 2)
+                    pr1 = min(int(reader.height), r_i + 3)
+                    pc0 = max(0, c_i - 2)
+                    pc1 = min(int(reader.width), c_i + 3)
+                    pwin = rasterio.windows.Window(pc0, pr0, pc1 - pc0, pr1 - pr0)
+                    pdem = reader.read(1, window=pwin).astype(np.float64)
+                    pval = np.isfinite(pdem) & (pdem != float(nodata)) & (pdem > -32000.0)
+                    pdem_clean = np.where(pval, pdem, np.nan)
+                    lr = r_i - pr0
+                    lc = c_i - pc0
+                    z_raw = pdem_clean[lr, lc]
+                    if sampling_method == "bilinear" and np.isfinite(z_raw):
+                        r_base = int(math.floor(r_f - 0.5))
+                        c_base = int(math.floor(c_f - 0.5))
+                        if (
+                            0 <= (r_base - pr0)
+                            and (r_base - pr0 + 1) < pdem_clean.shape[0]
+                            and 0 <= (c_base - pc0)
+                            and (c_base - pc0 + 1) < pdem_clean.shape[1]
+                        ):
+                            q = pdem_clean[r_base - pr0 : r_base - pr0 + 2, c_base - pc0 : c_base - pc0 + 2]
+                            if np.all(np.isfinite(q)):
+                                dr = (r_f - 0.5) - r_base
+                                dc = (c_f - 0.5) - c_base
+                                z_raw = float(
+                                    q[0, 0] * (1 - dr) * (1 - dc)
+                                    + q[0, 1] * (1 - dr) * dc
+                                    + q[1, 0] * dr * (1 - dc)
+                                    + q[1, 1] * dr * dc
+                                )
+                    if pdem.shape[0] >= 3 and pdem.shape[1] >= 3 and np.isfinite(z_raw):
+                        pnodata = ~pval
+                        pslp, _ = calculate_slope(pdem, dx_m, dy_m, nodata_mask=pnodata)
+                        pasp_raw = calculate_aspect(pdem, dx_m, dy_m, nodata_mask=pnodata)
+                        pasp = np.where(pasp_raw == -1.0, np.nan, pasp_raw)
+                        ptri, _ = calculate_roughness_tri_with_metadata(
+                            pdem,
+                            dx_m,
+                            dy_m,
+                            nodata_mask=pnodata,
+                            neighborhood_radius_meters=roughness_radius_meters,
+                        )
+                        s_val = float(pslp[lr, lc]) if np.isfinite(pslp[lr, lc]) else None
+                        a_val = float(pasp[lr, lc]) if np.isfinite(pasp[lr, lc]) else None
+                        t_val = float(ptri[lr, lc]) if np.isfinite(ptri[lr, lc]) else None
+                    else:
+                        s_val = a_val = t_val = None
+                else:
+                    lr = r_i - r0
+                    lc = c_i - c0
+                    z_raw = sub_dem_clean[lr, lc]
 
-                # Optional bilinear interpolation only if all 4 surrounding pixels are valid
-                if sampling_method == "bilinear" and np.isfinite(z_raw):
-                    r_base = int(math.floor(r_f - 0.5))
-                    c_base = int(math.floor(c_f - 0.5))
-                    if (
-                        0 <= (r_base - r0)
-                        and (r_base - r0 + 1) < sub_dem_clean.shape[0]
-                        and 0 <= (c_base - c0)
-                        and (c_base - c0 + 1) < sub_dem_clean.shape[1]
-                    ):
-                        q = sub_dem_clean[r_base - r0 : r_base - r0 + 2, c_base - c0 : c_base - c0 + 2]
-                        if np.all(np.isfinite(q)):
-                            dr = (r_f - 0.5) - r_base
-                            dc = (c_f - 0.5) - c_base
-                            z_raw = float(
-                                q[0, 0] * (1 - dr) * (1 - dc)
-                                + q[0, 1] * (1 - dr) * dc
-                                + q[1, 0] * dr * (1 - dc)
-                                + q[1, 1] * dr * dc
-                            )
+                    # Optional bilinear interpolation only if all 4 surrounding pixels are valid
+                    if sampling_method == "bilinear" and np.isfinite(z_raw):
+                        r_base = int(math.floor(r_f - 0.5))
+                        c_base = int(math.floor(c_f - 0.5))
+                        if (
+                            0 <= (r_base - r0)
+                            and (r_base - r0 + 1) < sub_dem_clean.shape[0]
+                            and 0 <= (c_base - c0)
+                            and (c_base - c0 + 1) < sub_dem_clean.shape[1]
+                        ):
+                            q = sub_dem_clean[r_base - r0 : r_base - r0 + 2, c_base - c0 : c_base - c0 + 2]
+                            if np.all(np.isfinite(q)):
+                                dr = (r_f - 0.5) - r_base
+                                dc = (c_f - 0.5) - c_base
+                                z_raw = float(
+                                    q[0, 0] * (1 - dr) * (1 - dc)
+                                    + q[0, 1] * (1 - dr) * dc
+                                    + q[1, 0] * dr * (1 - dc)
+                                    + q[1, 1] * dr * dc
+                                )
+
+                    if not np.isfinite(z_raw):
+                        s_val = a_val = t_val = None
+                    else:
+                        s_val = float(sub_slope[lr, lc]) if np.isfinite(sub_slope[lr, lc]) else None
+                        a_val = float(sub_aspect[lr, lc]) if np.isfinite(sub_aspect[lr, lc]) else None
+                        t_val = float(sub_tri[lr, lc]) if np.isfinite(sub_tri[lr, lc]) else None
 
                 if not np.isfinite(z_raw):
                     prof_samples.append(
@@ -544,10 +632,6 @@ def compute_elevation_profile(
                         )
                     )
                     continue
-
-                s_val = float(sub_slope[lr, lc]) if np.isfinite(sub_slope[lr, lc]) else None
-                a_val = float(sub_aspect[lr, lc]) if np.isfinite(sub_aspect[lr, lc]) else None
-                t_val = float(sub_tri[lr, lc]) if np.isfinite(sub_tri[lr, lc]) else None
                 cov_state = (
                     TerrainCoverageState.VALID_SOURCE_DATA
                     if (s_val is not None and t_val is not None)
@@ -663,7 +747,7 @@ def compute_elevation_profile(
         dx_meters=dx_m,
         dy_meters=dy_m,
         vertical_units="meters",
-        is_integer_dem=True,
+        is_integer_dem=is_int_dtype,
         sampling_method=f"{sampling_method}_transect_sampling",
     )
 

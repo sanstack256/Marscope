@@ -991,3 +991,290 @@ export interface MobilityEvaluationResponse {
   resolution_suitability: Record<string, ScaleSuitabilityRecord>;
   scientific_limitations: string[];
 }
+
+// ============================================================
+// Prompt 11: Real 3D Terrain Mesh & Science-Aware Routing
+// ============================================================
+
+export type TextureOverlayMode = "ortho" | "elevation" | "slope" | "roughness";
+export type SurfacePickMode = "inspect" | "set_start" | "add_waypoint" | "set_destination";
+export type PathAlgorithm = "astar" | "dijkstra";
+
+export interface MeshDemSummary {
+  dataset_id: string;
+  product_id: string;
+  product_title: string;
+  native_resolution_m?: number | null;
+  ortho_dataset_id?: string | null;
+  bounds: Record<string, number>;
+  recommended_focus_bounds: Record<string, number>;
+  local_slope_suitable: boolean;
+}
+
+export interface MeshLodLevel {
+  lod: number;
+  tiles_x: number;
+  tiles_y: number;
+  tile_grid_cols: number;
+  tile_grid_rows: number;
+  approx_vertex_spacing_m: number;
+}
+
+export interface MeshTileDescriptor {
+  tile_id: string;
+  lod: number;
+  row: number;
+  col: number;
+  bounds: Record<string, number>;
+  grid_rows: number;
+  grid_cols: number;
+  approx_vertex_spacing_m: number;
+}
+
+export interface TerrainMeshManifest {
+  dataset_id: string;
+  product_id: string;
+  product_title: string;
+  crs: string;
+  vertical_units: string;
+  vertical_datum: string;
+  native_resolution_m?: number | null;
+  ortho_dataset_id?: string | null;
+  requested_bounds: Record<string, number>;
+  requested_bounds_modified: boolean;
+  dataset_bounds: Record<string, number>;
+  origin: { lat: number; lon_east: number };
+  physical_extent_m: { width_m: number; height_m: number };
+  lod_levels: MeshLodLevel[];
+  tiles: MeshTileDescriptor[];
+  available_dems: MeshDemSummary[];
+  resolution_suitability: Record<string, ScaleSuitabilityRecord>;
+}
+
+export interface TerrainMeshTile {
+  tile_id: string;
+  dataset_id: string;
+  product_id: string;
+  crs: string;
+  vertical_units: string;
+  bounds: Record<string, number>;
+  origin: { lat: number; lon_east: number };
+  local_bounds_m: {
+    min_east_m: number;
+    max_east_m: number;
+    min_north_m: number;
+    max_north_m: number;
+  };
+  grid_rows: number;
+  grid_cols: number;
+  sample_spacing_m: { dx_m: number; dy_m: number };
+  native_resolution_m?: number | null;
+  elevations_m: (number | null)[];
+  valid_mask: number[];
+  slope_deg?: (number | null)[] | null;
+  roughness_tri_m?: (number | null)[] | null;
+  valid_vertex_count: number;
+  nodata_vertex_count: number;
+  elevation_min_m?: number | null;
+  elevation_max_m?: number | null;
+  slope_max_deg?: number | null;
+  generation_ms: number;
+}
+
+export interface RouteCoordinateInput {
+  lat: number;
+  lon_east: number;
+  label?: string | null;
+  target_id?: string | null;
+}
+
+export interface RoutePlanningConstraints {
+  max_slope_deg: number;
+  max_roughness_tri_m?: number | null;
+  snap_radius_m: number;
+  walking_speed_m_per_s?: number | null;
+  walking_speed_provenance?: string | null;
+  astronaut_total_mass_kg?: number | null;
+  max_eva_duration_hours?: number | null;
+  safety_reserve_fraction: number;
+  enforce_budget: boolean;
+  return_to_start: boolean;
+  optimize_target_order: boolean;
+  simplification_epsilon_m: number;
+  max_grid_dim: number;
+}
+
+export interface SnapDiagnostic {
+  point_role: string;
+  requested_lat: number;
+  requested_lon_east: number;
+  snapped: boolean;
+  snapped_lat: number;
+  snapped_lon_east: number;
+  snap_distance_m: number;
+  source_cell_state: string;
+  elevation_m?: number | null;
+}
+
+export interface SimplificationDiagnostic {
+  raw_grid_nodes: number;
+  simplified_vertices: number;
+  segments_checked: number;
+  shortcuts_accepted: number;
+  shortcuts_rejected_obstacle_or_nodata: number;
+  all_simplified_segments_verified_valid: boolean;
+}
+
+export interface BudgetDiagnostic {
+  evaluated: boolean;
+  return_to_start_included: boolean;
+  max_eva_duration_seconds?: number | null;
+  safety_reserve_fraction: number;
+  usable_budget_seconds?: number | null;
+  estimated_total_duration_seconds?: number | null;
+  margin_seconds?: number | null;
+  within_budget?: boolean | null;
+  reason?: string | null;
+}
+
+export interface RouteVertex {
+  seq: number;
+  lat: number;
+  lon_east: number;
+  elevation_m: number;
+  slope_deg?: number | null;
+  roughness_tri_m?: number | null;
+  cumulative_distance_m: number;
+  segment_distance_m: number;
+  is_stop: boolean;
+  stop_role?: string | null;
+  stop_label?: string | null;
+  target_id?: string | null;
+  science_corridor_score: number;
+}
+
+export interface RouteLegSummary {
+  leg_index: number;
+  from_label: string;
+  to_label: string;
+  is_return_leg: boolean;
+  horizontal_distance_m: number;
+  surface_distance_m: number;
+  elevation_gain_m: number;
+  elevation_loss_m: number;
+  mean_slope_deg: number;
+  max_slope_deg: number;
+  mean_roughness_tri_m?: number | null;
+  estimated_duration_seconds?: number | null;
+  total_cost: number;
+  vertex_start_seq: number;
+  vertex_end_seq: number;
+}
+
+export interface NavigationInstruction {
+  step_index: number;
+  action: string;
+  bearing_true_north_deg?: number | null;
+  bearing_grid_north_deg?: number | null;
+  cardinal_direction?: string | null;
+  turn_angle_deg?: number | null;
+  from_lat: number;
+  from_lon_east: number;
+  to_lat: number;
+  to_lon_east: number;
+  segment_distance_m: number;
+  cumulative_distance_m: number;
+  elevation_start_m: number;
+  elevation_end_m: number;
+  elevation_delta_m: number;
+  grade_percent: number;
+  segment_slope_deg: number;
+  local_roughness_tri_m?: number | null;
+  terrain_context: string;
+  nearby_science_targets: string[];
+  caution_notes: string[];
+  instruction_text: string;
+}
+
+export interface ScienceStopSummary {
+  target_id?: string | null;
+  name: string;
+  lat: number;
+  lon_east: number;
+  geology_type?: string | null;
+  scientific_value?: number | null;
+  matched_species?: string | null;
+  instrument_source?: string | null;
+  visit_order_index: number;
+  distance_from_route_m: number;
+}
+
+export interface RouteComputeResponse {
+  route_id: string;
+  route_signature: string;
+  created_at_utc: string;
+  dataset_id: string;
+  source_product_id: string;
+  crs: string;
+  bearing_convention: string;
+  mode: PlanningMode;
+  mode_label: string;
+  algorithm: PathAlgorithm;
+  effective_slope_limit_deg: number;
+  native_dem_resolution_m: number;
+  solver_grid_spacing_m: number;
+  solver_grid_shape: { rows: number; cols: number };
+  assumption_classification: string;
+  return_to_start: boolean;
+  within_budget?: boolean | null;
+  budget_diagnostic: BudgetDiagnostic;
+  total_horizontal_distance_m: number;
+  total_surface_distance_m: number;
+  total_elevation_gain_m: number;
+  total_elevation_loss_m: number;
+  net_elevation_change_m: number;
+  min_elevation_m: number;
+  max_elevation_m: number;
+  mean_slope_deg: number;
+  max_slope_deg: number;
+  mean_roughness_tri_m?: number | null;
+  estimated_duration_seconds?: number | null;
+  gravitational_climb_work_joules?: number | null;
+  total_cost: number;
+  compute_time_ms: number;
+  nodes_expanded: number;
+  target_visit_order: string[];
+  snap_diagnostics: SnapDiagnostic[];
+  simplification_diagnostic: SimplificationDiagnostic;
+  science_targets_reached: ScienceStopSummary[];
+  corridor_evidence_hits_within_150m: number;
+  legs: RouteLegSummary[];
+  vertices: RouteVertex[];
+  instructions: NavigationInstruction[];
+  resolution_suitability: Record<string, ScaleSuitabilityRecord>;
+  limitations: string[];
+}
+
+export interface RouteCompareEntry {
+  mode: PlanningMode;
+  mode_label: string;
+  feasible: boolean;
+  error_reason?: string | null;
+  route?: RouteComputeResponse | null;
+}
+
+export interface RouteCompareResponse {
+  dataset_id: string;
+  source_product_id: string;
+  comparison: RouteCompareEntry[];
+  comparison_notes: string[];
+}
+
+export interface PickedSurfacePoint {
+  lat: number;
+  lon_east: number;
+  elevation_m: number;
+  slope_deg?: number | null;
+  roughness_tri_m?: number | null;
+  dataset_id: string;
+}

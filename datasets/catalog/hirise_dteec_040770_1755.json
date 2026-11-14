@@ -1,0 +1,80 @@
+{
+  "id": "hirise_dteec_040770_1755",
+  "product_id": "DTEEC_040770_1755_039280_1755_U01.IMG",
+  "product_title": "HiRISE Stereo DTM — Gale Crater / Bradbury Landing to Vera Rubin Ridge (1.01 m/px)",
+  "product_type": "DEM / High-Resolution Stereo DTM",
+  "mission": "Mars Reconnaissance Orbiter (MRO)",
+  "instrument": "High Resolution Imaging Science Experiment (HiRISE)",
+  "source_archive": "NASA PDS / University of Arizona HiRISE DTM Archive",
+  "original_product_url": "https://hirise-pds.lpl.arizona.edu/PDS/DTM/ESP/ORB_040700_040799/ESP_040770_1755_ESP_039280_1755/DTEEC_040770_1755_039280_1755_U01.IMG",
+  "original_label_url": "https://hirise-pds.lpl.arizona.edu/PDS/DTM/ESP/ORB_040700_040799/ESP_040770_1755_ESP_039280_1755/DTEEC_040770_1755_039280_1755_U01.IMG",
+  "doi_or_pds_id": "MRO-M-HIRISE-5-DTM-V1.0:DTEEC_040770_1755_039280_1755_U01",
+  "license": "NASA Public Domain / US Govt Open",
+  "attribution": "NASA/JPL-Caltech/University of Arizona HiRISE Team",
+  "acquisition_timestamp": null,
+  "observation_sol": null,
+  "processing_level": "HiRISE Stereo DTM (32-bit float meters, SOCET SET)",
+  "calibration_status": "Tied to MOLA Areoid vertical datum (radius 3396.19 km)",
+  "coverage": {
+    "min_latitude": -4.792188,
+    "max_latitude": -4.583297,
+    "min_longitude": 137.335157,
+    "max_longitude": 137.442692,
+    "center_latitude": -4.687743,
+    "center_longitude": 137.388925,
+    "longitude_range": "[0, 360]"
+  },
+  "coordinate_reference_system": "IAU2000:49900",
+  "latitude_convention": "Planetocentric",
+  "longitude_direction": "East",
+  "map_projection": "Equirectangular (central_meridian=137.39)",
+  "planetary_radii_m": {
+    "a": 3396190.0,
+    "b": 3396190.0,
+    "c": 3396190.0
+  },
+  "horizontal_resolution_meters": 1.0118,
+  "vertical_resolution_meters": 0.25,
+  "units": "meters",
+  "nodata_value": -3.4028226550889045e38,
+  "data_format": "PDS3 Attached-Label 32-bit PC_REAL Image",
+  "file_size_bytes": 308422800,
+  "sha256_checksum": "407daf9f10229b892c811af49dfe3ef673f69981c43a2679bcb2a73677ef50cb",
+  "status": "downloaded",
+  "verification": {
+    "archive_availability": "verified",
+    "product_discovery": "verified",
+    "metadata_verification": "verified",
+    "license_verification": "verified",
+    "coverage_verification": "verified",
+    "download_verification": "verified",
+    "processing_verification": "not_applicable",
+    "field_verification": {
+      "crs": "verified",
+      "units": "verified",
+      "resolution": "verified",
+      "coverage": "verified",
+      "license": "verified"
+    },
+    "evidence_notes": [
+      "Catalogued from UArizona HiRISE DTMCUMINDEX.TAB; covers Bradbury Landing through Murray Formation & Vera Rubin Ridge.",
+      "Verified downloaded file dteec_040770_1755_039280_1755_u01.img (308422800 bytes, SHA-256=407daf9f1022...)",
+      "Verified PDS3 header dteec_040770_1755_039280_1755_u01.img"
+    ],
+    "last_checked_utc": "2026-11-14T14:28:36.420458Z"
+  },
+  "failure_reason": null,
+  "quality_flags": [
+    "Stereo Pair ESP_040770_1755 / ESP_039280_1755",
+    "Local Slope & Obstacle Resolution Suitable (1.01 m/px)"
+  ],
+  "known_limitations": [
+    "Oblique stereo swath leaves diagonal no-data regions inside the bounding box; never interpolate across missing swath corners."
+  ],
+  "processing_history": [
+    "Catalog record discovered via HiriseSourceAdapter"
+  ],
+  "local_file_path": "raw/dteec_040770_1755_039280_1755_u01.img",
+  "local_label_path": "raw/dteec_040770_1755_039280_1755_u01.img",
+  "processed_file_path": null
+}

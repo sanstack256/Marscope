@@ -86,3 +86,16 @@ Candidate locations are ranked strictly by transparent physical and spatial metr
 The imagery catalogue preserves coordinate convention and CRS separately from coordinates. ODE states its search bounding boxes use planetocentric latitude and positive-east longitude 0–360; this convention is not applied to other sources without evidence. Earth WGS84 is not used for Mars image associations.
 
 Panorama eligibility defaults to `panorama_eligibility_unverified`. A product is not considered cylindrical/360-degree eligible unless image content, dimensions, projection, horizontal and vertical angular coverage, orientation when available, camera/instrument metadata, and observation/geographic association are established from the product and label. Dataset or product names alone are insufficient. No indexed record has yet been classified as panorama eligible.
+
+---
+
+## 10. Prompt 11 Science-Aware Route Optimization & Slope Preservation Methodology
+
+1. **Three Explicit Planning Modes (`backend/app/routing/models.py`):**
+   - `Conservative Terrain-Avoidance` (`effective_slope_limit_factor = 0.80`, `slope_weight = 4.5`, `uphill_weight = 3.2`, `roughness_weight = 1.25`, `nodata_proximity_weight = 1.50`): Tightens user slope limit by 20% and avoids steep/rough/edge terrain.
+   - `Balanced Traverse` (`factor = 1.0`, `slope_weight = 1.8`, `uphill_weight = 1.6`, `roughness_weight = 0.55`): Balances path length against slope effort and terrain ruggedness.
+   - `Science-Priority Corridor` (`factor = 1.0`, `science_corridor_bonus = 0.50`, `min_cost_multiplier = 0.45`): Rewards corridors passing within `150 m` of verified APXS, ChemCam LIBS, CheMin XRD composition evidence or selected `ScienceTarget` sites without overriding slope or NoData constraints.
+2. **Obstacle & Relief Integrity Along Simplification (`pathfinder.py`, `service.py`):**
+   - Orthogonal passability guards prohibit diagonal corner-cutting adjacent to NoData or excessive-slope cells (`strict_no_corner_cutting`).
+   - `simplify_leg_safely()` enforces Bresenham/supercover line-of-sight passability checks plus a 3D vertical chord deviation bound ($\le \min(2.5, \max(1.0, 0.4\epsilon))$ m) so steep ridges or troughs are preserved as intermediate vertices.
+   - Summary `mean_slope_deg`, `max_slope_deg`, and `mean_roughness_tri_m` aggregate over **all raw traversed DEM grid cells** (`leg_res.cells`) rather than simplified polyline vertices alone.

@@ -371,15 +371,39 @@ def _extract_rmc_info(parsed: Dict[str, Any]) -> Dict[str, Any]:
     return info
 
 
+def _read_pds3_header_text(label_path: Path, max_bytes: int = 262_144) -> str:
+    """
+    Read PDS3 ODL label text safely. For attached-label binary rasters (.IMG) whose
+    payload follows the ASCII header ending at a standalone 'END' statement, stop
+    reading once END is seen or max_bytes is reached instead of loading gigabytes.
+    """
+    file_size = label_path.stat().st_size
+    if file_size <= max_bytes:
+        return label_path.read_text(encoding="utf-8", errors="replace")
+
+    lines: List[str] = []
+    bytes_read = 0
+    with label_path.open("rb") as fh:
+        for raw_line in fh:
+            bytes_read += len(raw_line)
+            text_line = raw_line.decode("utf-8", errors="replace")
+            lines.append(text_line)
+            if text_line.strip() == "END":
+                break
+            if bytes_read >= max_bytes:
+                break
+    return "".join(lines)
+
+
 def extract_pds3_metadata(label_path: Path) -> Dict[str, Any]:
     """
     Extract verified cartographic, observation, unit, table-schema, and planetary radii
-    metadata from a PDS3 .LBL file.
+    metadata from a PDS3 .LBL file or attached-label .IMG header.
     """
     if not label_path.exists():
         raise FileNotFoundError(f"PDS3 label not found: {label_path}")
 
-    text = label_path.read_text(encoding="utf-8", errors="replace")
+    text = _read_pds3_header_text(label_path)
     parsed = parse_pds3_odl(text)
 
     img_obj = parsed.get("_OBJECTS", {}).get("IMAGE", {})

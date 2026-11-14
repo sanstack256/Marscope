@@ -28,8 +28,8 @@ Future human surface operations on Mars ("Marswalks") will be constrained by hyp
 1. **Multimodal Planetary Data Fusion:** Co-registers sub-meter MRO HiRISE imagery, regional CTX mosaics, MOLA global topography, CRISM hyperspectral mineralogy, THEMIS thermal inertia, and MSL Curiosity in-situ observations.
 2. **Topographic & Hazard Modeling:** High-resolution slope, aspect, and Terrain Ruggedness Index (TRI) processing from Digital Elevation Models.
 3. **Dedicated Physics Engine:** Deterministic calculation of Martian gravitational forces, potential energy, atmospheric density profiles, uphill climbing resistance, and cumulative radiation doses.
-4. **Constrained Path Optimization:** Multi-objective graph pathfinding (A*, Dijkstra) enforcing strict astronaut return-to-base margins ($1.5\times$ return reserve) and critical slope thresholds ($< 25^\circ$).
-5. **Interactive 3D Planetary Workspace:** CesiumJS 3D Mars globe with MapLibre GL 2D fallback, elevation profile cross-sections, and step-by-step EVA simulation scrubbers.
+4. **Science-Aware Constrained Path Optimization:** 8-connected directed graph pathfinding (A* and Dijkstra across real NASA HiRISE/MOLA DEMs) supporting `Conservative`, `Balanced`, and `Science-Priority` policies, strict diagonal obstacle corner checks, 3D elevation/obstacle-verified route simplification, optional user-configured return-to-base reserves, and True/Grid North turn-by-turn navigation.
+5. **Interactive Dual-Engine 3D Planetary Workspace:** Interactive Three.js LOD 0–2 heightfield mesh viewer (`LocalTerrain3DViewer`) draped with orthorectified HiRISE imagery / slope / elevation / TRI overlays, synchronized with the CesiumJS 3D Mars globe (with `HeightmapTerrainData` HiRISE/MOLA DEM terrain provider) across Side-by-Side Split, 3D DEM, and Global views.
 6. **Full Provenance & Open-Science Transparency:** Every layer, waypoint, and observation traces directly to an official NASA Planetary Data System (PDS) Product ID and verified open license.
 
 ---
@@ -40,8 +40,7 @@ Future human surface operations on Mars ("Marswalks") will be constrained by hyp
 - **Framework:** Next.js (App Router, React 18+, Server & Client Components)
 - **Language:** TypeScript (Strict Type Checking)
 - **Styling:** Tailwind CSS (Aerospace Dark Design Token System)
-- **3D Geospatial Engine:** CesiumJS (Configured with IAU2000:49900 Mars Reference Ellipsoid)
-- **2D Geospatial Engine:** MapLibre GL JS
+- **3D Geospatial & Mesh Engines:** Three.js (`LocalTerrain3DViewer`, WebGL LOD `0..2` DEM meshes with draped HiRISE ortho/derivative textures) + CesiumJS (IAU2000:49900 Mars Reference Ellipsoid with `HeightmapTerrainData` local HiRISE/MOLA DEM terrain provider)
 - **State Management:** Zustand
 - **Telemetry & Charts:** Recharts
 - **Icons:** Lucide React
@@ -83,9 +82,9 @@ Marscope/
 │   ├── manifests/
 │   ├── raw/                # Raw NASA products (git-ignored)
 │   └── processed/          # Derived COGs (git-ignored)
-├── frontend/               # Next.js 14 / TypeScript / CesiumJS Web Application
+├── frontend/               # Next.js 16 / TypeScript / Three.js / CesiumJS Web App
 │   └── src/
-│       ├── app/            # App Router (9 specialized mission pages)
+│       ├── app/            # App Router (10 specialized mission pages)
 │       ├── components/     # UI components (3D Globe, Navigation, Panels)
 │       ├── stores/         # Zustand state stores
 │       ├── types/          # TypeScript domain definitions
@@ -167,31 +166,33 @@ MARSCOPE strictly enforces an anti-fabrication standard:
 
 ## 7. Current Project Status & Reproducible Build
 
-- **Phase:** Prompt 8 mobility backend remains present; Prompt 9 explorer work is partial. No four-mode terrain/panorama explorer is claimed complete.
+- **Phase:** Prompt 11 Real 3D Martian Terrain, Science-Aware Route Computation & Astronaut Navigation System is implemented and verified alongside the Scientific Discovery Engine (Prompts 4–7), Human Mobility Intelligence Engine (Prompt 8), and NASA Imagery Product Catalogue (Prompt 9).
 - **Pre-Implementation Scientific Corrections (Part A):**
   1. **Zero-Measurement Semantics (`app/science/composition/value_semantics.py`):** Numerical zero values (`0.0`) across APXS, ChemCam MOC, and CheMin RDR5 are never automatically classified as below-detection-limit (`BELOW_DETECTION_LIMIT`). They are preserved with `value_semantics = "reported_numerical_zero_unresolved_semantics"` and `source_interpretation_note` unless the source PDS3/PDS4 label explicitly declares a detection-limit constant (`source_defined_below_detection_limit`) or missing constant (`source_defined_missing`).
   2. **No Silent DEM Footprint Expansion (`app/terrain/processor.py`, `app/geospatial/alignment.py`):** `DEMProcessingService` (`PROCESSING_VERSION = "2.0.0"`, `FOOTPRINT_POLICY = "no_expansion_v1"`) never enlarges a requested study region when it contains fewer than `3x3` whole source pixels on a coarse DEM; it raises `InsufficientDEMCoverageError` with a structured `InsufficientCoverageReport` (`requested_bounds_modified = False`).
   3. **No Default 25° Safety-Threshold Semantics (`app/schemas/terrain.py`, `app/terrain/summary.py`, `app/physics/registry/parameters.py`):** Removed hardcoded `critical_slope_threshold_deg = 25.0` safety-limit defaults; replaced with optional user-configured `PlanningSlopeThreshold` (`parameter_class = "user_configured_planning_assumption"`, `is_validated_safety_limit = False`).
   4. **Reader Lease Protection Across Concurrent Index Rebuilds (`app/science/composition/index.py`):** Readers acquire per-process leases (`acquire_generation_lease()`), preventing `publish_generation()` pruning from deleting an in-flight generation directory while a query or manifest verification is executing.
 - **Human Mobility Intelligence Engine (`app/mobility/`, `/api/mobility/*`):**
-  - **DEM Inventory & Resolution Suitability (`resolution.py`):** Explicitly distinguishes `regional_elevation_analysis`, `local_slope_analysis`, `regional_roughness_analysis`, and `small_scale_obstacle_detection` so coarse orbital DEMs (MOLA MEGDR 4 ppd, ~14.8 km native / ~6.6 km gridded pixel spacing) are never presented as local human-scale slope or obstacle maps.
+  - **DEM Inventory & Resolution Suitability (`resolution.py`):** Explicitly distinguishes `regional_elevation_analysis`, `local_slope_analysis`, `regional_roughness_analysis`, and `small_scale_obstacle_detection` (`policy_id`, `policy_version`, `threshold_classification` from `backend/app/mobility/policies/resolution_v1.json`) so coarse orbital DEMs (MOLA MEGDR 4 ppd, ~14.8 km native / ~6.6 km gridded pixel spacing) are never presented as local human-scale slope or obstacle maps. `route_optimization_enabled = true`, while `safety_certification_enabled = false`.
   - **Windowed Terrain Features & Spatially Explicit Elevation Profiles (`terrain_features.py`):** Computes elevation (`meters`), Horn (1981) `3x3` slope (`degrees`), compass aspect (`[0, 360)` clockwise from North; flat cells undefined), metric TRI roughness (`meters`), and 2-point or polyline elevation gain/loss transects with contiguous `nodata_gap_segments`.
   - **5-State Spatial Coverage Intelligence (`coverage.py`):** Distinguishes `outside_source_footprint`, `inside_footprint_nodata`, `valid_source_data`, `insufficient_resolution_for_analysis`, and `derivative_unavailable_invalid_neighborhood`.
   - **Configurable `MobilityScenario`, Transparent `TraversalModel` & `TraversalCostSurface` (`mobility_scenario.py`, `traversal_model.py`, `cost_surface.py`):** Strict separation between scenario-independent physical measurements ($W = m \cdot g_{\text{Mars}}$, $\Delta PE = m \cdot g_{\text{Mars}} \cdot \Delta h$, $F_{\parallel} = m \cdot g_{\text{Mars}} \sin\theta$) and scenario-dependent traversal estimates ($t = d / v_{\text{eff}}$), with zero default walking speeds, zero physiological/oxygen/fatigue fabrication, zero safe/unsafe claims, and `null` cost on unknown/no-data terrain.
+- **Real 3D Terrain Mesh & Science-Aware Route Planning (Prompt 11):**
+  - **3D Heightfield Mesh & Texture Streaming (`app/terrain/mesh.py`, `app/api/terrain_mesh.py`):** Serves tiled `LOD 0..2` DEM meshes over real NASA HiRISE DTMs (`DTEEC_009149_1750_009294_1750_U01.IMG`, `DTEEC_040770_1755_039280_1755_U01.IMG`, 1.01 m/px) and MOLA MEGDR 128 ppd (`MEGT00N090HB.IMG`, 463 m/px), with bit-identical seam vertex coordinates, omitted NoData (`valid_mask === 0`) triangles, `HeightGridResponse` (`grid_rows`, `grid_cols`, `elevations_m`) for CesiumJS `HeightmapTerrainData`, and aligned PNG imagery/derivative overlays (`ortho`, `elevation`, `slope`, `roughness`).
+  - **Science-Aware Graph Routing (`app/routing/`, `/api/routing/*`):** 8-connected directed grid pathfinder (A* and Dijkstra verified identical optimal cost across all modes), strict orthogonal passability checks preventing corner-cutting across steep cliffs or NoData cells, 3D elevation + obstacle-checked polyline simplification, `Conservative` vs `Balanced` vs `Science-Priority` mode comparison (`/routes`), honest optional user-configured duration & gravitational climb work $m \cdot g_{\text{Mars}} \cdot \Delta h$ without unvalidated metabolic or $\text{O}_2$ curve fabrication, True North (`°T`) and Equirectangular Grid North (`°G`) instructions (`/planner`), interactive 3D traversal playback (`/simulation`), and GeoJSON export.
 - **Reproducible Offline Index Rebuild:**
   ```bash
   PYTHONPATH=backend python3 backend/scripts/rebuild_composition_index.py [--strict] [--acquire]
   ```
-- **Automated Verification:** Verified backend unit/integration test suite (`pytest`, 71 tests) and clean Next.js TypeScript/ESLint production build. Route optimization and pathfinding remain intentionally outside this milestone's scope.
+- **Automated & Browser Verification (Prompt 11):**
+  - Backend pytest suite: `backend/tests/test_prompt11_{terrain_mesh,routing,real_nasa_integration}.py` + prior suites (`test_geospatial`, `test_catalog`, `test_pds_parsing_and_coords`, `test_composition_discovery`, `test_prompt5/6/7/8`, `test_imagery_catalogue`) verified cleanly offline/with local NASA products (`NASA_INTEGRATION=1` network suite remains opt-in).
+  - Frontend verification: `npx tsc --noEmit`, `npm run lint`, and `npm run build` (`15/15` static routes), plus live headless Chrome CDP E2E walkthrough across all 10 App Router routes confirming zero console errors, zero page errors, zero React update loops, zero HTTP 5xx, dual Three.js + Cesium WebGL rendering, and live route computation/comparison/playback on `DTEEC_009149_1750_009294_1750_U01.IMG`.
 
-### Explorer status and limitations (2026-11-14)
+### Explorer status and remaining known scope bounds (2026-11-14)
 
-- Cesium starts at a global Mars view, supports its 3D/2D/Columbus scene modes, and uses the existing dynamically discovered layer catalog. Clicking the globe still selects a destination.
-- Idle scene rendering is disabled through Cesium request-render mode. Camera telemetry is sampled at most every 250 ms while moving and refreshed on move end. The displayed scale is measured from two globe intersections 40 canvas pixels apart; it is unavailable when those rays do not intersect the globe.
-- Candidate, destination, and manually configured position markers are diffed by stable IDs in a named `CustomDataSource`; unrelated entities are no longer cleared on every state change.
-- No verified local Navcam panorama products or DEM terrain-mesh service are present in this workspace. The current explorer does **not** provide a real panorama viewer, panorama discovery API, synchronized four-mode workflow, or DEM-derived ground 3D. The globe still uses an ellipsoid terrain provider. These are remaining milestone requirements.
-- Resolution suitability thresholds now live in `backend/app/mobility/policies/resolution_v1.json` (`1.0.0`). Their provenance and classification are returned with each assessment. They are engineering screens or unvalidated heuristics and do not establish detection capability, source accuracy, or route safety.
-- No performance benchmark or NASA panorama acquisition was performed; the interaction claims above describe code changes, not measured FPS improvements.
+- `/explorer` provides `3D Terrain DEM` (Three.js LOD 0–2 interactive surface viewer with HiRISE ortho draping, click-to-set Start/Waypoint/Destination, targets, and 3D route polylines), `Split View`, and `Mars Globe` (Cesium 3D/2D/Columbus scene modes with `createMarscopeDemTerrainProvider` local DEM relief). Camera telemetry is throttled in Cesium request-render mode and scale bar rays degrade cleanly when off-limb.
+- **MSL Navcam Panorama Viewer Remains Deferred:** No individual verified MSL Navcam RDR panorama image/label has been acquired from PDS ODE/Atlas (ODE returns `Invalid IIPT` on `MSL/NAVCAM/RDR` and exact Atlas `navcam` query returns zero), so no fake panorama station or unverified 360° image view is presented.
+- **No Unvalidated Physiological / Safety Claims:** Route feasibility reflects DEM terrain geometry and explicitly declared user constraints (`safety_certification_enabled = false`); metabolic rate, $\text{O}_2$ remaining, and suit battery curves remain explicitly labeled `Not Modeled (Unvalidated)`.
 
 ## NASA imagery catalogue
 

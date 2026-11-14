@@ -1,0 +1,77 @@
+{
+  "id": "mars_trek_curiosity_hirise",
+  "product_id": "curiosity_hirise_mosaic",
+  "product_title": "NASA Mars Trek Gale Crater HiRISE 0.25 m/px Basemap Mosaic",
+  "product_type": "IMAGERY / Local High-Resolution Basemap",
+  "mission": "Mars Reconnaissance Orbiter (MRO)",
+  "instrument": "High Resolution Imaging Science Experiment (HiRISE)",
+  "source_archive": "NASA Solar System Treks (Mars Trek WMTS)",
+  "original_product_url": "https://trek.nasa.gov/tiles/Mars/EQ/curiosity_hirise_mosaic/1.0.0/default/default028mm/{z}/{y}/{x}.png",
+  "original_label_url": "https://trek.nasa.gov/tiles/Mars/EQ/curiosity_hirise_mosaic/1.0.0/WMTSCapabilities.xml",
+  "doi_or_pds_id": null,
+  "license": "NASA Public Domain / US Govt Open",
+  "attribution": "NASA/JPL/University of Arizona/Mars Trek",
+  "acquisition_timestamp": null,
+  "observation_sol": null,
+  "processing_level": "Controlled Local HiRISE Mosaic (PNG WMTS Zoom 0-16)",
+  "calibration_status": "Visual controlled orbital mosaic (not metric elevation)",
+  "coverage": {
+    "min_latitude": -4.9255,
+    "max_latitude": -4.249,
+    "min_longitude": 137.1225,
+    "max_longitude": 137.7298,
+    "center_latitude": -4.58725,
+    "center_longitude": 137.42615,
+    "longitude_range": "[-180, 180]"
+  },
+  "coordinate_reference_system": "IAU2000:49900",
+  "latitude_convention": "Planetocentric",
+  "longitude_direction": "East",
+  "map_projection": "Simple Cylindrical Equirectangular (OGC WMTS default028mm)",
+  "planetary_radii_m": {
+    "a": 3396190.0,
+    "b": 3376200.0,
+    "c": 3376200.0
+  },
+  "horizontal_resolution_meters": 0.25,
+  "vertical_resolution_meters": null,
+  "units": "RGBA digital imagery (visual basemap)",
+  "nodata_value": null,
+  "data_format": "OGC WMTS / PNG tiles (Zoom 0-16)",
+  "file_size_bytes": null,
+  "sha256_checksum": null,
+  "status": "available",
+  "verification": {
+    "archive_availability": "verified",
+    "product_discovery": "verified",
+    "metadata_verification": "verified",
+    "license_verification": "verified",
+    "coverage_verification": "verified",
+    "download_verification": "not_applicable",
+    "processing_verification": "not_applicable",
+    "field_verification": {
+      "crs": "verified",
+      "resolution": "verified",
+      "coverage": "verified"
+    },
+    "evidence_notes": [
+      "Regional Gale Crater HiRISE WMTS endpoint (zoom 0..16, bbox 137.1225..137.7298E).",
+      "Verified WMTSCapabilities.xml HTTP 200 and live tile HTTP 200 over Gale Crater."
+    ],
+    "last_checked_utc": "2026-11-14T14:28:36.420458Z"
+  },
+  "failure_reason": null,
+  "quality_flags": [
+    "High-Resolution Gale Crater Coverage"
+  ],
+  "known_limitations": [
+    "Covers Gale Crater Curiosity corridor only (-4.9255..-4.2490, 137.1225..137.7298).",
+    "Visual RGBA mosaic only; quantitative elevation requires HiRISE/MOLA DEM products."
+  ],
+  "processing_history": [
+    "Catalog record discovered via MarsTrekSourceAdapter"
+  ],
+  "local_file_path": null,
+  "local_label_path": null,
+  "processed_file_path": null
+}

@@ -259,11 +259,31 @@ def evaluate_region_coverage_intelligence(
         elif nodata is None:
             nodata = -32768.0
 
+        max_cov_pixels = 2_000_000
+        win_px = int(win.width) * int(win.height)
         if src.crs and src.crs.is_projected:
             with WarpedVRT(src, crs=rio_crs) as vrt:
-                dem_arr = vrt.read(1, window=win).astype(np.float64)
+                if win_px > max_cov_pixels:
+                    from rasterio.enums import Resampling
+                    stride = max(2, int(math.ceil(math.sqrt(win_px / float(max_cov_pixels)))))
+                    out_h = max(3, int(win.height) // stride)
+                    out_w = max(3, int(win.width) // stride)
+                    dem_arr = vrt.read(1, window=win, out_shape=(out_h, out_w), resampling=Resampling.nearest).astype(np.float64)
+                    dx_m *= (float(win.width) / float(out_w))
+                    dy_m *= (float(win.height) / float(out_h))
+                else:
+                    dem_arr = vrt.read(1, window=win).astype(np.float64)
         else:
-            dem_arr = src.read(1, window=win).astype(np.float64)
+            if win_px > max_cov_pixels:
+                from rasterio.enums import Resampling
+                stride = max(2, int(math.ceil(math.sqrt(win_px / float(max_cov_pixels)))))
+                out_h = max(3, int(win.height) // stride)
+                out_w = max(3, int(win.width) // stride)
+                dem_arr = src.read(1, window=win, out_shape=(out_h, out_w), resampling=Resampling.nearest).astype(np.float64)
+                dx_m *= (float(win.width) / float(out_w))
+                dy_m *= (float(win.height) / float(out_h))
+            else:
+                dem_arr = src.read(1, window=win).astype(np.float64)
 
     valid_elev_mask = np.isfinite(dem_arr) & (dem_arr != float(nodata)) & (dem_arr > -32000.0)
     nodata_mask = ~valid_elev_mask
