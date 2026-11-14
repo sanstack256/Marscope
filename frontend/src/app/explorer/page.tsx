@@ -1160,12 +1160,21 @@ export default function SurfaceExplorerPage() {
                             {inspectedEvidence.canonical_species_id} ({inspectedEvidence.evidence_type})
                           </div>
                           <div>
-                            Raw: {inspectedEvidence.raw_value ?? "N/A"} {inspectedEvidence.raw_unit || ""} → Norm:{" "}
+                            Raw: {inspectedEvidence.raw_value ?? "N/A"} {inspectedEvidence.raw_unit || ""}{" "}
+                            {inspectedEvidence.source_raw_token ? `[token: "${inspectedEvidence.source_raw_token}"] ` : ""}→ Norm:{" "}
                             {inspectedEvidence.normalized_value?.toFixed(3) ?? "N/A"} {inspectedEvidence.normalized_unit || ""}
                             {inspectedEvidence.uncertainty_value != null
                               ? ` (±${inspectedEvidence.uncertainty_value.toFixed(3)} ${inspectedEvidence.uncertainty_unit || ""} ${inspectedEvidence.uncertainty_type || ""})`
                               : " (primary uncert: Unreported in source)"}
                           </div>
+                          {inspectedEvidence.value_semantics && (
+                            <div className="text-sky-300/90">
+                              Value Semantics: {inspectedEvidence.value_semantics}
+                              {inspectedEvidence.source_interpretation_note
+                                ? ` · ${inspectedEvidence.source_interpretation_note}`
+                                : ""}
+                            </div>
+                          )}
                           {inspectedEvidence.secondary_uncertainty_value != null && (
                             <div className="text-slate-400">
                               Secondary Uncert: ±{inspectedEvidence.secondary_uncertainty_value.toFixed(3)}{" "}

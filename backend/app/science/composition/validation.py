@@ -179,7 +179,32 @@ def validate_composition_evidence(
         )
     ok(5, "species_vocabulary_validation", f"Resolved canonical {spec.category.value} '{spec.canonical_id}'.")
 
-    # Stage 6: Numeric, null, negative & <LOD integrity
+    # Stage 6: Numeric, null, negative & source-defined detection-limit integrity (Prompt 8 semantics)
+    sem = getattr(ev, "value_semantics", "reported_value")
+    if sem == "source_defined_below_detection_limit":
+        return fail(
+            6,
+            "numeric_and_lod_integrity",
+            "BELOW_DETECTION_LIMIT",
+            f"Source label defines this value for '{ev.canonical_species_id}' as below detection limit "
+            f"({ev.source_interpretation_note}); not counted as a positive detection.",
+        )
+    if sem == "source_defined_missing":
+        return fail(
+            6,
+            "numeric_and_lod_integrity",
+            "SOURCE_DEFINED_MISSING_VALUE",
+            f"Source label defines this value for '{ev.canonical_species_id}' as a missing/invalid special constant "
+            f"({ev.source_interpretation_note}).",
+        )
+    if ev.evidence_status == EvidenceStatus.BELOW_DETECTION_LIMIT:
+        return fail(
+            6,
+            "numeric_and_lod_integrity",
+            "UNSUPPORTED_BDL_INFERENCE",
+            f"Evidence for '{ev.canonical_species_id}' is marked below-detection-limit but the source does not "
+            "define below-detection-limit semantics; a zero or absent uncertainty never establishes BDL.",
+        )
     if ev.raw_value is None or not math.isfinite(ev.raw_value):
         return fail(
             6,
@@ -194,14 +219,25 @@ def validate_composition_evidence(
             "NEGATIVE_PHYSICAL_VALUE",
             f"Non-physical negative concentration ({ev.raw_value} {ev.raw_unit}) rejected.",
         )
-    if ev.evidence_status == EvidenceStatus.BELOW_DETECTION_LIMIT:
-        return fail(
+    if sem == "reported_numerical_zero_unresolved_semantics":
+        if ev.evidence_status not in (EvidenceStatus.MEASURED, EvidenceStatus.UNLOCATED):
+            return fail(
+                6,
+                "numeric_and_lod_integrity",
+                "ZERO_SEMANTICS_STATUS_MISMATCH",
+                "A reported zero with unresolved semantics must be preserved as a measured/unlocated record.",
+            )
+        ok(
             6,
             "numeric_and_lod_integrity",
-            "BELOW_DETECTION_LIMIT",
-            f"Measurement for '{ev.canonical_species_id}' reported below detection limit (not counted as positive detection).",
+            f"Reported numerical zero preserved ({ev.raw_value} {ev.raw_unit}); source does not define it as "
+            "below-detection-limit (unresolved zero semantics, no detection limit assumed).",
         )
-    ok(6, "numeric_and_lod_integrity", f"Finite non-negative value {ev.raw_value} {ev.raw_unit}.")
+        sem_zero = True
+    else:
+        sem_zero = False
+    if not sem_zero:
+        ok(6, "numeric_and_lod_integrity", f"Finite non-negative value {ev.raw_value} {ev.raw_unit}.")
 
     # Stage 7: Physical abundance bounds check
     if ev.normalized_value is None or not math.isfinite(ev.normalized_value):

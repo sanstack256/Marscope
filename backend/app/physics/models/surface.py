@@ -172,10 +172,7 @@ def calculate_uphill_parallel_force(mass_kg: float, slope_degrees: float) -> Phy
     theta_rad = math.radians(slope_degrees)
     force_n = mass_kg * g_param.value * math.sin(theta_rad)
 
-    warnings: List[str] = []
-    crit_slope = get_parameter("critical_slope_threshold")
-    if crit_slope and slope_degrees > crit_slope.value:
-        warnings.append(f"Slope ({slope_degrees}°) exceeds critical safety threshold ({crit_slope.value}°). Severe slip hazard!")
+    warnings: List[str] = []  # No slope safety threshold is asserted (none is validated).
 
     return PhysicsCalculationResult(
         model_name="uphill_gravitational_resisting_force",

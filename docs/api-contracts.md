@@ -135,3 +135,28 @@ All endpoints are served under the `/api` prefix by the FastAPI backend. Standar
 
 ### `GET /api/sources`
 - **Description:** Returns complete dataset registry matching `DATA_SOURCES.md`, including PDS product identifiers, licensing status, and citations.
+
+---
+
+## 6. Prompt 8 Human Mobility Intelligence Endpoints (`/api/mobility/*`)
+
+### `GET /api/mobility/status`
+- **Description:** Returns DEM inventory, download/processing status, per-scale resolution suitability (`regional_elevation_analysis`, `local_slope_analysis`, `regional_roughness_analysis`, `small_scale_obstacle_detection`), and explicit confirmation that `route_optimization_enabled = false` and `safety_certification_enabled = false`.
+
+### `GET /api/mobility/terrain/features`
+- **Description:** Extracts windowed elevation (`meters`), Horn `3x3` slope (`degrees`), compass aspect (`[0, 360)` clockwise from North; flat cells undefined), and metric TRI roughness (`meters`) over `[min_lat, max_lat, min_lon, max_lon]`. Never enlarges requested bounds; raises HTTP `422` with a structured `InsufficientCoverageReport` if the window intersects fewer than `3x3` whole source pixels.
+
+### `GET /api/mobility/coverage`
+- **Description:** Returns 5-state spatial coverage intelligence (`outside_source_footprint`, `inside_footprint_nodata`, `valid_source_data`, `insufficient_resolution_for_analysis`, `derivative_unavailable_invalid_neighborhood`), covered/uncovered area in $\text{km}^2$, and optional `insufficient_coverage_report`.
+
+### `POST /api/mobility/scenarios`, `GET /api/mobility/scenarios`, `GET /api/mobility/scenarios/{scenario_id}`
+- **Description:** Creates, lists, and inspects versioned `MobilityScenario` configurations. Every parameter records its `ParameterOriginType` (`verified_planetary_constant`, `user_configured_assumption`, `optional_heuristic_rule`, or `unavailable`).
+
+### `POST /api/mobility/elevation-profile`
+- **Description:** Computes a geodesic elevation profile and cumulative positive gain / negative loss / net change between `start` and `end` or along `waypoints` (`>= 2` points), including contiguous `nodata_gap_segments`.
+
+### `POST /api/mobility/evaluate`
+- **Description:** Evaluates a transect (`waypoints`) or bounding box (`bounds`) under a saved `scenario_id` or `inline_scenario`, strictly separating `physical_measurements` from `scenario_traversal_estimates`.
+
+### `GET /api/mobility/cost-surface/metadata`
+- **Description:** Computes and returns a spatially explicit `CostSurfaceSummary` over `[min_lat, max_lat, min_lon, max_lon]` for a given `dataset_id` and `scenario_id`, preserving `null` cost on unknown/no-data terrain and distinguishing `explicit_scenario_exclusion` without emitting `"safe"` or `"unsafe"` labels.

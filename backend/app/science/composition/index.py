@@ -10,6 +10,7 @@ Stores validated geochemical and mineralogical CompositionEvidence in SQLite wit
   - Automatic full or incremental discovery across raw NASA PDS artifacts
 """
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
 import fnmatch
@@ -19,7 +20,8 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+import threading
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 import uuid
 from app.geospatial.crs import normalize_longitude_360
 from app.ingestion.pds_label import extract_pds3_metadata, parse_pds4_table_delimited
@@ -293,6 +295,8 @@ class CompositionSpatialIndex:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lease_thread_lock = threading.Lock()
+        self._in_process_leases: Dict[str, int] = {}
         self.rtree_enabled = self._detect_rtree_support()
         if self.db_path.exists() and not self._pointer_path().exists():
             self.rtree_enabled = self._init_schema_on(self.db_path, wal_mode=True)
@@ -314,6 +318,120 @@ class CompositionSpatialIndex:
         if self._is_default_db_name():
             return self.db_path.parent / ".publish.lock"
         return self.db_path.parent / f".{self.db_path.stem}.publish.lock"
+
+    def _lease_lock_path(self) -> Path:
+        if self._is_default_db_name():
+            return self.db_path.parent / ".generation_lease.lock"
+        return self.db_path.parent / f".{self.db_path.stem}.generation_lease.lock"
+
+    @staticmethod
+    def _is_pid_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def _has_active_reader_lease(self, gen_dir: Path) -> bool:
+        """
+        Return True if `gen_dir` has any active in-process or cross-process reader lease.
+        Cleans up stale lease files left by terminated OS processes.
+        Caller must hold `_lease_thread_lock` and exclusive flock on `_lease_lock_path()`.
+        """
+        if self._in_process_leases.get(gen_dir.name, 0) > 0:
+            return True
+        if not gen_dir.exists():
+            return False
+        active_found = False
+        for lf in gen_dir.glob(".reader_lease_*.lease"):
+            parts = lf.stem.split("_")
+            # format: .reader_lease_<pid>_<nonce>
+            pid_val: Optional[int] = None
+            if len(parts) >= 3:
+                try:
+                    pid_val = int(parts[2])
+                except ValueError:
+                    pid_val = None
+            if pid_val is not None and not self._is_pid_alive(pid_val):
+                try:
+                    lf.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                continue
+            active_found = True
+        return active_found
+
+    @contextmanager
+    def acquire_generation_lease(
+        self,
+    ) -> Iterator[Tuple[Optional[Path], Optional[Path], Optional[Dict[str, Any]], List[str]]]:
+        """
+        Atomically resolve the active generation and register a reader lease on its
+        immutable generation directory before any concurrent publisher can prune it.
+        While this context manager is held, `publish_generation()` will never delete
+        the leased generation directory even across arbitrarily many subsequent rebuilds.
+        """
+        lease_lock_file = self._lease_lock_path()
+        lease_lock_file.parent.mkdir(parents=True, exist_ok=True)
+        lease_file_path: Optional[Path] = None
+        leased_dir_name: Optional[str] = None
+
+        with self._lease_thread_lock:
+            with lease_lock_file.open("a+", encoding="utf-8") as lfh:
+                fcntl.flock(lfh.fileno(), fcntl.LOCK_EX)
+                try:
+                    db_p, mf_p, ptr, ptr_errs = self._resolve_active_paths()
+                    if ptr is not None and db_p is not None:
+                        gen_dir = Path(str(ptr.get("generation_dir") or db_p.parent))
+                        if gen_dir.exists() and gen_dir.is_dir() and gen_dir.parent == self._generations_dir():
+                            leased_dir_name = gen_dir.name
+                            self._in_process_leases[leased_dir_name] = (
+                                self._in_process_leases.get(leased_dir_name, 0) + 1
+                            )
+                            lease_file_path = (
+                                gen_dir / f".reader_lease_{os.getpid()}_{uuid.uuid4().hex[:12]}.lease"
+                            )
+                            try:
+                                lease_file_path.write_text(
+                                    json.dumps(
+                                        {
+                                            "pid": os.getpid(),
+                                            "generation_id": ptr.get("active_generation_id"),
+                                            "acquired_at_utc": datetime.now(timezone.utc).isoformat(),
+                                        }
+                                    ),
+                                    encoding="utf-8",
+                                )
+                            except OSError:
+                                lease_file_path = None
+                finally:
+                    fcntl.flock(lfh.fileno(), fcntl.LOCK_UN)
+
+        try:
+            yield db_p, mf_p, ptr, ptr_errs
+        finally:
+            if leased_dir_name is not None or lease_file_path is not None:
+                with self._lease_thread_lock:
+                    with lease_lock_file.open("a+", encoding="utf-8") as lfh:
+                        fcntl.flock(lfh.fileno(), fcntl.LOCK_EX)
+                        try:
+                            if leased_dir_name is not None:
+                                rem = self._in_process_leases.get(leased_dir_name, 0) - 1
+                                if rem <= 0:
+                                    self._in_process_leases.pop(leased_dir_name, None)
+                                else:
+                                    self._in_process_leases[leased_dir_name] = rem
+                            if lease_file_path is not None:
+                                try:
+                                    lease_file_path.unlink(missing_ok=True)
+                                except OSError:
+                                    pass
+                        finally:
+                            fcntl.flock(lfh.fileno(), fcntl.LOCK_UN)
 
     def _legacy_manifest_path(self) -> Path:
         if self._is_default_db_name():
@@ -538,21 +656,21 @@ class CompositionSpatialIndex:
         return self._init_schema_on(self.db_path, wal_mode=True)
 
     def get_active_generation(self) -> Optional[sqlite3.Row]:
-        db_p, _, ptr, ptr_errs = self._resolve_active_paths()
-        if ptr_errs or db_p is None or not db_p.exists():
-            return None
-        try:
-            with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
-                if ptr and ptr.get("active_generation_id"):
+        with self.acquire_generation_lease() as (db_p, _, ptr, ptr_errs):
+            if ptr_errs or db_p is None or not db_p.exists():
+                return None
+            try:
+                with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
+                    if ptr and ptr.get("active_generation_id"):
+                        return conn.execute(
+                            "SELECT * FROM index_generations WHERE generation_id = ? AND status = 'active' LIMIT 1",
+                            (ptr["active_generation_id"],),
+                        ).fetchone()
                     return conn.execute(
-                        "SELECT * FROM index_generations WHERE generation_id = ? AND status = 'active' LIMIT 1",
-                        (ptr["active_generation_id"],),
+                        "SELECT * FROM index_generations WHERE status = 'active' ORDER BY created_at_utc DESC LIMIT 1"
                     ).fetchone()
-                return conn.execute(
-                    "SELECT * FROM index_generations WHERE status = 'active' ORDER BY created_at_utc DESC LIMIT 1"
-                ).fetchone()
-        except sqlite3.Error:
-            return None
+            except sqlite3.Error:
+                return None
 
     def _validate_staged_generation(
         self,
@@ -967,24 +1085,36 @@ class CompositionSpatialIndex:
                         pfh.write(json.dumps(pointer_payload, indent=2, sort_keys=True, ensure_ascii=False))
                         pfh.flush()
                         os.fsync(pfh.fileno())
-                    os.replace(tmp_ptr, ptr_path)
-                    pointer_swapped = True
 
-                    # Prune old superseded generation directories beyond active + most recent previous (keep 2)
-                    keep_dirs = {target_dir.name}
-                    if prev_ptr and prev_ptr.get("generation_dir"):
-                        keep_dirs.add(Path(str(prev_ptr["generation_dir"])).name)
-                    for gd in sorted(
-                        (p for p in generations_dir.iterdir() if p.is_dir() and not p.name.startswith(".")),
-                        key=lambda p: p.stat().st_mtime,
-                        reverse=True,
-                    ):
-                        if gd.name in keep_dirs:
-                            continue
-                        if len(keep_dirs) < 2:
-                            keep_dirs.add(gd.name)
-                            continue
-                        shutil.rmtree(gd, ignore_errors=True)
+                    lease_lock_file = self._lease_lock_path()
+                    lease_lock_file.parent.mkdir(parents=True, exist_ok=True)
+                    with self._lease_thread_lock:
+                        with lease_lock_file.open("a+", encoding="utf-8") as lfh:
+                            fcntl.flock(lfh.fileno(), fcntl.LOCK_EX)
+                            try:
+                                os.replace(tmp_ptr, ptr_path)
+                                pointer_swapped = True
+
+                                # Prune old superseded generation directories beyond active + most recent previous (keep 2),
+                                # NEVER deleting any generation directory that has an active in-flight reader lease.
+                                keep_dirs = {target_dir.name}
+                                if prev_ptr and prev_ptr.get("generation_dir"):
+                                    keep_dirs.add(Path(str(prev_ptr["generation_dir"])).name)
+                                for gd in sorted(
+                                    (p for p in generations_dir.iterdir() if p.is_dir() and not p.name.startswith(".")),
+                                    key=lambda p: p.stat().st_mtime,
+                                    reverse=True,
+                                ):
+                                    if gd.name in keep_dirs:
+                                        continue
+                                    if len(keep_dirs) < 2:
+                                        keep_dirs.add(gd.name)
+                                        continue
+                                    if self._has_active_reader_lease(gd):
+                                        continue
+                                    shutil.rmtree(gd, ignore_errors=True)
+                            finally:
+                                fcntl.flock(lfh.fileno(), fcntl.LOCK_UN)
                 finally:
                     if staging_dir.exists():
                         shutil.rmtree(staging_dir, ignore_errors=True)
@@ -1551,13 +1681,18 @@ class CompositionSpatialIndex:
 
     def _authenticate_manifest_and_snapshot(
         self,
+        leased_resolution: Optional[Tuple[Optional[Path], Optional[Path], Optional[Dict[str, Any]], List[str]]] = None,
     ) -> Tuple[Optional[Path], Optional[Path], Optional[Dict[str, Any]], Optional[sqlite3.Row], Optional[Dict[str, Any]], List[str], List[str], List[str]]:
         """
         Atomically resolve pointer -> DB + manifest, verify canonical `complete_manifest_digest`
         and cross-check DB/pointer/manifest consistency on a single consistent snapshot.
         Returns (db_p, mf_p, ptr, gen_row, manifest_obj, pointer_errors, manifest_errors, db_errors).
         """
-        db_p, mf_p, ptr, ptr_errs = self._resolve_active_paths()
+        if leased_resolution is None:
+            with self.acquire_generation_lease() as res:
+                return self._authenticate_manifest_and_snapshot(leased_resolution=res)
+
+        db_p, mf_p, ptr, ptr_errs = leased_resolution
         manifest_errors: List[str] = []
         db_errors: List[str] = []
         gen_row: Optional[sqlite3.Row] = None
@@ -1638,64 +1773,66 @@ class CompositionSpatialIndex:
         SQLite generation header, and canonical `complete_manifest_digest` all agree.
         Raises LookupError if unbuilt, or ValueError if any tampering/mismatch is detected.
         """
-        _, mf_p, ptr, gen_row, manifest_obj, ptr_errs, mf_errs, db_errs = (
-            self._authenticate_manifest_and_snapshot()
-        )
-        if ptr is None and gen_row is None and not ptr_errs and (mf_p is None or not mf_p.exists()):
-            raise LookupError("Reproducibility manifest unavailable; rebuild composition index first.")
-        all_errs = ptr_errs + mf_errs + db_errs
-        if all_errs or manifest_obj is None:
-            raise ValueError("; ".join(all_errs) if all_errs else "Reproducibility manifest authentication failed.")
-        return manifest_obj
+        with self.acquire_generation_lease() as leased_res:
+            _, mf_p, ptr, gen_row, manifest_obj, ptr_errs, mf_errs, db_errs = (
+                self._authenticate_manifest_and_snapshot(leased_resolution=leased_res)
+            )
+            if ptr is None and gen_row is None and not ptr_errs and (mf_p is None or not mf_p.exists()):
+                raise LookupError("Reproducibility manifest unavailable; rebuild composition index first.")
+            all_errs = ptr_errs + mf_errs + db_errs
+            if all_errs or manifest_obj is None:
+                raise ValueError("; ".join(all_errs) if all_errs else "Reproducibility manifest authentication failed.")
+            return manifest_obj
 
     def get_status(self) -> CompositionIndexStatus:
         incomplete_staging = self._list_incomplete_staging_dirs()
-        db_p, mf_p, ptr, gen, manifest_obj, ptr_errs, manifest_errors, db_errors = (
-            self._authenticate_manifest_and_snapshot()
-        )
-        prev_gen_id = ptr.get("previous_successful_generation_id") if ptr else None
-        ptr_path = self._pointer_path()
-
-        if gen is None:
-            overall = IntegrityStatus.MANIFEST_INVALID if (ptr_errs or db_errors) else IntegrityStatus.UNAVAILABLE
-            return CompositionIndexStatus(
-                index_available=False,
-                integrity_status=overall,
-                generation_build_status=GenerationBuildStatus.FAILED,
-                source_integrity_status=IntegrityStatus.UNAVAILABLE,
-                manifest_integrity_status=IntegrityStatus.MANIFEST_INVALID if manifest_errors else IntegrityStatus.UNAVAILABLE,
-                pointer_integrity_status=IntegrityStatus.MANIFEST_INVALID if ptr_errs else IntegrityStatus.UNAVAILABLE,
-                database_integrity_status=IntegrityStatus.INCOMPLETE if db_errors else IntegrityStatus.UNAVAILABLE,
-                previous_successful_generation_id=prev_gen_id,
-                incomplete_staging_generations=incomplete_staging,
-                manifest_validation_errors=ptr_errs + manifest_errors + db_errors,
-                rtree_enabled=self.rtree_enabled,
-                sqlite_path=str(db_p or self.db_path),
-                pointer_path=str(ptr_path) if ptr_path.exists() else None,
-                reproducibility_manifest_path=str(mf_p) if (mf_p and mf_p.exists()) else None,
-                notes=(ptr_errs + db_errors + manifest_errors) or ["No active composition index generation has been built yet."],
+        with self.acquire_generation_lease() as leased_res:
+            db_p, mf_p, ptr, gen, manifest_obj, ptr_errs, manifest_errors, db_errors = (
+                self._authenticate_manifest_and_snapshot(leased_resolution=leased_res)
             )
+            prev_gen_id = ptr.get("previous_successful_generation_id") if ptr else None
+            ptr_path = self._pointer_path()
 
-        gen_id = gen["generation_id"]
-        with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
-            species_cnt = conn.execute(
-                "SELECT COUNT(DISTINCT canonical_species_id) FROM composition_evidence WHERE generation_id = ?",
-                (gen_id,),
-            ).fetchone()[0]
-            actual_ev_cnt = int(
-                conn.execute(
-                    "SELECT COUNT(*) FROM composition_evidence WHERE generation_id = ?",
+            if gen is None:
+                overall = IntegrityStatus.MANIFEST_INVALID if (ptr_errs or db_errors) else IntegrityStatus.UNAVAILABLE
+                return CompositionIndexStatus(
+                    index_available=False,
+                    integrity_status=overall,
+                    generation_build_status=GenerationBuildStatus.FAILED,
+                    source_integrity_status=IntegrityStatus.UNAVAILABLE,
+                    manifest_integrity_status=IntegrityStatus.MANIFEST_INVALID if manifest_errors else IntegrityStatus.UNAVAILABLE,
+                    pointer_integrity_status=IntegrityStatus.MANIFEST_INVALID if ptr_errs else IntegrityStatus.UNAVAILABLE,
+                    database_integrity_status=IntegrityStatus.INCOMPLETE if db_errors else IntegrityStatus.UNAVAILABLE,
+                    previous_successful_generation_id=prev_gen_id,
+                    incomplete_staging_generations=incomplete_staging,
+                    manifest_validation_errors=ptr_errs + manifest_errors + db_errors,
+                    rtree_enabled=self.rtree_enabled,
+                    sqlite_path=str(db_p or self.db_path),
+                    pointer_path=str(ptr_path) if ptr_path.exists() else None,
+                    reproducibility_manifest_path=str(mf_p) if (mf_p and mf_p.exists()) else None,
+                    notes=(ptr_errs + db_errors + manifest_errors) or ["No active composition index generation has been built yet."],
+                )
+
+            gen_id = gen["generation_id"]
+            with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
+                species_cnt = conn.execute(
+                    "SELECT COUNT(DISTINCT canonical_species_id) FROM composition_evidence WHERE generation_id = ?",
                     (gen_id,),
                 ).fetchone()[0]
-            )
-            inst_rows = conn.execute(
-                "SELECT DISTINCT instrument_id FROM composition_evidence WHERE generation_id = ? ORDER BY instrument_id",
-                (gen_id,),
-            ).fetchall()
-            prod_rows = conn.execute(
-                "SELECT product_id, file_path, sha256_checksum, manifest_json FROM ingested_products WHERE generation_id = ?",
-                (gen_id,),
-            ).fetchall()
+                actual_ev_cnt = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM composition_evidence WHERE generation_id = ?",
+                        (gen_id,),
+                    ).fetchone()[0]
+                )
+                inst_rows = conn.execute(
+                    "SELECT DISTINCT instrument_id FROM composition_evidence WHERE generation_id = ? ORDER BY instrument_id",
+                    (gen_id,),
+                ).fetchall()
+                prod_rows = conn.execute(
+                    "SELECT product_id, file_path, sha256_checksum, manifest_json FROM ingested_products WHERE generation_id = ?",
+                    (gen_id,),
+                ).fetchall()
 
         notes = list(json.loads(gen["notes_json"] or "[]"))
         missing_expected = list(json.loads(gen["missing_expected_json"] or "[]")) if "missing_expected_json" in gen.keys() else []
@@ -1851,109 +1988,109 @@ class CompositionSpatialIndex:
         sp_list = list(species_ids)
         if not sp_list:
             return []
-        db_p, _, ptr, ptr_errs = self._resolve_active_paths()
-        if ptr_errs or db_p is None or not db_p.exists():
-            return []
-
-        with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
-            if ptr and ptr.get("active_generation_id"):
-                gen = conn.execute(
-                    "SELECT * FROM index_generations WHERE generation_id = ? AND status = 'active' LIMIT 1",
-                    (ptr["active_generation_id"],),
-                ).fetchone()
-            else:
-                gen = conn.execute(
-                    "SELECT * FROM index_generations WHERE status = 'active' ORDER BY created_at_utc DESC LIMIT 1"
-                ).fetchone()
-            if gen is None:
+        with self.acquire_generation_lease() as (db_p, _, ptr, ptr_errs):
+            if ptr_errs or db_p is None or not db_p.exists():
                 return []
-            gen_id = gen["generation_id"]
 
-            placeholders = ",".join("?" for _ in sp_list)
-            clauses = [
-                "ce.generation_id = ?",
-                f"ce.canonical_species_id IN ({placeholders})",
-            ]
-            params: List[Any] = [gen_id, *sp_list]
-
-            if located_only:
-                clauses.append("ce.location_verified = 1")
-            if instruments:
-                ip = ",".join("?" for _ in instruments)
-                clauses.append(f"ce.instrument_id IN ({ip})")
-                params.extend(instruments)
-            if sol_min is not None:
-                clauses.append("ce.sol >= ?")
-                params.append(sol_min)
-            if sol_max is not None:
-                clauses.append("ce.sol <= ?")
-                params.append(sol_max)
-
-            join_sql = ""
-            if bbox is not None:
-                min_lat, max_lat, min_lon_raw, max_lon_raw = bbox
-                mn_lon = normalize_longitude_360(min_lon_raw)
-                mx_lon = normalize_longitude_360(max_lon_raw)
-                if self.rtree_enabled and mn_lon <= mx_lon:
-                    join_sql = "JOIN evidence_rtree rt ON ce.row_id = rt.row_id"
-                    clauses.append("rt.min_lat <= ? AND rt.max_lat >= ? AND rt.min_lon <= ? AND rt.max_lon >= ?")
-                    params.extend([max_lat, min_lat, mx_lon, mn_lon])
-                elif mn_lon <= mx_lon:
-                    clauses.append("ce.min_lat <= ? AND ce.max_lat >= ? AND ce.min_lon_east <= ? AND ce.max_lon_east >= ?")
-                    params.extend([max_lat, min_lat, mx_lon, mn_lon])
+            with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
+                if ptr and ptr.get("active_generation_id"):
+                    gen = conn.execute(
+                        "SELECT * FROM index_generations WHERE generation_id = ? AND status = 'active' LIMIT 1",
+                        (ptr["active_generation_id"],),
+                    ).fetchone()
                 else:
-                    # Antimeridian crossing in [0, 360): [mn_lon, 360] OR [0, mx_lon]
-                    clauses.append("ce.min_lat <= ? AND ce.max_lat >= ? AND (ce.max_lon_east >= ? OR ce.min_lon_east <= ?)")
-                    params.extend([max_lat, min_lat, mn_lon, mx_lon])
+                    gen = conn.execute(
+                        "SELECT * FROM index_generations WHERE status = 'active' ORDER BY created_at_utc DESC LIMIT 1"
+                    ).fetchone()
+                if gen is None:
+                    return []
+                gen_id = gen["generation_id"]
 
-            sql = f"SELECT ce.payload_json FROM composition_evidence ce {join_sql} WHERE {' AND '.join(clauses)}"
-            rows = conn.execute(sql, params).fetchall()
-        return [CompositionEvidence.model_validate_json(r[0]) for r in rows]
+                placeholders = ",".join("?" for _ in sp_list)
+                clauses = [
+                    "ce.generation_id = ?",
+                    f"ce.canonical_species_id IN ({placeholders})",
+                ]
+                params: List[Any] = [gen_id, *sp_list]
+
+                if located_only:
+                    clauses.append("ce.location_verified = 1")
+                if instruments:
+                    ip = ",".join("?" for _ in instruments)
+                    clauses.append(f"ce.instrument_id IN ({ip})")
+                    params.extend(instruments)
+                if sol_min is not None:
+                    clauses.append("ce.sol >= ?")
+                    params.append(sol_min)
+                if sol_max is not None:
+                    clauses.append("ce.sol <= ?")
+                    params.append(sol_max)
+
+                join_sql = ""
+                if bbox is not None:
+                    min_lat, max_lat, min_lon_raw, max_lon_raw = bbox
+                    mn_lon = normalize_longitude_360(min_lon_raw)
+                    mx_lon = normalize_longitude_360(max_lon_raw)
+                    if self.rtree_enabled and mn_lon <= mx_lon:
+                        join_sql = "JOIN evidence_rtree rt ON ce.row_id = rt.row_id"
+                        clauses.append("rt.min_lat <= ? AND rt.max_lat >= ? AND rt.min_lon <= ? AND rt.max_lon >= ?")
+                        params.extend([max_lat, min_lat, mx_lon, mn_lon])
+                    elif mn_lon <= mx_lon:
+                        clauses.append("ce.min_lat <= ? AND ce.max_lat >= ? AND ce.min_lon_east <= ? AND ce.max_lon_east >= ?")
+                        params.extend([max_lat, min_lat, mx_lon, mn_lon])
+                    else:
+                        # Antimeridian crossing in [0, 360): [mn_lon, 360] OR [0, mx_lon]
+                        clauses.append("ce.min_lat <= ? AND ce.max_lat >= ? AND (ce.max_lon_east >= ? OR ce.min_lon_east <= ?)")
+                        params.extend([max_lat, min_lat, mn_lon, mx_lon])
+
+                sql = f"SELECT ce.payload_json FROM composition_evidence ce {join_sql} WHERE {' AND '.join(clauses)}"
+                rows = conn.execute(sql, params).fetchall()
+            return [CompositionEvidence.model_validate_json(r[0]) for r in rows]
 
     def get_evidence_by_id(self, evidence_id: str) -> Optional[CompositionEvidence]:
-        db_p, _, ptr, ptr_errs = self._resolve_active_paths()
-        if ptr_errs or db_p is None or not db_p.exists():
-            return None
-        with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
-            if ptr and ptr.get("active_generation_id"):
-                gen = conn.execute(
-                    "SELECT generation_id FROM index_generations WHERE generation_id = ? AND status = 'active' LIMIT 1",
-                    (ptr["active_generation_id"],),
-                ).fetchone()
-            else:
-                gen = conn.execute(
-                    "SELECT generation_id FROM index_generations WHERE status = 'active' ORDER BY created_at_utc DESC LIMIT 1"
-                ).fetchone()
-            if gen is None:
+        with self.acquire_generation_lease() as (db_p, _, ptr, ptr_errs):
+            if ptr_errs or db_p is None or not db_p.exists():
                 return None
-            row = conn.execute(
-                "SELECT payload_json FROM composition_evidence WHERE generation_id = ? AND evidence_id = ? LIMIT 1",
-                (gen["generation_id"], evidence_id),
-            ).fetchone()
-        return CompositionEvidence.model_validate_json(row[0]) if row else None
+            with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
+                if ptr and ptr.get("active_generation_id"):
+                    gen = conn.execute(
+                        "SELECT generation_id FROM index_generations WHERE generation_id = ? AND status = 'active' LIMIT 1",
+                        (ptr["active_generation_id"],),
+                    ).fetchone()
+                else:
+                    gen = conn.execute(
+                        "SELECT generation_id FROM index_generations WHERE status = 'active' ORDER BY created_at_utc DESC LIMIT 1"
+                    ).fetchone()
+                if gen is None:
+                    return None
+                row = conn.execute(
+                    "SELECT payload_json FROM composition_evidence WHERE generation_id = ? AND evidence_id = ? LIMIT 1",
+                    (gen["generation_id"], evidence_id),
+                ).fetchone()
+            return CompositionEvidence.model_validate_json(row[0]) if row else None
 
     def list_rejected_records(self, limit: int = 100, offset: int = 0) -> Tuple[int, List[RejectionRecord]]:
-        db_p, _, ptr, ptr_errs = self._resolve_active_paths()
-        if ptr_errs or db_p is None or not db_p.exists():
-            return 0, []
-        with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
-            if ptr and ptr.get("active_generation_id"):
-                gen = conn.execute(
-                    "SELECT generation_id FROM index_generations WHERE generation_id = ? AND status = 'active' LIMIT 1",
-                    (ptr["active_generation_id"],),
-                ).fetchone()
-            else:
-                gen = conn.execute(
-                    "SELECT generation_id FROM index_generations WHERE status = 'active' ORDER BY created_at_utc DESC LIMIT 1"
-                ).fetchone()
-            if gen is None:
+        with self.acquire_generation_lease() as (db_p, _, ptr, ptr_errs):
+            if ptr_errs or db_p is None or not db_p.exists():
                 return 0, []
-            gen_id = gen["generation_id"]
-            total = conn.execute(
-                "SELECT COUNT(*) FROM rejected_records WHERE generation_id = ?", (gen_id,)
-            ).fetchone()[0]
-            rows = conn.execute(
-                "SELECT payload_json FROM rejected_records WHERE generation_id = ? ORDER BY row_id DESC LIMIT ? OFFSET ?",
-                (gen_id, limit, offset),
-            ).fetchall()
-        return int(total), [RejectionRecord.model_validate_json(r[0]) for r in rows]
+            with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
+                if ptr and ptr.get("active_generation_id"):
+                    gen = conn.execute(
+                        "SELECT generation_id FROM index_generations WHERE generation_id = ? AND status = 'active' LIMIT 1",
+                        (ptr["active_generation_id"],),
+                    ).fetchone()
+                else:
+                    gen = conn.execute(
+                        "SELECT generation_id FROM index_generations WHERE status = 'active' ORDER BY created_at_utc DESC LIMIT 1"
+                    ).fetchone()
+                if gen is None:
+                    return 0, []
+                gen_id = gen["generation_id"]
+                total = conn.execute(
+                    "SELECT COUNT(*) FROM rejected_records WHERE generation_id = ?", (gen_id,)
+                ).fetchone()[0]
+                rows = conn.execute(
+                    "SELECT payload_json FROM rejected_records WHERE generation_id = ? ORDER BY row_id DESC LIMIT ? OFFSET ?",
+                    (gen_id, limit, offset),
+                ).fetchall()
+            return int(total), [RejectionRecord.model_validate_json(r[0]) for r in rows]

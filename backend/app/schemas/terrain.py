@@ -3,7 +3,7 @@ Terrain Intelligence & Processing Schemas
 Martian Surface Intelligence & Exploration System
 """
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -19,6 +19,17 @@ class RasterBandStats(BaseModel):
     units: str = Field(..., description="Physical units of band (e.g., meters, degrees, unknown)")
 
 
+class PlanningSlopeThreshold(BaseModel):
+    """User-configured planning parameter. NOT a validated human safety limit."""
+
+    threshold_deg: float = Field(..., gt=0.0, lt=90.0, description="Slope angle in degrees")
+    parameter_class: Literal["user_configured_planning_assumption"] = "user_configured_planning_assumption"
+    label: str = Field(..., min_length=1, description="Human-readable name of this planning scenario threshold")
+    provenance: str = Field(..., min_length=1, description="Who/what defined this value and why (required)")
+    version: str = Field(..., min_length=1, description="Version of this parameter definition")
+    is_validated_safety_limit: Literal[False] = False
+
+
 class TerrainSummary(BaseModel):
     source_dem_id: str = Field(..., description="Parent DEM dataset identifier")
     source_product_id: Optional[str] = Field(None, description="Official archive product identifier")
@@ -31,10 +42,19 @@ class TerrainSummary(BaseModel):
     slope_stats: RasterBandStats = Field(..., description="Calculated slope statistics (degrees)")
     aspect_stats: Optional[RasterBandStats] = Field(None, description="Calculated aspect statistics (degrees from North)")
     roughness_stats: Optional[RasterBandStats] = Field(None, description="Calculated Terrain Ruggedness Index statistics")
-    critical_slope_threshold_deg: float = Field(25.0, description="Safety slope threshold")
-    critical_slope_coverage_pct: Optional[float] = Field(
+    planning_threshold: Optional["PlanningSlopeThreshold"] = Field(
         None,
-        description="Percentage of valid terrain pixels exceeding critical slope threshold",
+        description=(
+            "Optional USER-CONFIGURED planning slope threshold. Absent unless explicitly supplied. "
+            "It is a planning assumption, never a validated astronaut safety limit."
+        ),
+    )
+    planning_threshold_coverage_pct: Optional[float] = Field(
+        None,
+        description=(
+            "Percentage of valid slope cells exceeding the user-configured planning threshold; "
+            "null when no threshold was configured. Not a safety classification."
+        ),
     )
     quality_warnings: List[str] = Field(default_factory=list, description="Quality or interpolation warnings")
 
@@ -80,3 +100,21 @@ class TerrainLayerMetadata(BaseModel):
     crs: str
     processing_version: str = "1.0.0"
     preview_url: Optional[str] = None
+
+
+class InsufficientCoverageReport(BaseModel):
+    """Structured result returned when a requested footprint cannot support the requested analysis."""
+
+    status: Literal["insufficient_coverage"] = "insufficient_coverage"
+    requested_bounds: dict = Field(..., description="Exactly as requested: min_lon,min_lat,max_lon,max_lat (degrees)")
+    requested_bounds_modified: Literal[False] = False
+    source_coverage_bounds: Optional[dict] = None
+    intersecting_bounds: Optional[dict] = None
+    requested_pixel_dimensions: Optional[dict] = Field(None, description="Requested span divided by source pixel size (fractional)")
+    available_pixel_dimensions: Optional[dict] = Field(None, description="Whole source pixels inside the requested footprint")
+    source_resolution: Optional[dict] = None
+    minimum_resolution_requirement: Optional[dict] = None
+    insufficient_coverage_reason: str
+    supported_products: List[str] = Field(default_factory=list)
+    unsupported_derivative_products: List[str] = Field(default_factory=list)
+    next_action: str

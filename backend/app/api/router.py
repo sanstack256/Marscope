@@ -13,6 +13,7 @@ from app.api import (
     health,
     layers,
     localization,
+    mobility,
     observations,
     physics,
     sources,
@@ -25,6 +26,7 @@ api_router = APIRouter(prefix="/api")
 api_router.include_router(health.router)
 api_router.include_router(datasets.router)
 api_router.include_router(terrain.router)
+api_router.include_router(mobility.router)
 api_router.include_router(layers.router)
 api_router.include_router(observations.router)
 api_router.include_router(composition.router)

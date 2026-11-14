@@ -39,9 +39,8 @@ Using Horn's 8-neighbor weighted finite-difference gradient operator to minimize
   $$F_{\text{parallel}} = m_{\text{total}} \cdot g_{\text{Mars}} \cdot \sin(\theta)$$
 - **Normal Force:**
   $$F_{\text{normal}} = m_{\text{total}} \cdot g_{\text{Mars}} \cdot \cos(\theta)$$
-- **Terrain Shear Slip Condition (Coulomb-Mohr Criterion):**
-  $$\tau_{\text{available}} = c + \sigma \tan(\phi)$$
-  Where $c$ is regolith cohesion ($\approx 0.1\text{--}2.0\text{ kPa}$), $\sigma$ is normal stress, and $\phi$ is the internal friction angle ($\approx 30^\circ\text{--}35^\circ$ for basaltic sand). Slopes exceeding $20^\circ$ exhibit severe shear slip hazard for suited human mobility.
+- **Optional User-Configured Planning Slope Threshold (`PlanningSlopeThreshold`):**
+  MARSCOPE does **not** embed a default $25^\circ$ critical safety slope limit in its physics registry or terrain summaries. Any slope threshold used to highlight steep cells or exclude cells in a `MobilityScenario` (`planning_max_slope_deg`) must be explicitly provided by the user, is tagged `parameter_class = "user_configured_planning_assumption"` with `is_validated_safety_limit = false`, and never certifies terrain as `"safe"` or `"unsafe"`.
 
 ### 2.4 Atmospheric Density
 Using the ideal gas formulation for the predominant carbon dioxide atmosphere:

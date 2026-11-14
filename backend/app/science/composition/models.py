@@ -327,6 +327,10 @@ class CompositionEvidence(BaseModel):
     detection_limit_value: Optional[float] = None
     detection_limit_unit: Optional[str] = None
     detection_limit_status: Optional[str] = None
+    value_semantics: str = "reported_value"
+    source_raw_token: Optional[str] = None
+    source_interpretation_note: Optional[str] = None
+    source_special_constants: Dict[str, str] = Field(default_factory=dict)
     quality_flag: Optional[str] = None
 
     methodology: str

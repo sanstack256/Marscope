@@ -449,6 +449,17 @@ class CuriosityDataParser:
                 elif fname_u.endswith("_SHOTS_STDEV") and fdesc:
                     stdev_definitions[fname_u] = fdesc
 
+        field_special_constants: Dict[str, Dict[str, str]] = {}
+        for f in ordered_fields:
+            fkey = _norm_col_key(str(f.get("NAME") or ""))
+            consts = {
+                str(k).lower(): str(v).strip().strip('"')
+                for k, v in f.items()
+                if str(k).upper().endswith("_CONSTANT") and v is not None and str(v).strip()
+            }
+            if consts:
+                field_special_constants[fkey] = consts
+
         oxide_col_indices: Dict[str, Tuple[int, Optional[int], Optional[int]]] = {}
         for ox_u in known_oxides:
             if ox_u in col_lookup:
@@ -505,6 +516,8 @@ class CuriosityDataParser:
                 stdev = _safe_float(cols[stdev_i]) if stdev_i is not None and stdev_i < len(cols) else None
                 oxides[ox_canon] = {
                     "value": val,
+                    "raw_token": cols[val_i].strip() if val_i < len(cols) else "",
+                    "special_constants": dict(field_special_constants.get(ox_u, {})),
                     "rmsep": rmsep,
                     "shots_stdev": stdev,
                     "rmsep_definition": rmsep_definitions.get(f"{ox_u}_RMSEP"),
@@ -881,11 +894,14 @@ class CuriosityDataParser:
                     if not e_ok:
                         row_rejections.append({"row_index": row_idx, "reason": f"Non-numeric APXS {ox} error '{r.get(ecol)}'."})
                         err = None
-                    if val is not None or err is not None:
+                    _v_special = field_meta_by_header.get(vcol, {}).get("special_tokens", set())
+                    if val is not None or err is not None or (raw_str in _v_special):
                         oxides_wt_pct[ox] = {
                             "value": val,
                             "error": err,
                             "unit": unit,
+                            "raw_token": raw_str,
+                            "special_constants": dict(field_meta_by_header.get(vcol, {}).get("special_constants") or {}),
                             "source_column": vcol,
                             "error_definition": (field_meta_by_header.get(ecol or "") or {}).get("description") if ecol else None,
                             "is_exact_zero": (val == 0.0 and raw_str != ""),
@@ -902,11 +918,14 @@ class CuriosityDataParser:
                     if not e_ok:
                         row_rejections.append({"row_index": row_idx, "reason": f"Non-numeric APXS {el} error '{r.get(ecol)}'."})
                         err = None
-                    if val is not None or err is not None:
+                    _v_special = field_meta_by_header.get(vcol, {}).get("special_tokens", set())
+                    if val is not None or err is not None or (raw_str in _v_special):
                         trace_ppm[el] = {
                             "value": val,
                             "error": err,
                             "unit": unit,
+                            "raw_token": raw_str,
+                            "special_constants": dict(field_meta_by_header.get(vcol, {}).get("special_constants") or {}),
                             "source_column": vcol,
                             "error_definition": (field_meta_by_header.get(ecol or "") or {}).get("description") if ecol else None,
                             "is_exact_zero": (val == 0.0 and raw_str != ""),
@@ -1084,6 +1103,7 @@ class CuriosityDataParser:
             err_unit_source: Optional[str] = None
             err_conv_history: List[str] = []
             err_limitations: List[str] = []
+            pct_special_constants: Dict[str, str] = {}
 
             err_semantics = "chemin_estimated_error_unspecified_sigma"
             err_definition = "Estimated uncertainty without explicit sigma multiplier in PDS3 label."
@@ -1108,6 +1128,13 @@ class CuriosityDataParser:
                 mapped_unit_src: Optional[str] = "pds3_fmt_unit" if cunit else None
 
                 if h == pct_col:
+                    pct_special_constants.update(
+                        {
+                            str(k).lower(): str(v).strip().strip('"')
+                            for k, v in cmeta.items()
+                            if str(k).upper().endswith("_CONSTANT") and v is not None and str(v).strip()
+                        }
+                    )
                     if cunit and cunit.upper() not in {"WEIGHT_PERCENT", "WT%", "PERCENT", "WT_PCT"}:
                         raise MalformedObservationError(
                             f"Unsupported or non-quantitative CheMin abundance unit '{cunit}' in schema column '{h}'."
@@ -1189,6 +1216,31 @@ class CuriosityDataParser:
                     row_rejections.append({"row_index": idx, "reason": "Empty mineral name."})
                     continue
                 pct = _safe_float(raw_pct)
+                _declared_special = any(
+                    raw_pct.strip().strip('"') == str(t).strip() for t in pct_special_constants.values()
+                )
+                if pct is None and _declared_special:
+                    minerals.append(
+                        {
+                            "row_index": idx,
+                            "mineral": mineral_name,
+                            "weight_percent": None,
+                            "raw_token": raw_pct,
+                            "special_constants": dict(pct_special_constants),
+                            "estimated_error": None,
+                            "normalized_error": None,
+                            "unit": pct_unit,
+                            "error_schema_unit": err_schema_unit,
+                            "error_unit": err_resolved_unit,
+                            "normalized_error_unit": err_resolved_unit,
+                            "error_is_physical_unit": err_is_physical,
+                            "error_limitations": list(err_limitations),
+                            "error_semantics": err_semantics,
+                            "error_definition": err_definition,
+                            "schema_identity": schema_id_str,
+                        }
+                    )
+                    continue
                 if pct is None:
                     row_rejections.append(
                         {
@@ -1216,6 +1268,8 @@ class CuriosityDataParser:
                         "row_index": idx,
                         "mineral": mineral_name,
                         "weight_percent": pct,
+                        "raw_token": raw_pct,
+                        "special_constants": dict(pct_special_constants),
                         "estimated_error": raw_err_val,
                         "normalized_error": norm_err_val,
                         "unit": pct_unit,

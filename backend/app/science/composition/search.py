@@ -386,6 +386,16 @@ class CompositionSearchService:
                 scientific_warnings=warnings,
             )
 
+        zero_unresolved = sum(
+            1 for item in processed if item[0].value_semantics == "reported_numerical_zero_unresolved_semantics"
+        )
+        if zero_unresolved:
+            warnings.append(
+                f"{zero_unresolved} matching record(s) report a numerical zero whose meaning (absent, below detection, "
+                "or true zero) is not defined by the source product; they are preserved as reported zeros and are not "
+                "evidence of presence."
+            )
+
         seen_oxide_sources = {item[0].canonical_species_id for item in processed if item[0].is_stoichiometric_conversion}
         if "FeO" in seen_oxide_sources and "FeOT" in seen_oxide_sources:
             warnings.append(

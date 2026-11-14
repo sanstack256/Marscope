@@ -130,3 +130,78 @@ def clip_raster_to_bounding_box(
                 "nodata_value": nodata_val,
                 "units": units or "unknown",
             }
+
+
+class FootprintPlanError(ValueError):
+    """Raised when a requested footprint cannot be mapped onto the source raster."""
+
+
+def plan_clip_to_bounding_box(
+    source_raster_path: Path,
+    min_lon: float,
+    min_lat: float,
+    max_lon: float,
+    max_lat: float,
+    output_crs_str: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Dry-run of clip_raster_to_bounding_box: compute, WITHOUT writing or altering the request,
+    the intersection with the source footprint and the whole-pixel window the clip would read.
+
+    Never enlarges the requested bounds. Longitude convention differences ([0,360] vs [-180,180])
+    are normalised without changing the requested angular extent. Antimeridian-crossing footprints
+    (min_lon > max_lon after normalisation) are rejected as unsupported: request two analyses.
+    """
+    with rasterio.open(source_raster_path) as src:
+        if src.crs is None:
+            raise CRSError(f"Source raster '{source_raster_path.name}' is unreferenced (no CRS).")
+        src_crs_str = src.crs.to_string()
+        if not validate_mars_crs(src_crs_str):
+            raise CRSError(f"Source raster CRS '{src_crs_str}' is not a valid Martian coordinate system.")
+        target_crs_str = output_crs_str or src_crs_str
+        if not validate_mars_crs(target_crs_str):
+            raise CRSError(f"Requested output CRS '{target_crs_str}' is invalid for Mars.")
+        rio_crs = CRS.from_wkt(get_mars_crs(target_crs_str).to_wkt())
+        need_warp = bool(src.crs.is_projected) or (src.crs != rio_crs and not src.crs.is_geographic)
+        with ExitStack() as stack:
+            reader = stack.enter_context(WarpedVRT(src, crs=rio_crs)) if need_warp else src
+            sb = reader.bounds
+            lon0, lon1 = min_lon, max_lon
+            if sb.right > 180.0 and min_lon < 0.0:
+                lon0, lon1 = min_lon % 360.0, max_lon % 360.0
+            if lon0 > lon1:
+                raise FootprintPlanError(
+                    "Antimeridian-crossing footprints are not supported in a single analysis; "
+                    "request the two sides as separate analyses."
+                )
+            px_x, px_y = abs(reader.transform.a), abs(reader.transform.e)
+            plan: Dict[str, Any] = {
+                "requested_bounds": {"min_lon": min_lon, "min_lat": min_lat, "max_lon": max_lon, "max_lat": max_lat},
+                "normalised_request_bounds": {"min_lon": lon0, "min_lat": min_lat, "max_lon": lon1, "max_lat": max_lat},
+                "source_bounds": {"min_lon": sb.left, "min_lat": sb.bottom, "max_lon": sb.right, "max_lat": sb.top},
+                "source_pixel_size": {"x": px_x, "y": px_y, "units": "crs_units"},
+                "source_crs": src_crs_str,
+                "source_is_geographic": bool(reader.crs and reader.crs.is_geographic),
+                "requested_pixel_dimensions": {
+                    "width": (lon1 - lon0) / px_x if px_x else None,
+                    "height": (max_lat - min_lat) / px_y if px_y else None,
+                },
+            }
+            overlaps = not (lon1 <= sb.left or lon0 >= sb.right or max_lat <= sb.bottom or min_lat >= sb.top)
+            plan["overlaps_source"] = overlaps
+            if not overlaps:
+                plan["intersecting_bounds"] = None
+                plan["available_pixel_dimensions"] = {"width": 0, "height": 0}
+                return plan
+            il, ib = max(lon0, sb.left), max(min_lat, sb.bottom)
+            ir, it = min(lon1, sb.right), min(max_lat, sb.top)
+            plan["intersecting_bounds"] = {"min_lon": il, "min_lat": ib, "max_lon": ir, "max_lat": it}
+            win = from_bounds(il, ib, ir, it, reader.transform).round_offsets().round_lengths()
+            plan["available_pixel_dimensions"] = {"width": int(win.width), "height": int(win.height)}
+            plan["window"] = {
+                "col_off": int(win.col_off),
+                "row_off": int(win.row_off),
+                "width": int(win.width),
+                "height": int(win.height),
+            }
+            return plan

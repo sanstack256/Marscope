@@ -156,9 +156,20 @@ def test_validation_pipeline_rejects_invalid_and_non_composition_records():
     assert not ok_neg and rej_neg is not None and rej_neg.rejection_code == "NEGATIVE_PHYSICAL_VALUE"
 
     ok_lod, _, rej_lod = validate_composition_evidence(
-        _make_sample_evidence(evidence_status=EvidenceStatus.BELOW_DETECTION_LIMIT, raw_value=0.0, normalized_value=0.0)
+        _make_sample_evidence(
+            evidence_status=EvidenceStatus.BELOW_DETECTION_LIMIT,
+            raw_value=0.0,
+            normalized_value=None,
+            value_semantics="source_defined_below_detection_limit",
+            source_interpretation_note="test source-declared BDL constant",
+        )
     )
     assert not ok_lod and rej_lod is not None and rej_lod.rejection_code == "BELOW_DETECTION_LIMIT"
+    # Prompt 8: BDL status WITHOUT source-defined semantics is an unsupported inference
+    ok_inf, _, rej_inf = validate_composition_evidence(
+        _make_sample_evidence(evidence_status=EvidenceStatus.BELOW_DETECTION_LIMIT, raw_value=0.0, normalized_value=0.0)
+    )
+    assert not ok_inf and rej_inf is not None and rej_inf.rejection_code == "UNSUPPORTED_BDL_INFERENCE"
 
     # Stage 7: >100 wt% rejected
     ok_big, _, rej_big = validate_composition_evidence(_make_sample_evidence(raw_value=105.0, normalized_value=105.0))
@@ -250,7 +261,7 @@ def test_spatial_index_rebuild_search_antimeridian_and_targets(tmp_path: Path):
     assert status.index_available
     assert status.located_evidence_count > 0
     assert status.unlocated_evidence_count >= 2  # Gypsum + Andesine at missing RMC 99_99
-    assert status.rejected_record_count >= 3  # APXS Ni <LOD + PSV + REMS
+    assert status.rejected_record_count >= 2  # PSV + REMS (Prompt 8: APXS reported zero is preserved, not auto-rejected as BDL)
     assert status.checksum_valid is True
     assert status.crism_status == "unavailable_no_validated_mineral_cube"
 

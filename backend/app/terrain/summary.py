@@ -8,7 +8,7 @@ Never turns missing/empty rasters into zero-valued measurements.
 
 from typing import List, Optional
 import numpy as np
-from app.schemas.terrain import TerrainSummary, RasterBandStats
+from app.schemas.terrain import PlanningSlopeThreshold, RasterBandStats, TerrainSummary
 
 
 def compute_band_stats(data: np.ndarray, units: str) -> RasterBandStats:
@@ -57,14 +57,17 @@ def compile_terrain_summary(
     slope_deg: np.ndarray,
     aspect_deg: Optional[np.ndarray] = None,
     roughness_tri: Optional[np.ndarray] = None,
-    critical_slope_threshold: float = 25.0,
+    planning_threshold: Optional[PlanningSlopeThreshold] = None,
     warnings: Optional[List[str]] = None,
     source_product_id: Optional[str] = None,
     processing_version: str = "1.1.0",
     roughness_window_radius_meters: Optional[float] = None,
 ) -> TerrainSummary:
     """
-    Compile complete terrain summary with slope threshold assessment over valid pixels.
+    Compile terrain summary of physical measurements over valid pixels.
+
+    No safety threshold exists here. A planning threshold is reported only when the caller explicitly
+    supplies a user-configured PlanningSlopeThreshold (with provenance and version).
     """
     elev_stats = compute_band_stats(elevation, "meters")
     slope_stats = compute_band_stats(slope_deg, "degrees")
@@ -72,12 +75,12 @@ def compile_terrain_summary(
     aspect_stats = compute_band_stats(aspect_deg, "degrees_clockwise_north") if aspect_deg is not None else None
     rough_stats = compute_band_stats(roughness_tri, "meters") if roughness_tri is not None else None
 
-    valid_slopes = slope_deg[np.isfinite(slope_deg)]
-    if valid_slopes.size > 0:
-        critical_count = np.sum(valid_slopes > critical_slope_threshold)
-        crit_pct: Optional[float] = round(float(critical_count / valid_slopes.size * 100.0), 2)
-    else:
-        crit_pct = None
+    crit_pct: Optional[float] = None
+    if planning_threshold is not None:
+        valid_slopes = slope_deg[np.isfinite(slope_deg)]
+        if valid_slopes.size > 0:
+            exceed = np.sum(valid_slopes > planning_threshold.threshold_deg)
+            crit_pct = round(float(exceed / valid_slopes.size * 100.0), 2)
 
     return TerrainSummary(
         source_dem_id=source_dem_id,
@@ -91,7 +94,7 @@ def compile_terrain_summary(
         slope_stats=slope_stats,
         aspect_stats=aspect_stats,
         roughness_stats=rough_stats,
-        critical_slope_threshold_deg=critical_slope_threshold,
-        critical_slope_coverage_pct=crit_pct,
+        planning_threshold=planning_threshold,
+        planning_threshold_coverage_pct=crit_pct,
         quality_warnings=warnings or [],
     )

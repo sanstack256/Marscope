@@ -9,6 +9,7 @@ layer, localization, composition spatial index, coordinate association, and dest
 from pathlib import Path
 from app.ingestion.acquisition import AcquisitionService
 from app.ingestion.catalog import DatasetCatalogService
+from app.mobility.service import HumanMobilityService
 from app.science.composition.index import CompositionSpatialIndex
 from app.science.composition.search import CompositionSearchService
 from app.science.coordinate_association import CoordinateAssociationService
@@ -55,4 +56,9 @@ destination_service = DestinationEvaluationService(
     processed_dir=PROCESSED_DIR,
     composition_search_service=composition_search_service,
     localization_service=localization_service,
+)
+mobility_service = HumanMobilityService(
+    catalog_service=catalog_service,
+    raw_dir=RAW_DIR,
+    processed_dir=PROCESSED_DIR,
 )

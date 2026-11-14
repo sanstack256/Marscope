@@ -150,6 +150,31 @@ export interface RasterBandStats {
   units: string;
 }
 
+export interface PlanningSlopeThreshold {
+  threshold_deg: number;
+  parameter_class: string;
+  label: string;
+  provenance: string;
+  version: string;
+  is_validated_safety_limit: boolean;
+}
+
+export interface InsufficientCoverageReport {
+  status?: string;
+  requested_bounds: Record<string, number>;
+  requested_bounds_modified: boolean;
+  source_coverage_bounds?: Record<string, number> | null;
+  intersecting_bounds?: Record<string, number> | null;
+  requested_pixel_dimensions?: Record<string, number | null> | null;
+  available_pixel_dimensions?: Record<string, number> | null;
+  source_resolution?: Record<string, unknown> | null;
+  minimum_resolution_requirement: Record<string, unknown>;
+  insufficient_coverage_reason: string;
+  supported_products: string[];
+  unsupported_derivative_products: string[];
+  next_action: string;
+}
+
 export interface TerrainSummary {
   source_dem_id: string;
   source_product_id?: string | null;
@@ -162,8 +187,8 @@ export interface TerrainSummary {
   slope_stats: RasterBandStats;
   aspect_stats?: RasterBandStats | null;
   roughness_stats?: RasterBandStats | null;
-  critical_slope_threshold_deg: number;
-  critical_slope_coverage_pct?: number | null;
+  planning_threshold?: PlanningSlopeThreshold | null;
+  planning_threshold_coverage_pct?: number | null;
   quality_warnings: string[];
 }
 
@@ -512,6 +537,10 @@ export interface CompositionEvidence {
   raw_species_name: string;
   evidence_type: string;
   evidence_status: string;
+  value_semantics?: string;
+  source_raw_token?: string | null;
+  source_interpretation_note?: string | null;
+  source_special_constants?: Record<string, string> | null;
   raw_value?: number | null;
   raw_unit?: string | null;
   normalized_value?: number | null;
@@ -792,4 +821,169 @@ export interface ScienceTarget {
   distance_from_astronaut_m?: number | null;
   explanation?: string | null;
   created_at_utc?: string;
+}
+
+export interface ScaleSuitabilityRecord {
+  analysis_type: string;
+  suitability: string;
+  native_resolution_m?: number | null;
+  effective_resolution_m?: number | null;
+  minimum_recommended_resolution_m: number;
+  supported: boolean;
+  explanation: string;
+  scientific_limitation: string;
+}
+
+export interface TerrainDatasetInventoryEntry {
+  dataset_id: string;
+  product_id: string;
+  product_title: string;
+  mission: string;
+  instrument: string;
+  source_archive: string;
+  source_url: string;
+  status: string;
+  locally_downloaded: boolean;
+  locally_processed: boolean;
+  crs: string;
+  vertical_units: string;
+  native_horizontal_resolution_m?: number | null;
+  effective_equatorial_pixel_m?: number | null;
+  coverage_bounds: Record<string, number>;
+  sha256_checksum?: string | null;
+  resolution_suitability: Record<string, ScaleSuitabilityRecord>;
+  limitations: string[];
+}
+
+export interface MobilityStatusResponse {
+  engine_name: string;
+  engine_version: string;
+  route_optimization_enabled: boolean;
+  safety_certification_enabled: boolean;
+  active_dem_dataset_id?: string | null;
+  total_catalog_dem_count: number;
+  locally_downloaded_dem_count: number;
+  locally_processed_dem_count: number;
+  scenario_count: number;
+  terrain_inventory: TerrainDatasetInventoryEntry[];
+  capabilities: string[];
+  scientific_limitations: string[];
+}
+
+export interface CoverageIntelligenceResponse {
+  dataset_id: string;
+  source_product_id: string;
+  crs: string;
+  requested_bounds: Record<string, number>;
+  requested_bounds_modified: boolean;
+  source_footprint_bounds: Record<string, number>;
+  overlap_bounds?: Record<string, number> | null;
+  has_spatial_overlap: boolean;
+  sufficient_for_3x3_derivatives: boolean;
+  requested_area_km2: number;
+  covered_area_km2: number;
+  uncovered_area_km2: number;
+  valid_elevation_area_km2: number;
+  nodata_elevation_area_km2: number;
+  valid_derivative_area_km2: number;
+  valid_elevation_percentage_of_requested: number;
+  valid_derivative_percentage_of_requested: number;
+  pixel_counts: Record<string, number>;
+  coverage_state_counts: Record<string, number>;
+  derivative_availability: Record<string, boolean>;
+  resolution_suitability: Record<string, ScaleSuitabilityRecord>;
+  insufficient_coverage_report?: InsufficientCoverageReport | null;
+  notes: string[];
+}
+
+export interface ElevationProfileSample {
+  sample_index: number;
+  lat: number;
+  lon_east: number;
+  cumulative_distance_meters: number;
+  segment_distance_meters: number;
+  coverage_state: string;
+  elevation_meters?: number | null;
+  segment_elevation_delta_meters?: number | null;
+  slope_deg?: number | null;
+  segment_slope_deg?: number | null;
+  aspect_deg?: number | null;
+  roughness_tri_meters?: number | null;
+  source_pixel_row?: number | null;
+  source_pixel_col?: number | null;
+}
+
+export interface ElevationProfileGapSegment {
+  start_sample_index: number;
+  end_sample_index: number;
+  start_distance_meters: number;
+  end_distance_meters: number;
+  gap_length_meters: number;
+  reason: string;
+}
+
+export interface ElevationProfileResponse {
+  dataset_id: string;
+  source_product_id: string;
+  crs: string;
+  sampling_method: string;
+  geometry_type: string;
+  waypoint_count: number;
+  sample_count: number;
+  valid_sample_count: number;
+  nodata_sample_count: number;
+  complete_coverage: boolean;
+  sample_spacing_meters: number;
+  total_horizontal_distance_meters: number;
+  evaluated_horizontal_distance_meters: number;
+  total_positive_elevation_gain_meters?: number | null;
+  total_negative_elevation_change_meters?: number | null;
+  net_elevation_change_meters?: number | null;
+  min_elevation_meters?: number | null;
+  max_elevation_meters?: number | null;
+  mean_slope_along_profile_deg?: number | null;
+  max_slope_along_profile_deg?: number | null;
+  nodata_gap_segments: ElevationProfileGapSegment[];
+  samples: ElevationProfileSample[];
+  resolution_suitability: Record<string, ScaleSuitabilityRecord>;
+  limitations: string[];
+}
+
+export interface MobilityScenario {
+  scenario_id: string;
+  name: string;
+  version: string;
+  description?: string | null;
+  created_at_utc: string;
+  is_safety_certification: boolean;
+  mars_surface_gravity_m_s2: number;
+  reference_walking_speed_m_per_s?: number | null;
+  planning_max_slope_deg?: number | null;
+  planning_max_roughness_m?: number | null;
+  roughness_window_radius_m?: number | null;
+  astronaut_body_mass_kg?: number | null;
+  suit_mass_kg?: number | null;
+  carried_load_mass_kg?: number | null;
+  total_mass_kg?: number | null;
+  mars_surface_weight_n?: number | null;
+  traversal_time_estimation_ready: boolean;
+  notes: string[];
+}
+
+export interface MobilityEvaluationResponse {
+  evaluation_id: string;
+  evaluation_mode: string;
+  dataset_id: string;
+  source_product_id: string;
+  processing_version: string;
+  traversal_model_id: string;
+  traversal_model_version: string;
+  scenario: MobilityScenario;
+  physical_measurements: Record<string, unknown>;
+  scenario_traversal_estimates: Record<string, unknown>;
+  coverage_intelligence?: CoverageIntelligenceResponse | null;
+  elevation_profile?: ElevationProfileResponse | null;
+  cost_surface?: Record<string, unknown> | null;
+  resolution_suitability: Record<string, ScaleSuitabilityRecord>;
+  scientific_limitations: string[];
 }

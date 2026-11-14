@@ -113,19 +113,6 @@ _REGISTRY: Dict[str, PhysicsParameter] = {
         version="1.0.0",
         verification_status="MSL RAD Peer-Reviewed",
     ),
-    "critical_slope_threshold": PhysicsParameter(
-        id="critical_slope_threshold",
-        name="Critical Traversability Slope Angle Threshold",
-        value=25.0,
-        units="deg",
-        source="NASA SP-2016-6105 / Mars Exploration Rover Terramechanics Standards",
-        source_url="https://ntrs.nasa.gov/",
-        validity_range=[20.0, 30.0],
-        applicable_conditions="Granular basaltic soil under Martian gravity",
-        uncertainty=2.0,
-        version="1.0.0",
-        verification_status="Engineering Operational Limit",
-    ),
 }
 
 

@@ -6,8 +6,9 @@ Martian Surface Intelligence & Exploration System
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, status
 from app.schemas.dataset import Dataset, DatasetLifecycleStatus, DatasetManifest
+from app.schemas.terrain import PlanningSlopeThreshold
 from app.services.container import PROCESSED_DIR, RAW_DIR, acquisition_service, catalog_service
-from app.terrain.processor import DEMProcessingService
+from app.terrain.processor import DEMProcessingService, InsufficientDEMCoverageError
 
 router = APIRouter(prefix="/datasets", tags=["Dataset Catalog & Acquisition"])
 
@@ -104,11 +105,31 @@ async def validate_dataset(dataset_id: str) -> Dict[str, Any]:
 @router.post("/{dataset_id}/process")
 async def process_dataset(
     dataset_id: str,
+    min_lat: Optional[float] = Query(None, ge=-90.0, le=90.0, description="Optional explicit minimum latitude (deg)"),
+    max_lat: Optional[float] = Query(None, ge=-90.0, le=90.0, description="Optional explicit maximum latitude (deg)"),
+    min_lon: Optional[float] = Query(None, ge=-180.0, le=360.0, description="Optional explicit minimum longitude (deg)"),
+    max_lon: Optional[float] = Query(None, ge=-180.0, le=360.0, description="Optional explicit maximum longitude (deg)"),
     roughness_radius_meters: Optional[float] = Query(None, gt=0.0, description="Physical TRI neighborhood radius in meters"),
+    planning_slope_threshold_deg: Optional[float] = Query(
+        None,
+        gt=0.0,
+        lt=90.0,
+        description="Optional user-configured planning slope threshold in degrees (not a safety limit)",
+    ),
+    planning_threshold_label: str = Query(
+        "user_configured_planning_slope_threshold",
+        description="Label for optional user-configured planning slope threshold",
+    ),
+    planning_threshold_provenance: str = Query(
+        "Explicitly configured by user for exploratory terrain summarization; not a validated suit or physiology limit.",
+        description="Provenance statement for optional planning slope threshold",
+    ),
+    planning_threshold_version: str = Query("1.0.0", description="Version tag for optional planning slope threshold"),
 ) -> Dict[str, Any]:
     """
     Process a locally downloaded DEM dataset into clipped GeoTIFF and terrain derivatives
     (slope, aspect, metric TRI) with a verifiable processing manifest.
+    Never silently expands requested study bounds; returns structured InsufficientCoverageReport on HTTP 422.
     """
     dataset = catalog_service.get_dataset(dataset_id)
     if not dataset:
@@ -119,24 +140,64 @@ async def process_dataset(
             detail=f"Dataset '{dataset_id}' (type '{dataset.product_type}') is not a DEM raster product.",
         )
 
-    gale_bounds = {
-        "min_lat": -5.5,
-        "max_lat": -4.3,
-        "min_lon": 137.2,
-        "max_lon": 138.0,
-    }
+    explicit_coords = [min_lat, max_lat, min_lon, max_lon]
+    if any(v is not None for v in explicit_coords) and not all(v is not None for v in explicit_coords):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="When specifying custom study_bounds, all four of min_lat, max_lat, min_lon, and max_lon must be provided.",
+        )
+
+    study_bounds = (
+        {
+            "min_lat": float(min_lat),
+            "max_lat": float(max_lat),
+            "min_lon": float(min_lon),
+            "max_lon": float(max_lon),
+        }
+        if all(v is not None for v in explicit_coords)
+        else {
+            "min_lat": -5.5,
+            "max_lat": -4.3,
+            "min_lon": 137.2,
+            "max_lon": 138.0,
+        }
+    )
+
+    planning_threshold = (
+        PlanningSlopeThreshold(
+            threshold_deg=planning_slope_threshold_deg,
+            label=planning_threshold_label,
+            provenance=planning_threshold_provenance,
+            version=planning_threshold_version,
+            is_validated_safety_limit=False,
+        )
+        if planning_slope_threshold_deg is not None
+        else None
+    )
+
     try:
         manifest = DEMProcessingService.process_dem_dataset(
             dataset=dataset,
             raw_dir=RAW_DIR,
             processed_dir=PROCESSED_DIR,
-            study_bounds=gale_bounds,
+            study_bounds=study_bounds,
             roughness_radius_meters=roughness_radius_meters,
+            planning_threshold=planning_threshold,
         )
         catalog_service.register_dataset(dataset)
         return manifest
     except FileNotFoundError as fe:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(fe))
+    except InsufficientDEMCoverageError as ice:
+        catalog_service.update_dataset_status(
+            dataset_id,
+            DatasetLifecycleStatus.FAILED_PROCESSING,
+            failure_reason=ice.report.insufficient_coverage_reason,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=ice.report.model_dump(),
+        )
     except Exception as exc:
         catalog_service.update_dataset_status(
             dataset_id,

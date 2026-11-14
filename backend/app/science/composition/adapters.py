@@ -32,6 +32,7 @@ from app.science.composition.validation import (
     validate_composition_evidence,
 )
 from app.science.coordinate_association import CoordinateAssociationService
+from app.science.composition.value_semantics import ValueSemantics, classify_value_semantics
 from app.science.curiosity_parser import CuriosityDataParser, _sha256_file
 
 
@@ -136,6 +137,26 @@ def _evaluate_batch(
     return accepted, rejected
 
 
+
+def _resolve_value_state(
+    val: Optional[float],
+    token: Optional[str],
+    consts: Optional[Dict[str, str]],
+):
+    """Return (semantics, note, dl_status) from source-declared semantics only (never inferred BDL)."""
+    sem, note = classify_value_semantics(val, token, consts)
+    if sem == ValueSemantics.SOURCE_DEFINED_BELOW_DETECTION_LIMIT:
+        dl = "source_defined_below_detection_limit"
+    elif sem == ValueSemantics.SOURCE_DEFINED_MISSING:
+        dl = "source_defined_missing"
+    elif sem == ValueSemantics.NULL_OR_BLANK:
+        dl = "missing_null_in_source"
+    elif sem == ValueSemantics.REPORTED_NUMERICAL_ZERO_UNRESOLVED:
+        dl = "not_defined_by_source"
+    else:
+        dl = None
+    return sem, note, dl
+
 class ApxsEvidenceAdapter:
     """Adapter for NASA PDS4 APXS calibrated oxide (wt%) & trace element (ppm) CSV tables."""
 
@@ -185,15 +206,13 @@ class ApxsEvidenceAdapter:
                     else EvidenceType.OXIDE_COMPOSITION_MEASUREMENT
                 )
 
-                dl_status: Optional[str] = None
-                if val is None:
+                sem, sem_note, dl_status = _resolve_value_state(val, m.get("raw_token"), m.get("special_constants"))
+                if sem == ValueSemantics.SOURCE_DEFINED_BELOW_DETECTION_LIMIT:
+                    status = EvidenceStatus.BELOW_DETECTION_LIMIT
+                    norm_val, norm_unit, norm_formula = None, None, None
+                elif sem in (ValueSemantics.SOURCE_DEFINED_MISSING, ValueSemantics.NULL_OR_BLANK) or val is None:
                     status = EvidenceStatus.MISSING_NULL
                     norm_val, norm_unit, norm_formula = None, None, None
-                    dl_status = "missing_null_in_source"
-                elif val == 0.0 and (err is None or err == 0.0):
-                    status = EvidenceStatus.BELOW_DETECTION_LIMIT
-                    norm_val, norm_unit, norm_formula = 0.0, "wt%", "zero_with_zero_error_bdl_excluded"
-                    dl_status = "reported_zero_with_zero_error_bdl_excluded_no_quantitative_lod_in_source"
                 else:
                     status = EvidenceStatus.MEASURED if loc_verified else EvidenceStatus.UNLOCATED
                     try:
@@ -251,6 +270,10 @@ class ApxsEvidenceAdapter:
                     uncertainty_semantics=(apxs_unc_meta.statistical_interpretation if apxs_unc_meta else None),
                     uncertainty_metadata=apxs_unc_meta,
                     detection_limit_status=dl_status,
+                    value_semantics=sem.value,
+                    source_raw_token=m.get("raw_token"),
+                    source_interpretation_note=sem_note,
+                    source_special_constants=dict(m.get("special_constants") or {}),
                     quality_flag=row.get("quality_flag"),
                     methodology="APXS X-ray spectroscopy calibrated RGFit elemental/oxide reduction",
                     provenance_url=provenance_url,
@@ -289,15 +312,13 @@ class ApxsEvidenceAdapter:
                 err = m.get("error")
                 spec = get_species_by_id(raw_el)
                 canon_id = spec.canonical_id if spec else f"UNKNOWN:{raw_el}"
-                dl_status = None
-                if val is None:
+                sem, sem_note, dl_status = _resolve_value_state(val, m.get("raw_token"), m.get("special_constants"))
+                if sem == ValueSemantics.SOURCE_DEFINED_BELOW_DETECTION_LIMIT:
+                    status = EvidenceStatus.BELOW_DETECTION_LIMIT
+                    norm_val, norm_unit, norm_formula = None, None, None
+                elif sem in (ValueSemantics.SOURCE_DEFINED_MISSING, ValueSemantics.NULL_OR_BLANK) or val is None:
                     status = EvidenceStatus.MISSING_NULL
                     norm_val, norm_unit, norm_formula = None, None, None
-                    dl_status = "missing_null_in_source"
-                elif val == 0.0 and (err is None or err == 0.0):
-                    status = EvidenceStatus.BELOW_DETECTION_LIMIT
-                    norm_val, norm_unit, norm_formula = 0.0, "ppm", "zero_with_zero_error_bdl_excluded"
-                    dl_status = "reported_zero_with_zero_error_bdl_excluded_no_quantitative_lod_in_source"
                 else:
                     status = EvidenceStatus.MEASURED if loc_verified else EvidenceStatus.UNLOCATED
                     norm_val, norm_unit, norm_formula = (
@@ -351,6 +372,10 @@ class ApxsEvidenceAdapter:
                     uncertainty_semantics=(apxs_trace_unc.statistical_interpretation if apxs_trace_unc else None),
                     uncertainty_metadata=apxs_trace_unc,
                     detection_limit_status=dl_status,
+                    value_semantics=sem.value,
+                    source_raw_token=m.get("raw_token"),
+                    source_interpretation_note=sem_note,
+                    source_special_constants=dict(m.get("special_constants") or {}),
                     quality_flag=row.get("quality_flag"),
                     methodology="APXS X-ray spectroscopy calibrated RGFit trace element quantification",
                     provenance_url=provenance_url,
@@ -439,15 +464,13 @@ class ChemCamEvidenceAdapter:
                 shots_stdev = ox_m.get("shots_stdev")
                 spec = get_species_by_id(ox_name)
                 canon_id = spec.canonical_id if spec else f"UNKNOWN:{ox_name}"
-                dl_status: Optional[str] = None
-                if val is None:
+                sem, sem_note, dl_status = _resolve_value_state(val, ox_m.get("raw_token"), ox_m.get("special_constants"))
+                if sem == ValueSemantics.SOURCE_DEFINED_BELOW_DETECTION_LIMIT:
+                    status = EvidenceStatus.BELOW_DETECTION_LIMIT
+                    norm_val, norm_unit, norm_formula = None, None, None
+                elif sem in (ValueSemantics.SOURCE_DEFINED_MISSING, ValueSemantics.NULL_OR_BLANK) or val is None:
                     status = EvidenceStatus.MISSING_NULL
                     norm_val, norm_unit, norm_formula = None, None, None
-                    dl_status = "missing_null_in_source"
-                elif val == 0.0 and (rmsep is None or rmsep == 0.0):
-                    status = EvidenceStatus.BELOW_DETECTION_LIMIT
-                    norm_val, norm_unit, norm_formula = 0.0, "wt%", "zero_with_zero_rmsep_excluded"
-                    dl_status = "reported_zero_with_zero_rmsep_excluded_no_quantitative_lod_in_source"
                 else:
                     status = EvidenceStatus.MEASURED if loc_verified else EvidenceStatus.UNLOCATED
                     norm_val, norm_unit, norm_formula = (
@@ -512,6 +535,10 @@ class ChemCamEvidenceAdapter:
                     secondary_uncertainty_type="chemcam_shots_stdev" if shots_stdev is not None else None,
                     secondary_uncertainty_metadata=cc_sec_unc,
                     detection_limit_status=dl_status,
+                    value_semantics=sem.value,
+                    source_raw_token=ox_m.get("raw_token"),
+                    source_interpretation_note=sem_note,
+                    source_special_constants=dict(ox_m.get("special_constants") or {}),
                     quality_flag=f"total_oxide_wt={r.get('total_wt_pct')}" if r.get("total_wt_pct") is not None else None,
                     methodology="ChemCam LIBS Multivariate PLS+ICA Oxide Regression (LANL MOC table)",
                     provenance_url=provenance_url,
@@ -674,17 +701,19 @@ class CheMinEvidenceAdapter:
             canon_name = spec.canonical_name if spec else raw_min
             category = spec.category if spec else SpeciesCategory.MINERAL
 
-            dl_status: Optional[str] = None
-            if wt_pct is None:
+            sem, sem_note, dl_status = _resolve_value_state(wt_pct, m.get("raw_token"), m.get("special_constants"))
+            if sem == ValueSemantics.SOURCE_DEFINED_BELOW_DETECTION_LIMIT:
+                status = EvidenceStatus.BELOW_DETECTION_LIMIT
+                norm_val, norm_unit, norm_formula = None, None, None
+            elif sem in (ValueSemantics.SOURCE_DEFINED_MISSING, ValueSemantics.NULL_OR_BLANK) or wt_pct is None:
                 status = EvidenceStatus.MISSING_NULL
                 norm_val, norm_unit, norm_formula = None, None, None
-                dl_status = "missing_null_in_source"
-            elif wt_pct == 0.0 and (err is None or err == 0.0):
-                status = EvidenceStatus.BELOW_DETECTION_LIMIT
-                norm_val, norm_unit, norm_formula = 0.0, "wt%", "zero_with_zero_error_bdl_excluded"
-                dl_status = "reported_zero_with_zero_error_bdl_excluded_no_quantitative_lod_in_source"
             else:
-                status = EvidenceStatus.DETECTED if loc_verified else EvidenceStatus.UNLOCATED
+                # A reported zero abundance is MEASURED (not DETECTED): the source does not state presence.
+                if sem == ValueSemantics.REPORTED_NUMERICAL_ZERO_UNRESOLVED:
+                    status = EvidenceStatus.MEASURED if loc_verified else EvidenceStatus.UNLOCATED
+                else:
+                    status = EvidenceStatus.DETECTED if loc_verified else EvidenceStatus.UNLOCATED
                 norm_val, norm_unit, norm_formula = (
                     normalize_concentration_value(spec, wt_pct, "wt%")
                     if spec
@@ -734,6 +763,10 @@ class CheMinEvidenceAdapter:
                 uncertainty_semantics=(chemin_unc.statistical_interpretation if chemin_unc else None),
                 uncertainty_metadata=chemin_unc,
                 detection_limit_status=dl_status,
+                value_semantics=sem.value,
+                source_raw_token=m.get("raw_token"),
+                source_interpretation_note=sem_note,
+                source_special_constants=dict(m.get("special_constants") or {}),
                 quality_flag="crystalline_phase_wt_pct",
                 methodology="CheMin Co K-alpha X-Ray Diffraction TOPAS Rietveld refinement",
                 provenance_url=provenance_url,
