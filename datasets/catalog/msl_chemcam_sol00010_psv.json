@@ -1,0 +1,52 @@
+{
+  "id": "msl_chemcam_sol00010_psv",
+  "product_id": "CL1_398380611PSV_F0030000CCAM04010P3",
+  "product_title": "MSL ChemCam Laser-Induced Breakdown Spectrometer Calibrated Spectra (Sol 10)",
+  "product_type": "SPECTRUM / In-Situ Chemistry",
+  "mission": "Mars Science Laboratory (MSL)",
+  "instrument": "Chemistry Camera (ChemCam LIBS)",
+  "source_archive": "NASA PDS Geosciences Node",
+  "original_product_url": "https://pds-geosciences.wustl.edu/msl/msl-m-chemcam-libs-4_5-rdr-v1/mslccm_1xxx/data/sol00010/cl1_398380611psv_f0030000ccam04010p3.tab",
+  "original_label_url": "https://pds-geosciences.wustl.edu/msl/msl-m-chemcam-libs-4_5-rdr-v1/mslccm_1xxx/data/sol00010/cl1_398380611psv_f0030000ccam04010p3.lbl",
+  "doi_or_pds_id": "MSL-M-CHEMCAM-LIBS-4/5-RDR-V1.0:CL1_398380611PSV_F0030000CCAM04010P3",
+  "license": "NASA Public Domain / US Govt Open",
+  "attribution": "NASA/JPL-Caltech/LANL/CNES/IRAP",
+  "acquisition_timestamp": "2012-08-16T20:26:41Z",
+  "observation_sol": 10,
+  "processing_level": "Calibrated Spectra (RDR Level 4/5)",
+  "calibration_status": "Dark-subtracted, wavelength-calibrated, instrument-response corrected",
+  "coverage": {
+    "min_latitude": -4.595,
+    "max_latitude": -4.59,
+    "min_longitude": 137.44,
+    "max_longitude": 137.445,
+    "center_latitude": -4.592,
+    "center_longitude": 137.442
+  },
+  "coordinate_reference_system": "IAU2000:49900",
+  "latitude_convention": "Planetocentric",
+  "longitude_direction": "East",
+  "map_projection": "Rover Local Frame / Topocentric",
+  "horizontal_resolution_meters": null,
+  "vertical_resolution_meters": null,
+  "units": "photons / (s * cm^2 * sr * nm)",
+  "nodata_value": null,
+  "data_format": "PDS3 ASCII Table (.TAB)",
+  "file_size_bytes": 284812,
+  "sha256_checksum": null,
+  "status": "license_verified",
+  "failure_reason": null,
+  "quality_flags": [
+    "Calibrated Emission Lines",
+    "Nominal Laser Power"
+  ],
+  "known_limitations": [
+    "Point observation sampled at ~1.5 m standoff distance.",
+    "Surface dust coating can attenuate bedrock signal on initial laser shots."
+  ],
+  "processing_history": [
+    "Raw CCD spectra -> Dark subtraction -> Continuum removal -> Wavelength calibration"
+  ],
+  "local_file_path": null,
+  "processed_file_path": null
+}

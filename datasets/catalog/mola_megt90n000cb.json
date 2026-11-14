@@ -1,0 +1,50 @@
+{
+  "id": "mola_megt90n000cb",
+  "product_id": "MEGT90N000CB.IMG",
+  "product_title": "MOLA Global Reference MEGDR 4 ppd Topography",
+  "product_type": "DEM / Global Reference Elevation",
+  "mission": "Mars Global Surveyor (MGS)",
+  "instrument": "Mars Orbiter Laser Altimeter (MOLA)",
+  "source_archive": "NASA PDS Geosciences Node",
+  "original_product_url": "https://pds-geosciences.wustl.edu/mgs/mgs-m-mola-5-megdr-l3-v1/mgsl_300x/meg004/megt90n000cb.img",
+  "original_label_url": "https://pds-geosciences.wustl.edu/mgs/mgs-m-mola-5-megdr-l3-v1/mgsl_300x/meg004/megt90n000cb.lbl",
+  "doi_or_pds_id": "MGS-M-MOLA-5-MEGDR-L3-V1.0:MEGT90N000CB.IMG",
+  "license": "NASA Public Domain / US Govt Open",
+  "attribution": "NASA/JPL/Goddard Space Flight Center",
+  "acquisition_timestamp": "2003-04-03T11:05:00Z",
+  "observation_sol": null,
+  "processing_level": "Derived Global Map (Level 3)",
+  "calibration_status": "Calibrated to MOLA Areoid datum",
+  "coverage": {
+    "min_latitude": -90.0,
+    "max_latitude": 90.0,
+    "min_longitude": 0.0,
+    "max_longitude": 360.0,
+    "center_latitude": 0.0,
+    "center_longitude": 180.0
+  },
+  "coordinate_reference_system": "IAU2000:MARS_SPHERE",
+  "latitude_convention": "Planetocentric",
+  "longitude_direction": "East",
+  "map_projection": "Simple Cylindrical",
+  "horizontal_resolution_meters": 14818.0,
+  "vertical_resolution_meters": 1.0,
+  "units": "meters relative to MOLA Areoid",
+  "nodata_value": -32768.0,
+  "data_format": "PDS3 Binary Image (MSB_INTEGER 16-bit)",
+  "file_size_bytes": 2073600,
+  "sha256_checksum": null,
+  "status": "license_verified",
+  "failure_reason": null,
+  "quality_flags": [
+    "Global Continuous Coverage"
+  ],
+  "known_limitations": [
+    "Coarse macro-scale elevation only (14.8 km/pixel)."
+  ],
+  "processing_history": [
+    "Global spherical harmonic interpolation"
+  ],
+  "local_file_path": null,
+  "processed_file_path": null
+}
