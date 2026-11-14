@@ -8,6 +8,7 @@ blocked/no-data pixels and validating line-of-sight simplification against all p
 from __future__ import annotations
 
 from dataclasses import dataclass
+import heapq
 import math
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -25,6 +26,7 @@ from app.routing.schemas import RoutePlanningConstraints, SnapDiagnostic
 from app.schemas.dataset import Dataset
 from app.terrain.roughness import calculate_roughness_tri_with_metadata
 from app.terrain.slope import calculate_slope
+from app.terrain_uncertainty.slope_uncertainty import propagate_horn_slope_uncertainty
 
 
 MARS_GEOG_CRS = rasterio.crs.CRS.from_proj4(
@@ -60,6 +62,68 @@ class TerrainGrid:
     science_field: np.ndarray  # float64 [0, 1]
     effective_slope_limit_deg: float
     max_roughness_tri_m: Optional[float] = None
+    cell_traversability_state: Optional[np.ndarray] = None  # uint8: 0=UNKNOWN, 1=EVALUATED, 2=KNOWN_EXCLUSION
+    optical_valid_mask: Optional[np.ndarray] = None
+    slope_sigma_grid: Optional[np.ndarray] = None
+    uncertainty_status: str = "UNCERTAINTY_UNQUANTIFIED"
+
+    def __post_init__(self) -> None:
+        if self.cell_traversability_state is None:
+            # 0 = UNKNOWN_INSUFFICIENTLY_OBSERVED, 1 = EVALUATED, 2 = KNOWN_CONSTRAINT_EXCLUSION
+            state = np.zeros((self.rows, self.cols), dtype=np.uint8)
+            observed = self.valid_elev & np.isfinite(self.slope_deg) & (self.native_resolution_m <= 5.0)
+            excluded = observed & (~self.traversable)
+            state[self.traversable & observed] = 1
+            state[excluded] = 2
+            self.cell_traversability_state = state
+
+    def traversability_state_counts(self) -> Dict[str, int]:
+        st = self.cell_traversability_state
+        if st is None:
+            return {"evaluated": int(np.count_nonzero(self.traversable)), "known_exclusion": 0, "unknown_insufficient": 0}
+        return {
+            "evaluated": int(np.count_nonzero(st == 1)),
+            "known_exclusion": int(np.count_nonzero(st == 2)),
+            "unknown_insufficient": int(np.count_nonzero(st == 0)),
+        }
+
+    def clone_with_overrides(
+        self,
+        *,
+        effective_slope_limit_deg: float,
+        max_roughness_tri_m: Optional[float] = None,
+        slope_deg_override: Optional[np.ndarray] = None,
+        tri_m_override: Optional[np.ndarray] = None,
+    ) -> "TerrainGrid":
+        """Create a lightweight shallow clone overriding slope/TRI/limits without re-reading DEM rasters."""
+        slp = slope_deg_override if slope_deg_override is not None else self.slope_deg
+        tri = tri_m_override if tri_m_override is not None else self.tri_m
+        r_cap = max_roughness_tri_m if max_roughness_tri_m is not None else self.max_roughness_tri_m
+        trav = self.valid_elev & np.isfinite(slp) & (slp <= float(effective_slope_limit_deg))
+        if r_cap is not None:
+            trav = trav & np.isfinite(tri) & (tri <= float(r_cap))
+        return TerrainGrid(
+            rows=self.rows,
+            cols=self.cols,
+            lats=self.lats,
+            lons_east=self.lons_east,
+            dx_m=self.dx_m,
+            dy_m=self.dy_m,
+            native_resolution_m=self.native_resolution_m,
+            elevation_m=self.elevation_m,
+            slope_deg=slp,
+            tri_m=tri,
+            valid_elev=self.valid_elev,
+            traversable=trav,
+            nodata_adj_penalty=self.nodata_adj_penalty,
+            uncertainty_score=self.uncertainty_score,
+            science_field=self.science_field,
+            effective_slope_limit_deg=float(effective_slope_limit_deg),
+            max_roughness_tri_m=r_cap,
+            optical_valid_mask=self.optical_valid_mask,
+            slope_sigma_grid=self.slope_sigma_grid,
+            uncertainty_status=self.uncertainty_status,
+        )
 
     @classmethod
     def from_arrays(
@@ -260,7 +324,15 @@ class TerrainGrid:
             return False
         return True
 
-    def edge_cost(self, r0: int, c0: int, r1: int, c1: int, policy: RoutingModePolicy) -> float:
+    def edge_cost(
+        self,
+        r0: int,
+        c0: int,
+        r1: int,
+        c1: int,
+        policy: RoutingModePolicy,
+        penalty_grid: Optional[np.ndarray] = None,
+    ) -> float:
         """Deterministic positive edge traversal cost C(e) >= policy.min_cost_multiplier * horiz_m."""
         dc = c1 - c0
         dr = r1 - r0
@@ -290,7 +362,57 @@ class TerrainGrid:
             - policy.science_corridor_bonus * float(self.science_field[r1, c1])
         )
         multiplier = max(policy.min_cost_multiplier, raw_mult)
+        if penalty_grid is not None:
+            multiplier *= max(1.0, float(penalty_grid[r1, c1]))
         return horiz_m * multiplier
+
+    def reverse_dijkstra_to_target(
+        self,
+        goal_rc: Tuple[int, int],
+        policy: RoutingModePolicy,
+    ) -> Tuple[Dict[int, float], Dict[int, int]]:
+        """
+        Compute exact optimal asymmetric directed return paths from EVERY reachable cell u
+        to `goal_rc` using directed checks `can_step(u, goal_neighbor)` and `edge_cost(u, goal_neighbor)`.
+        Returns (cost_to_goal_map, next_hop_map).
+        """
+        gr, gc = goal_rc
+        cols = self.cols
+        rows = self.rows
+        goal_idx = gr * cols + gc
+        dist: Dict[int, float] = {goal_idx: 0.0}
+        next_hop: Dict[int, int] = {}
+        pq: List[Tuple[float, int, int]] = [(0.0, 0, goal_idx)]
+        tie = 1
+        visited: set = set()
+        neighbors = ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1))
+
+        while pq:
+            cur_d, _, v_idx = heapq.heappop(pq)
+            if v_idx in visited:
+                continue
+            visited.add(v_idx)
+            vr, vc = v_idx // cols, v_idx % cols
+            if not self.traversable[vr, vc]:
+                continue
+            for dr, dc in neighbors:
+                ur, uc = vr + dr, vc + dc
+                if ur < 0 or ur >= rows or uc < 0 or uc >= cols:
+                    continue
+                u_idx = ur * cols + uc
+                if u_idx in visited:
+                    continue
+                # Evaluate TRUE forward direction u -> v for return traverse toward goal
+                if not self.can_step(ur, uc, vr, vc):
+                    continue
+                alt = cur_d + self.edge_cost(ur, uc, vr, vc, policy)
+                prev = dist.get(u_idx)
+                if prev is None or alt < prev - 1e-9:
+                    dist[u_idx] = alt
+                    next_hop[u_idx] = v_idx
+                    heapq.heappush(pq, (alt, tie, u_idx))
+                    tie += 1
+        return dist, next_hop
 
     def exclusion_statistics(self) -> Dict[str, int]:
         """Count exact hard-constraint cell exclusions across the solver DEM grid."""
@@ -660,9 +782,29 @@ def build_terrain_grid_from_dataset(
                 trav = trav & np.isfinite(tri_arr) & (tri_arr <= float(constraints.max_roughness_tri_m))
 
             native_res = float(dataset.horizontal_resolution_meters or 0.5 * (dx_m + dy_m))
-            # Coarse DEM uncertainty score increases above 20m/pixel
+            sigma_probe = dataset.vertical_resolution_meters
+            unc_status = "QUANTIFIED_FROM_METADATA" if sigma_probe is not None else "UNCERTAINTY_UNQUANTIFIED"
+            if any("QUANT" in f.upper() or "INT" in f.upper() for f in (dataset.quality_flags or [])) or "mola" in dataset.id.lower():
+                unc_status = "QUANTIZATION_LOWER_BOUND_ONLY"
+                sigma_probe = (sigma_probe or 1.0) / math.sqrt(12.0)
+
+            _s_deg, slope_sigma_arr, _s_sum = propagate_horn_slope_uncertainty(
+                elevation_grid=dem_arr,
+                dx_meters=dx_m,
+                dy_meters=dy_m,
+                sigma_z_m=sigma_probe,
+                nodata_mask=nodata_mask,
+                is_empirical_error_map=False,
+            )
+
+            # Separated epistemic uncertainty penalty score [0, 1]
             coarse_factor = min(1.0, math.log10(max(1.0, native_res)) / 4.2) if native_res > 20.0 else 0.0
-            uncert = np.where(np.isfinite(slope_arr), coarse_factor, 1.0)
+            sig_norm = np.where(
+                np.isfinite(slope_sigma_arr),
+                np.clip(slope_sigma_arr / max(5.0, eff_limit), 0.0, 0.75),
+                0.5,
+            )
+            uncert = np.where(np.isfinite(slope_arr), np.clip(np.maximum(coarse_factor, sig_norm), 0.0, 1.0), 1.0)
 
             nodata_prox = _compute_nodata_proximity(valid_elev)
             sci_field = _compute_science_field(lats, lons_east, science_points or [])
@@ -687,6 +829,8 @@ def build_terrain_grid_from_dataset(
                 max_roughness_tri_m=(
                     float(constraints.max_roughness_tri_m) if constraints.max_roughness_tri_m is not None else None
                 ),
+                slope_sigma_grid=slope_sigma_arr,
+                uncertainty_status=unc_status,
             )
 
         if src.crs and src.crs.is_projected:

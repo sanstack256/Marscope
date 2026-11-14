@@ -1,14 +1,18 @@
 """
-MARSCOPE EVA Time Budget Model
-Explicitly separates outbound travel, science stops, operational overhead,
-return travel, and protected safety reserve without silent speed assumptions.
+MARSCOPE EVA Time Budget Evaluation
+Calculates explicit outbound, dwell, overhead, return, and reserve budgets
+without silent defaults, pairing every duration with a versioned locomotion specification.
 """
 
 from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from app.eva_operations.schemas import SpeedModelMode, TimeBudgetBreakdown
+from app.eva_operations.schemas import (
+    SpeedModelMode,
+    TimeBudgetBreakdown,
+    get_locomotion_model_spec,
+)
 
 
 def evaluate_eva_time_budget(
@@ -17,6 +21,7 @@ def evaluate_eva_time_budget(
     outbound_tobler_s: Optional[float],
     return_constant_s: Optional[float],
     return_tobler_s: Optional[float],
+    return_route_computed: bool = True,
     stop_dwell_seconds: Dict[str, float],
     operational_overhead_s: float,
     walking_speed_mps: Optional[float],
@@ -31,17 +36,16 @@ def evaluate_eva_time_budget(
         missing.append("mission_duration_limit_s")
     if return_reserve_fraction is None:
         missing.append("return_reserve_fraction")
+    if not return_route_computed:
+        missing.append("independent_return_route")
 
     mode = (
         SpeedModelMode.TOBLER_STYLE_GRADE_APPROXIMATION
         if use_tobler_grade_approximation
         else SpeedModelMode.CONSTANT_USER_SPEED
     )
-    mode_note = (
-        "Unvalidated Tobler-style grade speed attenuation applied over DEM chord grades; planning approximation only, not calibrated suit biomechanics."
-        if use_tobler_grade_approximation
-        else "Exact constant-speed kinematics (distance / walking_speed_mps); no slope speed degradation assumed."
-    )
+    loco_spec = get_locomotion_model_spec(use_tobler_grade_approximation)
+    mode_note = f"[{loco_spec.model_id} {loco_spec.model_version} | {loco_spec.classification}] {loco_spec.description} {loco_spec.unvalidated_note}"
 
     stops_s = round(sum(max(0.0, float(v)) for v in stop_dwell_seconds.values()), 1)
     overhead_s = round(max(0.0, float(operational_overhead_s)), 1)
@@ -61,11 +65,16 @@ def evaluate_eva_time_budget(
             within_time_budget=None,
             speed_model_used=mode,
             speed_model_validation_note=mode_note,
+            locomotion_model=loco_spec,
             missing_inputs=missing,
         )
 
     out_s = outbound_tobler_s if use_tobler_grade_approximation else outbound_constant_s
-    ret_s = return_tobler_s if use_tobler_grade_approximation else return_constant_s
+    ret_s = (
+        (return_tobler_s if use_tobler_grade_approximation else return_constant_s)
+        if return_route_computed
+        else None
+    )
 
     total_req_s: Optional[float] = None
     if out_s is not None and ret_s is not None:
@@ -84,7 +93,7 @@ def evaluate_eva_time_budget(
             within_budget = margin_s >= 0.0
 
     return TimeBudgetBreakdown(
-        available=bool(total_req_s is not None and not missing),
+        available=bool(total_req_s is not None and return_route_computed and "walking_speed_mps" not in missing and "mission_duration_limit_s" not in missing and "return_reserve_fraction" not in missing),
         outbound_travel_s=round(float(out_s), 1) if out_s is not None else None,
         science_stops_s=stops_s,
         operational_overhead_s=overhead_s,
@@ -97,5 +106,6 @@ def evaluate_eva_time_budget(
         within_time_budget=within_budget,
         speed_model_used=mode,
         speed_model_validation_note=mode_note,
+        locomotion_model=loco_spec,
         missing_inputs=missing,
     )

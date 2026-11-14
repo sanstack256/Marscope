@@ -285,8 +285,8 @@ def evaluate_multidomain_readiness(
             status=dem_status,
             evidence_basis=f"{corridor.source_product_id} ({native_resolution_m:.2f} m/px, {valid_dem * 100:.1f}% corridor valid)",
             policy_version=pv,
-            threshold_or_rule=f"valid >= {READINESS_POLICY['min_dem_valid_fraction_assessed'] * 100:.0f}% & res <= {READINESS_POLICY['max_local_dem_resolution_m']:.1f} m/px",
-            notes=["Corridor polygon masked via rasterio.geometry_mask."],
+            threshold_or_rule=f"valid >= {READINESS_POLICY['min_dem_valid_fraction_assessed'] * 100:.0f}% & res <= {READINESS_POLICY['max_local_dem_resolution_m']:.1f} m/px (local slope screening ONLY; sub-meter obstacles < 0.5 m unresolved)",
+            notes=["Corridor polygon masked via rasterio.geometry_mask; empirical per-pixel DEM height sigma raster absent in PDS3."],
         ),
         DomainAssessmentRecord(
             domain="slope_and_relief",
@@ -339,17 +339,36 @@ def evaluate_multidomain_readiness(
         ),
         DomainAssessmentRecord(
             domain="rover_and_surface_observations",
-            status="ASSESSED" if obs_count > 0 else "UNAVAILABLE",
-            evidence_basis=f"{obs_count} Gale / Curiosity observations spatially indexed by Shapely STRtree",
+            status="PARTIALLY_ASSESSED" if obs_count > 0 else "UNAVAILABLE",
+            evidence_basis=(
+                f"{obs_count} localized Gale / Curiosity point observation records indexed by Shapely STRtree (non-continuous corridor coverage)"
+                if obs_count > 0
+                else "No spatially associated Curiosity point records within corridor search radius"
+            ),
             policy_version=pv,
-            threshold_or_rule="Perseverance/Jezero records isolated; local product existence checked explicitly",
+            threshold_or_rule="Localized Curiosity records anchor point sites ONLY and never certify whole-corridor ground truth; Perseverance/Jezero records isolated",
         ),
         DomainAssessmentRecord(
             domain="navigation_and_return_feasibility",
-            status="ASSESSED" if corridor.route_surface_distance_m > 0 else "UNAVAILABLE",
-            evidence_basis=f"Route {corridor.route_surface_distance_m:.1f} m with {len(corridor.segments)} segments",
+            status=(
+                "ASSESSED"
+                if (
+                    corridor.route_surface_distance_m > 0
+                    and native_resolution_m <= READINESS_POLICY["max_local_dem_resolution_m"]
+                    and getattr(request, "independent_return_computed", False) is True
+                )
+                else ("PARTIALLY_ASSESSED" if corridor.route_surface_distance_m > 0 else "UNAVAILABLE")
+            ),
+            evidence_basis=(
+                f"Outbound {corridor.route_surface_distance_m:.1f} m with {len(corridor.segments)} segments; "
+                + (
+                    "independent destination->start return trajectory verified."
+                    if getattr(request, "independent_return_computed", False)
+                    else "independent return trajectory not yet verified inside corridor dossier (run EVA Return Analysis)."
+                )
+            ),
             policy_version=pv,
-            threshold_or_rule="Strict return-path verification via EVA Operational Envelope when duration limits provided",
+            threshold_or_rule="Requires independent destination->origin path computation, checkpoint turnback verification, and <= 2.0 m/px DEM slope coverage",
         ),
         DomainAssessmentRecord(
             domain="kinematic_duration_budget",

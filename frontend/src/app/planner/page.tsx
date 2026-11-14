@@ -40,9 +40,11 @@ import { LocalTerrain3DViewer } from "@/components/LocalTerrain3DViewer";
 import { API_BASE_URL } from "@/lib/constants";
 import { useRoutingStore } from "@/stores/useRoutingStore";
 import { useTrackingStore } from "@/stores/useTrackingStore";
+import { useEvaOperationsStore } from "@/stores/useEvaOperationsStore";
 import type {
   PathAlgorithm,
   PlanningMode,
+  RouteObjective,
   RouteVertex,
   TerrainPointLookupResponse,
 } from "@/types";
@@ -122,8 +124,21 @@ export default function PlannerPage() {
   const computeRoute = useRoutingStore((s) => s.computeRoute);
   const compareRoutes = useRoutingStore((s) => s.compareRoutes);
   const selectComparedRoute = useRoutingStore((s) => s.selectComparedRoute);
+  const activeObjective = useRoutingStore((s) => s.activeObjective);
+  const robustComparison = useRoutingStore((s) => s.robustComparison);
+  const robustLoading = useRoutingStore((s) => s.robustLoading);
+  const routeSensitivity = useRoutingStore((s) => s.routeSensitivity);
+  const sensitivityLoading = useRoutingStore((s) => s.sensitivityLoading);
+  const setActiveObjective = useRoutingStore((s) => s.setActiveObjective);
+  const computeRobustComparison = useRoutingStore((s) => s.computeRobustComparison);
+  const evaluateRouteSensitivity = useRoutingStore((s) => s.evaluateRouteSensitivity);
+  const selectRobustCandidate = useRoutingStore((s) => s.selectRobustCandidate);
   const exportActiveGeoJSON = useRoutingStore((s) => s.exportActiveGeoJSON);
   const selectInstructionStep = useRoutingStore((s) => s.selectInstructionStep);
+
+  const evaEnvelope = useEvaOperationsStore((s) => s.evaEnvelope);
+  const selectedReturnAlternativeId = useEvaOperationsStore((s) => s.selectedReturnAlternativeId);
+  const setSelectedReturnAlternativeId = useEvaOperationsStore((s) => s.setSelectedReturnAlternativeId);
 
   const trackingStatus = useTrackingStore((s) => s.trackingStatus);
   const replanPreview = useTrackingStore((s) => s.replanPreview);
@@ -379,6 +394,30 @@ export default function PlannerPage() {
           >
             <Scale className="w-3.5 h-3.5" />
             <span>{compareLoading ? "Comparing..." : "Compare 3 Modes"}</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="robust-compare-btn"
+            onClick={() => void computeRobustComparison()}
+            disabled={robustLoading || !startPoint || !destinationPoint}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600/25 hover:bg-purple-600/40 border border-purple-500/45 text-xs font-medium text-purple-200 transition-colors disabled:opacity-50"
+            title="Compute spatially distinct multi-objective routes, independent returns, and scenario stability"
+          >
+            {robustLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+            <span>{robustLoading ? "Robust Compare..." : "Robust Multi-Route"}</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="sensitivity-btn"
+            onClick={() => void evaluateRouteSensitivity()}
+            disabled={sensitivityLoading || !activeRoute}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-600/20 hover:bg-amber-600/35 border border-amber-500/40 text-xs font-medium text-amber-200 transition-colors disabled:opacity-40"
+            title="Run deterministic uncertainty & constraint scenario perturbation tests"
+          >
+            <ShieldAlert className="w-3.5 h-3.5" />
+            <span>{sensitivityLoading ? "Probing..." : "Test Stability"}</span>
           </button>
 
           <button
@@ -727,6 +766,29 @@ export default function PlannerPage() {
                   <div className="text-[10px] text-slate-400">{m.desc}</div>
                 </button>
               ))}
+            </div>
+
+            <div className="space-y-1">
+              <label className="block text-[10px] font-mono text-cyan-300">
+                Explicit Optimization Objective (Prompt 16)
+                <select
+                  data-testid="route-objective-select"
+                  value={activeObjective ?? ""}
+                  onChange={(e) =>
+                    setActiveObjective((e.target.value || null) as RouteObjective | null)
+                  }
+                  className="mt-1 w-full bg-[#0d111a] border border-cyan-500/35 rounded px-2 py-1.5 text-xs text-slate-100"
+                >
+                  <option value="">Follow Strategy Mode ({activeMode})</option>
+                  <option value="BALANCED_MULTIOBJECTIVE">Balanced Multi-Objective</option>
+                  <option value="SHORTEST_TRAVERSABLE">Shortest Traversable Distance</option>
+                  <option value="LOWEST_SLOPE">Lowest Slope Avoidance</option>
+                  <option value="LOWEST_CLIMB_ENERGY">Lowest Gravitational Climb Work</option>
+                  <option value="LOWEST_ROUGHNESS">Lowest Surface Roughness (TRI)</option>
+                  <option value="HIGHEST_EVIDENCE_COVERAGE">Highest Evidence &amp; Low-Uncertainty Coverage</option>
+                  <option value="SCIENCE_CORRIDOR">Science Corridor (Verified Targets Only)</option>
+                </select>
+              </label>
             </div>
 
             <div className="grid grid-cols-2 gap-2 pt-1">
@@ -1157,6 +1219,271 @@ export default function PlannerPage() {
                   </div>
                 )}
               </div>
+
+              {/* Prompt 16: Robust Multi-Route Comparison Matrix + Single-Corridor Bottleneck Honesty */}
+              {robustComparison && (
+                <div
+                  className="bg-[#121622] border border-purple-500/35 rounded-xl p-4 space-y-3"
+                  data-testid="robust-comparison-panel"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Scale className="w-4 h-4 text-purple-300" />
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-purple-200">
+                        Robust Multi-Route Alternatives &amp; Return Comparison ({robustComparison.distinct_candidate_count} distinct)
+                      </h3>
+                    </div>
+                    <span
+                      className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+                        robustComparison.alternative_generation_status === "DISTINCT_ALTERNATIVES_AVAILABLE"
+                          ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                          : "border-amber-500/40 bg-amber-500/15 text-amber-300"
+                      }`}
+                    >
+                      {robustComparison.alternative_generation_status}
+                    </span>
+                  </div>
+
+                  {robustComparison.alternative_generation_status === "SINGLE_CORRIDOR_BOTTLENECK" && (
+                    <div className="rounded-lg border border-amber-500/40 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-200">
+                      Single-Corridor Bottleneck Detected: Candidate objectives converged into substantially overlapping paths (rejected near-duplicates: {robustComparison.duplicate_candidates_rejected}). No artificial corridor detour is fabricated.
+                    </div>
+                  )}
+
+                  <div className="text-[11px] text-slate-300 bg-[#0d111a] border border-[#1e2638] rounded-lg px-3 py-2">
+                    <strong className="text-cyan-300">Selection Rationale:</strong> {robustComparison.recommendation_rationale}
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-[11px] font-mono border-collapse">
+                      <thead>
+                        <tr className="border-b border-[#243047] text-slate-400">
+                          <th className="py-1.5 pr-2">Candidate</th>
+                          <th className="py-1.5 pr-2">Objective</th>
+                          <th className="py-1.5 pr-2">Method / Overlap</th>
+                          <th className="py-1.5 pr-2">Dist / +Gain</th>
+                          <th className="py-1.5 pr-2">Max Slope</th>
+                          <th className="py-1.5 pr-2">3-State Eval</th>
+                          <th className="py-1.5 pr-2">Independent Return</th>
+                          <th className="py-1.5 pr-2">Stability</th>
+                          <th className="py-1.5">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#1e2638]">
+                        {robustComparison.candidates.map((cand) => {
+                          const isSelected = activeRoute?.route_id === cand.route.route_id;
+                          const isRec = robustComparison.recommended_candidate_id === cand.candidate_id;
+                          const travPct =
+                            cand.route.traversability_summary != null
+                              ? `${(cand.route.traversability_summary.evaluated_fraction * 100).toFixed(0)}%`
+                              : "—";
+                          return (
+                            <tr
+                              key={cand.candidate_id}
+                              className={isSelected ? "bg-cyan-500/10 text-white" : "text-slate-300"}
+                            >
+                              <td className="py-1.5 pr-2 font-bold">
+                                {cand.candidate_id}
+                                {isRec && (
+                                  <span className="ml-1 px-1 py-0.2 rounded bg-emerald-500/20 text-emerald-300 text-[9px]">
+                                    REC
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-1.5 pr-2">{cand.objective}</td>
+                              <td className="py-1.5 pr-2 text-slate-400">
+                                {cand.diversification_method} ({(cand.max_overlap_with_prior_routes * 100).toFixed(0)}%)
+                              </td>
+                              <td className="py-1.5 pr-2">
+                                {cand.route.total_surface_distance_m.toFixed(0)} m / +
+                                {cand.route.total_elevation_gain_m.toFixed(1)} m
+                              </td>
+                              <td className="py-1.5 pr-2 text-amber-300">
+                                {cand.route.max_slope_deg.toFixed(1)}°
+                              </td>
+                              <td className="py-1.5 pr-2 text-emerald-300">{travPct}</td>
+                              <td className="py-1.5 pr-2">
+                                {cand.return_computed
+                                  ? `${cand.return_distance_m?.toFixed(0) ?? "?"} m (${((cand.return_overlap_with_outbound_fraction ?? 0) * 100).toFixed(0)}% ovlp)`
+                                  : cand.return_status || "UNCOMPUTED"}
+                              </td>
+                              <td className="py-1.5 pr-2">
+                                {cand.sensitivity_summary?.stability_status ?? "NOT_EVALUATED"}
+                              </td>
+                              <td className="py-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => selectRobustCandidate(cand.candidate_id)}
+                                  className={`px-2 py-0.5 rounded text-[10px] ${
+                                    isSelected
+                                      ? "bg-cyan-500 text-slate-950 font-bold"
+                                      : "bg-[#1a2438] text-cyan-200 hover:bg-cyan-600/30"
+                                  }`}
+                                >
+                                  {isSelected ? "Active" : "Inspect"}
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Prompt 16: Itemized Cost Decomposition & Route Sensitivity Probe */}
+              {(activeRoute.cost_decomposition || routeSensitivity || evaEnvelope?.return_plan) && (
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                  {activeRoute.cost_decomposition && (
+                    <div
+                      className="bg-[#121622] border border-[#1e2638] rounded-xl p-3.5 space-y-2 text-[11px] font-mono"
+                      data-testid="cost-decomposition-panel"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold uppercase tracking-wider text-cyan-300">
+                          Itemized Cost Decomposition ({activeRoute.objective ?? activeRoute.mode})
+                        </span>
+                        <span className="text-[10px] text-emerald-300">
+                          {activeRoute.cost_decomposition.unverified_optical_candidates_excluded
+                            ? "Unverified Optical Excluded"
+                            : "Standard"}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-slate-300">
+                        <span className="text-slate-400">Base Distance Cost:</span>
+                        <span className="text-right">{activeRoute.cost_decomposition.base_distance_cost.toFixed(1)}</span>
+                        <span className="text-slate-400">Slope Penalty Cost:</span>
+                        <span className="text-right">{activeRoute.cost_decomposition.slope_penalty_cost.toFixed(1)}</span>
+                        <span className="text-slate-400">Uphill Climb Effort:</span>
+                        <span className="text-right">{activeRoute.cost_decomposition.uphill_climb_cost.toFixed(1)}</span>
+                        <span className="text-slate-400">Downhill Descent:</span>
+                        <span className="text-right">{activeRoute.cost_decomposition.downhill_descent_cost.toFixed(1)}</span>
+                        <span className="text-slate-400">Roughness (TRI):</span>
+                        <span className="text-right">{activeRoute.cost_decomposition.roughness_penalty_cost.toFixed(1)}</span>
+                        <span className="text-slate-400">Uncertainty / Nodata:</span>
+                        <span className="text-right">
+                          {(
+                            activeRoute.cost_decomposition.uncertainty_penalty_cost +
+                            activeRoute.cost_decomposition.nodata_proximity_cost
+                          ).toFixed(1)}
+                        </span>
+                        <span className="text-slate-400">Science Corridor Bonus:</span>
+                        <span className="text-right text-purple-300">
+                          -{activeRoute.cost_decomposition.science_corridor_reduction.toFixed(1)}
+                        </span>
+                        <span className="text-slate-200 font-bold border-t border-[#1e2638] pt-1">
+                          Total Objective Cost:
+                        </span>
+                        <span className="text-right text-cyan-300 font-bold border-t border-[#1e2638] pt-1">
+                          {activeRoute.cost_decomposition.total_objective_cost.toFixed(1)}
+                        </span>
+                      </div>
+                      {activeRoute.traversability_summary && (
+                        <div className="text-[10px] text-slate-400 pt-1 border-t border-[#1e2638]">
+                          Grid States · Evaluated: {(activeRoute.traversability_summary.evaluated_fraction * 100).toFixed(1)}% · Excluded Slope: {(activeRoute.traversability_summary.known_exclusion_fraction * 100).toFixed(1)}% · Unknown/Edge: {(activeRoute.traversability_summary.unknown_insufficient_fraction * 100).toFixed(1)}%
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {routeSensitivity && (
+                    <div
+                      className="bg-[#121622] border border-amber-500/35 rounded-xl p-3.5 space-y-2 text-[11px] font-mono"
+                      data-testid="route-sensitivity-panel"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs font-bold uppercase tracking-wider text-amber-300">
+                          Deterministic Scenario Sensitivity ({routeSensitivity.evaluated_scenario_count} probes)
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded border text-[10px] ${
+                            routeSensitivity.stability_status === "STABLE_ACROSS_EVALUATED_SCENARIOS"
+                              ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                              : "border-amber-500/40 bg-amber-500/15 text-amber-200"
+                          }`}
+                        >
+                          {routeSensitivity.stability_status}
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-slate-400">
+                        Path changes: {routeSensitivity.scenarios_where_path_changed} · Infeasible: {routeSensitivity.scenarios_where_infeasible} · Driver: {routeSensitivity.dominant_sensitivity_driver ?? "none"}
+                      </div>
+                      <div className="max-h-40 overflow-y-auto space-y-1 pr-1">
+                        {routeSensitivity.scenarios.map((sc) => (
+                          <div
+                            key={sc.scenario_id}
+                            className="flex items-center justify-between rounded border border-[#1e2638] bg-[#0d111a] px-2 py-1 text-[10px]"
+                          >
+                            <div className="truncate pr-2">
+                              <span className="text-slate-200">{sc.label}</span>{" "}
+                              <span className="text-slate-500">({sc.perturbation_parameter})</span>
+                            </div>
+                            <span
+                              className={
+                                !sc.route_found
+                                  ? "text-rose-300"
+                                  : sc.path_changed_from_baseline
+                                  ? "text-amber-300"
+                                  : "text-emerald-300"
+                              }
+                            >
+                              {!sc.route_found
+                                ? "INFEASIBLE"
+                                : sc.path_changed_from_baseline
+                                ? `CHANGED (${((sc.path_signature_diff_fraction ?? 0) * 100).toFixed(0)}%)`
+                                : "STABLE"}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {evaEnvelope?.return_plan && (
+                    <div className="bg-[#121622] border border-cyan-500/35 rounded-xl p-3.5 space-y-2 text-[11px] font-mono xl:col-span-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs font-bold uppercase tracking-wider text-cyan-300">
+                          EVA Independent Return &amp; Turnback Checkpoints ({evaEnvelope.return_plan.return_status ?? evaEnvelope.return_plan.return_strategy})
+                        </span>
+                        <span className="text-slate-300">
+                          PONR Distance: {evaEnvelope.return_plan.point_of_no_return_distance_m != null ? `${evaEnvelope.return_plan.point_of_no_return_distance_m.toFixed(1)} m` : "Unavailable"}
+                        </span>
+                      </div>
+                      {evaEnvelope.return_plan.return_alternatives && evaEnvelope.return_plan.return_alternatives.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-slate-400 text-[10px]">3D Return Alternative:</span>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedReturnAlternativeId(null)}
+                            className={`px-2 py-0.5 rounded text-[10px] border ${
+                              selectedReturnAlternativeId === null
+                                ? "border-cyan-400 bg-cyan-500/20 text-cyan-200"
+                                : "border-[#243047] bg-[#0d111a] text-slate-400"
+                            }`}
+                          >
+                            Primary Independent Return
+                          </button>
+                          {evaEnvelope.return_plan.return_alternatives.map((alt) => (
+                            <button
+                              key={alt.alternative_id}
+                              type="button"
+                              onClick={() => setSelectedReturnAlternativeId(alt.alternative_id)}
+                              className={`px-2 py-0.5 rounded text-[10px] border ${
+                                selectedReturnAlternativeId === alt.alternative_id
+                                  ? "border-rose-400 bg-rose-500/20 text-rose-200"
+                                  : "border-[#243047] bg-[#0d111a] text-slate-300"
+                              }`}
+                            >
+                              {alt.strategy_label} ({alt.surface_distance_m.toFixed(0)} m, +{alt.elevation_gain_m.toFixed(1)} m)
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Strictly 4 Labeled Metric Groups */}
               {activeRoute.provenance_graph && (

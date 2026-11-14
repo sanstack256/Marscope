@@ -73,6 +73,8 @@ function buildTileTextureUrl(
   } else if (texOverlay === "roughness" && manifest.roughness_range_m) {
     qs.set("vmin", String(manifest.roughness_range_m.min_m));
     qs.set("vmax", String(manifest.roughness_range_m.max_m));
+  } else if (texOverlay === "traversability_state") {
+    qs.set("max_slope_deg", String(useRoutingStore.getState().constraints.max_slope_deg ?? 20));
   }
   return `${API_BASE_URL}/terrain/ortho/${encodeURIComponent(texDatasetId)}/texture?${qs.toString()}`;
 }
@@ -179,6 +181,9 @@ export function LocalTerrain3DViewer({
   const evidenceOverlays = useEvidenceStore((s) => s.overlays);
   const selectedSegmentId = useEvidenceStore((s) => s.selectedSegmentId);
   const evaReturnPlan = useEvaOperationsStore((s) => s.evaEnvelope?.return_plan ?? null);
+  const selectedReturnAlternativeId = useEvaOperationsStore((s) => s.selectedReturnAlternativeId);
+  const robustComparison = useRoutingStore((s) => s.robustComparison);
+  const maxSlopeDeg = useRoutingStore((s) => s.constraints.max_slope_deg);
   const startPoint = useRoutingStore((s) => s.startPoint);
   const destinationPoint = useRoutingStore((s) => s.destinationPoint);
   const customWaypoints = useRoutingStore((s) => s.customWaypoints);
@@ -1381,6 +1386,85 @@ export function LocalTerrain3DViewer({
         });
       }
     }
+
+    // Prompt 16: Multi-Route Alternative Corridors (distinct objectives / diversified corridors)
+    if (
+      showRoute &&
+      robustComparison &&
+      robustComparison.dataset_id === meshManifest.dataset_id &&
+      (evidenceOverlays.showAlternativeRoutes ?? true)
+    ) {
+      const altColors = ["#a855f7", "#10b981", "#f59e0b", "#ec4899", "#14b8a6", "#6366f1"];
+      let cIdx = 0;
+      robustComparison.candidates.forEach((cand) => {
+        if (!cand.route || cand.route.route_id === activeRoute?.route_id || cand.route.vertices.length < 2) {
+          return;
+        }
+        const pts = cand.route.vertices.map((v) => toSceneVec(v.lat, v.lon_east, v.elevation_m, 2.2));
+        const geom = new THREE.BufferGeometry().setFromPoints(pts);
+        const mat = new THREE.LineBasicMaterial({
+          color: altColors[cIdx % altColors.length],
+          transparent: true,
+          opacity: 0.72,
+        });
+        overlayGroup.add(new THREE.Line(geom, mat));
+        cIdx += 1;
+      });
+    }
+
+    // Prompt 16: Highlighted Independent Return Alternative (if selected)
+    if (showRoute && evaReturnPlan?.return_alternatives?.length && selectedReturnAlternativeId) {
+      const altRet = evaReturnPlan.return_alternatives.find(
+        (a) => a.alternative_id === selectedReturnAlternativeId
+      );
+      if (altRet && altRet.vertices.length >= 2) {
+        const retPts = altRet.vertices.map((rv) => toSceneVec(rv.lat, rv.lon_east, rv.elevation_m, 4.4));
+        const rg = new THREE.BufferGeometry().setFromPoints(retPts);
+        const rm = new THREE.LineDashedMaterial({
+          color: "#f43f5e",
+          dashSize: Math.max(4, pinScale * 2.2),
+          gapSize: Math.max(2, pinScale * 1.1),
+        });
+        const rl = new THREE.Line(rg, rm);
+        rl.computeLineDistances();
+        overlayGroup.add(rl);
+      }
+    }
+
+    // Prompt 16: 3D Turnback PONR Checkpoint Marker on active outbound path
+    if (
+      showRoute &&
+      activeRoute &&
+      activeRoute.vertices.length >= 2 &&
+      evaReturnPlan?.point_of_no_return_distance_m != null &&
+      (evidenceOverlays.showTurnbackPonr ?? true)
+    ) {
+      const targetDist = evaReturnPlan.point_of_no_return_distance_m;
+      let bestV = activeRoute.vertices[0];
+      let bestDiff = Math.abs(bestV.cumulative_distance_m - targetDist);
+      for (const v of activeRoute.vertices) {
+        const d = Math.abs(v.cumulative_distance_m - targetDist);
+        if (d < bestDiff) {
+          bestDiff = d;
+          bestV = v;
+        }
+      }
+      const ponrPos = toSceneVec(bestV.lat, bestV.lon_east, bestV.elevation_m, 6.2);
+      const ponrGroup = new THREE.Group();
+      ponrGroup.position.copy(ponrPos);
+      const ponrOrb = new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.95, 0),
+        new THREE.MeshBasicMaterial({ color: "#fb7185" })
+      );
+      const ponrRing = new THREE.Mesh(
+        new THREE.RingGeometry(1.3, 1.85, 24),
+        new THREE.MeshBasicMaterial({ color: "#fb7185", side: THREE.DoubleSide })
+      );
+      ponrRing.rotation.x = -Math.PI / 2;
+      ponrGroup.add(ponrOrb, ponrRing);
+      overlayGroup.add(ponrGroup);
+      zoomAdaptiveMarkersRef.current.push({ obj: ponrGroup, weight: 1.05 });
+    }
   }, [
     meshManifest,
     verticalExaggeration,
@@ -1402,6 +1486,9 @@ export function LocalTerrain3DViewer({
     evidenceOverlays,
     selectedSegmentId,
     evaReturnPlan,
+    selectedReturnAlternativeId,
+    robustComparison,
+    maxSlopeDeg,
   ]);
 
   // Respond to external camera focus requests (e.g. clicking an instruction row or target)
@@ -1613,6 +1700,35 @@ export function LocalTerrain3DViewer({
             </button>
           ))}
         </div>
+
+        {/* Prompt 16 Scientific Uncertainty / 3-State Traversability / Observability Overlays */}
+        <div
+          className="flex flex-wrap bg-[#0b101b]/95 border border-cyan-500/35 rounded-lg p-0.5 text-[10px] font-mono"
+          data-testid="prompt16-overlay-selector"
+        >
+          {(
+            [
+              { id: "uncertainty_status", label: "Uncertainty" },
+              { id: "traversability_state", label: "3-State Trav" },
+              { id: "observability", label: "Observability" },
+              { id: "slope_uncertainty_probe", label: "Slope Probe" },
+            ] as Array<{ id: TextureOverlayMode; label: string }>
+          ).map((ov) => (
+            <button
+              key={ov.id}
+              type="button"
+              onClick={() => setActiveOverlayMode(ov.id)}
+              className={`px-2 py-1 rounded transition-colors ${
+                activeOverlayMode === ov.id
+                  ? "bg-cyan-500 text-slate-950 font-bold"
+                  : "text-cyan-200/80 hover:text-white hover:bg-[#182235]"
+              }`}
+              title={meshManifest?.overlay_legends?.[ov.id]?.label ?? ov.label}
+            >
+              {ov.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Pick Mode & Camera Controls */}
@@ -1730,9 +1846,67 @@ export function LocalTerrain3DViewer({
               EVD:{corridorAssessment.cache_validity}
             </span>
           )}
+          {evaReturnPlan?.return_status && (
+            <span
+              className={`px-2 py-0.5 rounded font-mono text-[10px] border ${
+                evaReturnPlan.return_status === "INDEPENDENT_RETURN_COMPUTED"
+                  ? "border-emerald-700/70 bg-emerald-950/60 text-emerald-300"
+                  : evaReturnPlan.return_status === "REVERSED_OUTBOUND_REFERENCE_ONLY"
+                  ? "border-amber-700/70 bg-amber-950/60 text-amber-200"
+                  : "border-rose-700/70 bg-rose-950/60 text-rose-300"
+              }`}
+              title={evaReturnPlan.return_strategy_note ?? "Return plan computation status"}
+            >
+              RET:{evaReturnPlan.return_status}
+            </span>
+          )}
         </div>
         </div>
       </div>
+
+      {/* Prompt 16 Backend-Synchronized Overlay Legend & Unavailability Diagnostics */}
+      {meshManifest?.overlay_legends?.[activeOverlayMode] && (
+        <div
+          className="mx-2.5 mt-1 z-10 pointer-events-auto max-w-md rounded-lg border border-[#243047] bg-[#0b101b]/90 px-3 py-2 text-[10px] font-mono text-slate-200 shadow-lg"
+          data-testid="prompt16-dynamic-legend"
+        >
+          {(() => {
+            const leg = meshManifest.overlay_legends![activeOverlayMode];
+            return (
+              <div className="space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-cyan-300">{leg.label}</span>
+                  <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 uppercase">
+                    {leg.uncertainty_classification} · {leg.units}
+                  </span>
+                </div>
+                {!leg.available && leg.unavailable_reason && (
+                  <div className="text-amber-300 bg-amber-950/50 border border-amber-500/30 rounded px-2 py-1">
+                    Unavailable: {leg.unavailable_reason}
+                  </div>
+                )}
+                <div className="text-slate-400">
+                  Method: {leg.method} ({leg.normalization})
+                  {leg.vmin != null && leg.vmax != null ? ` · Range [${leg.vmin}, ${leg.vmax}]` : ""}
+                </div>
+                {leg.categories && leg.categories.length > 0 && (
+                  <div className="flex flex-wrap gap-2 pt-0.5">
+                    {leg.categories.map((cat) => (
+                      <span key={cat.label} className="inline-flex items-center gap-1 text-slate-300">
+                        <span
+                          className="inline-block w-2.5 h-2.5 rounded-sm border border-white/20"
+                          style={{ backgroundColor: cat.hex }}
+                        />
+                        <span>{cat.label}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+      )}
 
       {/* Overwrite Confirmation Prompt for Existing Start / Destination */}
       {pendingPickConfirm && (

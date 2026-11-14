@@ -34,6 +34,87 @@ class SpeedModelMode(str, Enum):
     TOBLER_STYLE_GRADE_APPROXIMATION = "TOBLER_STYLE_GRADE_APPROXIMATION"
 
 
+class ReturnPlanStatus(str, Enum):
+    """Explicit epistemic status distinguishing verified independent returns from references or failures."""
+
+    INDEPENDENT_RETURN_COMPUTED = "INDEPENDENT_RETURN_COMPUTED"
+    REVERSED_OUTBOUND_REFERENCE_ONLY = "REVERSED_OUTBOUND_REFERENCE_ONLY"
+    RETURN_COMPUTATION_FAILED = "RETURN_COMPUTATION_FAILED"
+    RETURN_DATA_UNAVAILABLE = "RETURN_DATA_UNAVAILABLE"
+    RETURN_CONSTRAINTS_UNSATISFIED = "RETURN_CONSTRAINTS_UNSATISFIED"
+
+
+class LocomotionModelSpec(BaseModel):
+    """Explicitly versioned planetary EVA locomotion timing specification and validity boundary."""
+
+    model_id: str
+    model_version: str
+    classification: str  # user_parameterized_reference | unvalidated_terrestrial_heuristic
+    description: str
+    applicable_scope: str
+    unvalidated_note: str
+
+
+LOCOMOTION_MODEL_CONSTANT = LocomotionModelSpec(
+    model_id="MARSCOPE-LOCO-CONST",
+    model_version="locomotion_v1.0",
+    classification="user_parameterized_reference",
+    description="Constant user-configured surface walking speed (duration = surface_distance_m / walking_speed_mps).",
+    applicable_scope="Nominal sensitivity reference; neglects slope slowdown and fatigue.",
+    unvalidated_note="Does NOT account for suited EVA metabolic exertion, slope slow-down, or loose regolith slip.",
+)
+
+LOCOMOTION_MODEL_TOBLER_APPROX = LocomotionModelSpec(
+    model_id="MARSCOPE-LOCO-TOBLER",
+    model_version="locomotion_v1.0",
+    classification="unvalidated_terrestrial_heuristic",
+    description="Terrestrial Tobler exponential hiking grade heuristic scaled to user base speed plus 55 deg local slope attenuation.",
+    applicable_scope="Exploratory sensitivity probe comparing uphill vs downhill asymmetry ONLY.",
+    unvalidated_note="NOT calibrated or validated for pressurized Mars suit biomechanics, partial gravity (3.72 m/s^2), or dusty talus.",
+)
+
+
+def get_locomotion_model_spec(use_tobler: bool) -> LocomotionModelSpec:
+    return LOCOMOTION_MODEL_TOBLER_APPROX if use_tobler else LOCOMOTION_MODEL_CONSTANT
+
+
+class TurnbackCheckpointRecord(BaseModel):
+    """Turnback safety verification at one outbound checkpoint using an actual independent C_i -> origin path."""
+
+    checkpoint_index: int
+    lat: float
+    lon_east: float
+    outbound_distance_m: float
+    outbound_elapsed_s: Optional[float] = None
+    return_route_computed: bool
+    independent_return_distance_m: Optional[float] = None
+    independent_return_elevation_gain_m: Optional[float] = None
+    independent_return_duration_constant_s: Optional[float] = None
+    independent_return_duration_tobler_s: Optional[float] = None
+    estimated_roundtrip_time_s: Optional[float] = None
+    fits_usable_budget: Optional[bool] = None
+    return_differs_from_outbound: bool = False
+    failure_reason: Optional[str] = None
+
+
+class IndependentReturnAlternative(BaseModel):
+    """One distinct alternative return corridor evaluated from destination back to origin."""
+
+    alternative_id: str
+    objective: str
+    strategy_label: str
+    horizontal_distance_m: float
+    surface_distance_m: float
+    elevation_gain_m: float
+    max_slope_deg: float
+    mean_slope_deg: float
+    estimated_time_constant_s: Optional[float] = None
+    estimated_time_tobler_s: Optional[float] = None
+    spatial_overlap_with_primary_fraction: Optional[float] = None
+    overlap_with_outbound_fraction: Optional[float] = None
+    vertices: List[RouteVertex] = Field(default_factory=list)
+
+
 class ExplicitResourceSpec(BaseModel):
     resource_name: str = Field(..., min_length=1, description="Explicit supply name (e.g. oxygen_kg, battery_wh)")
     initial_quantity: float = Field(..., ge=0.0)
@@ -75,12 +156,13 @@ class TimeBudgetBreakdown(BaseModel):
     return_travel_s: Optional[float] = None
     reserve_protected_s: Optional[float] = None
     total_required_s: Optional[float] = None
-    mission_duration_limit_s: Optional[float] = None
+    mission_duration_limit_s: float | None = None
     usable_budget_s: Optional[float] = None
     time_margin_s: Optional[float] = None
     within_time_budget: Optional[bool] = None
     speed_model_used: SpeedModelMode = SpeedModelMode.CONSTANT_USER_SPEED
     speed_model_validation_note: str
+    locomotion_model: Optional[LocomotionModelSpec] = None
     missing_inputs: List[str] = Field(default_factory=list)
 
 
@@ -125,8 +207,10 @@ class SegmentScheduleItem(BaseModel):
 
 
 class ReturnPlanReport(BaseModel):
+    return_status: ReturnPlanStatus = ReturnPlanStatus.INDEPENDENT_RETURN_COMPUTED
     return_route_computed: bool
-    return_strategy: str  # explicit_computed_reverse_path | symmetric_reverse_corridor | unavailable
+    return_strategy: str  # independent_return_route | reversed_outbound_reference_only | return_computation_failed | return_data_unavailable
+    return_strategy_note: Optional[str] = None
     return_route_vertices: List[RouteVertex] = Field(default_factory=list)
     return_horizontal_distance_m: float
     return_surface_distance_m: float
@@ -137,6 +221,12 @@ class ReturnPlanReport(BaseModel):
     asymmetric_climb_delta_m: float
     return_margin_s: Optional[float] = None
     point_of_no_return_distance_m: Optional[float] = None
+    turnback_constraint_checkpoint_distance_m: Optional[float] = None
+    turnback_ponr_method: str = "checkpoint_independent_reverse_dijkstra"
+    overlap_with_outbound_fraction: Optional[float] = None
+    locomotion_model: Optional[LocomotionModelSpec] = None
+    turnback_checkpoints: List[TurnbackCheckpointRecord] = Field(default_factory=list)
+    return_alternatives: List[IndependentReturnAlternative] = Field(default_factory=list)
     feasible_within_usable_budget: Optional[bool] = None
     warnings: List[str] = Field(default_factory=list)
 

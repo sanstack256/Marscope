@@ -996,7 +996,40 @@ export interface MobilityEvaluationResponse {
 // Prompt 11: Real 3D Terrain Mesh & Science-Aware Routing
 // ============================================================
 
-export type TextureOverlayMode = "ortho" | "elevation" | "slope" | "roughness";
+export type TextureOverlayMode =
+  | "ortho"
+  | "elevation"
+  | "slope"
+  | "roughness"
+  | "uncertainty_status"
+  | "traversability_state"
+  | "observability"
+  | "slope_uncertainty_probe";
+
+export type RouteObjective =
+  | "SHORTEST_TRAVERSABLE"
+  | "LOWEST_SLOPE"
+  | "LOWEST_CLIMB_ENERGY"
+  | "LOWEST_ROUGHNESS"
+  | "HIGHEST_EVIDENCE_COVERAGE"
+  | "SCIENCE_CORRIDOR"
+  | "BALANCED_MULTIOBJECTIVE";
+
+export interface OverlayLegendDescriptor {
+  overlay_id: string;
+  label: string;
+  available: boolean;
+  unavailable_reason?: string | null;
+  units: string;
+  normalization: string;
+  method: string;
+  uncertainty_classification: string;
+  vmin?: number | null;
+  vmax?: number | null;
+  no_data_meaning?: string | null;
+  palette_stops: Array<{ t: number; rgb?: number[]; hex: string; color?: string }>;
+  categories: Array<{ label: string; hex: string }>;
+}
 export type SurfacePickMode = "inspect" | "set_start" | "add_waypoint" | "set_destination";
 export type PathAlgorithm = "astar" | "dijkstra";
 
@@ -1189,6 +1222,7 @@ export interface TerrainMeshManifest {
   roughness_range_m?: { min_m: number; max_m: number } | null;
   tri_metadata?: Record<string, unknown> | null;
   color_normalizations?: Record<string, ColorNormalizationSpec>;
+  overlay_legends?: Record<string, OverlayLegendDescriptor>;
 }
 
 export interface TerrainMeshTile {
@@ -1359,6 +1393,7 @@ export interface RouteComputeResponse {
   crs: string;
   bearing_convention: string;
   mode: PlanningMode;
+  objective?: RouteObjective | null;
   mode_label: string;
   algorithm: PathAlgorithm;
   effective_slope_limit_deg: number;
@@ -1395,11 +1430,16 @@ export interface RouteComputeResponse {
   resolution_suitability: Record<string, ScaleSuitabilityRecord>;
   provenance?: Record<string, unknown> | null;
   provenance_graph?: ProvenanceDependencyGraph | null;
+  decision_explainer?: RouteDecisionExplainer | null;
+  cost_decomposition?: RouteCostDecomposition | null;
+  traversability_summary?: RouteTraversabilitySummary | null;
+  uncertainty_status?: string | null;
   limitations: string[];
 }
 
 export interface RouteCompareEntry {
   mode: PlanningMode;
+  objective?: RouteObjective | null;
   mode_label: string;
   feasible: boolean;
   error_reason?: string | null;
@@ -1863,6 +1903,8 @@ export interface MissionDossierResponse {
   readiness_policy_version?: string;
   cache_validity?: "CURRENT" | "STALE" | "RECOMPUTING" | "FAILED" | "UNAVAILABLE";
   stale_reasons?: string[];
+  corridor_uncertainty_profile?: CorridorUncertaintyProfile | null;
+  complementarity_report?: ComplementarityAssessmentReport | null;
 }
 
 export interface EvaExplicitResourceSpec {
@@ -1945,6 +1987,19 @@ export interface EvaSegmentScheduleItem {
 }
 
 export interface EvaReturnPlanReport {
+  return_status?:
+    | "INDEPENDENT_RETURN_COMPUTED"
+    | "RETURN_CONSTRAINTS_UNSATISFIED"
+    | "RETURN_COMPUTATION_FAILED"
+    | "RETURN_DATA_UNAVAILABLE"
+    | "REVERSED_OUTBOUND_REFERENCE_ONLY"
+    | "NOT_REQUESTED";
+  turnback_ponr_method?: string;
+  return_strategy_note?: string;
+  overlap_with_outbound_fraction?: number | null;
+  locomotion_model?: LocomotionModelSpec | null;
+  turnback_checkpoints?: TurnbackCheckpointRecord[];
+  return_alternatives?: IndependentReturnAlternative[];
   return_route_computed: boolean;
   return_strategy: string;
   return_route_vertices: Array<{ seq: number; lat: number; lon_east: number; elevation_m: number }>;
@@ -1997,4 +2052,288 @@ export interface EvaMissionEnvelopeResponse {
   limitations: string[];
   cache_validity: string;
   compute_time_ms: number;
+}
+
+// ============================================================
+// Prompt 16: Terrain Uncertainty, Observability, Complementarity,
+// Robust Multi-Route Optimization & Independent Return Analysis
+// ============================================================
+
+export interface UncertaintyMetricRecord {
+  metric_name: string;
+  metric_kind: string;
+  status: string;
+  value?: number | null;
+  units?: string | null;
+  confidence_level?: string | null;
+  is_spatial_map: boolean;
+  is_quantified_empirical_error: boolean;
+  source_basis: string;
+  notes?: string | null;
+}
+
+export interface DatasetUncertaintyProfile {
+  model_version: string;
+  dataset_id: string;
+  product_id: string;
+  product_type: string;
+  crs: string;
+  vertical_datum: string;
+  horizontal_resolution_m?: number | null;
+  sample_bits?: number | null;
+  sample_type?: string | null;
+  is_integer_quantized: boolean;
+  has_per_pixel_error_raster: boolean;
+  pds_keywords_present: Record<string, unknown>;
+  elevation_uncertainty_metrics: UncertaintyMetricRecord[];
+  overall_elevation_uncertainty_status: string;
+  georegistration_uncertainty: Record<string, unknown>;
+  missing_uncertainty_fields: string[];
+  limitations: string[];
+}
+
+export interface SlopeUncertaintySummary {
+  status: string;
+  metric_kind: string;
+  basis_sigma_z_m?: number | null;
+  basis_description: string;
+  is_empirical_error_map: boolean;
+  is_metadata_sensitivity_probe: boolean;
+  mean_slope_sigma_deg?: number | null;
+  max_slope_sigma_deg?: number | null;
+  median_slope_sigma_deg?: number | null;
+  near_flat_bias_affected_fraction?: number | null;
+  invalid_neighborhood_fraction: number;
+  analytical_formula: string;
+  notes: string[];
+}
+
+export interface RoughnessUncertaintySummary {
+  status: string;
+  metric_kind: string;
+  window_shape_pixels: string;
+  window_dimensions_m: Record<string, number>;
+  mean_tri_sigma_m?: number | null;
+  max_tri_sigma_m?: number | null;
+  invalid_neighborhood_fraction: number;
+  notes: string[];
+}
+
+export interface RegistrationUncertaintyResult {
+  dem_dataset_id: string;
+  optical_dataset_id?: string | null;
+  overall_status: string;
+  pair_assessments: Array<Record<string, unknown>>;
+  slope_and_point_sensitivity_note: string;
+  limitations: string[];
+}
+
+export interface FeatureObservabilityRecord {
+  category: string;
+  observability_state: string;
+  source_dataset_id: string;
+  native_pixel_scale_m?: number | null;
+  minimum_resolvable_feature_size_m?: number | null;
+  minimum_recommended_spacing_m?: number | null;
+  nyquist_factor_pixels: number;
+  policy_id: string;
+  policy_version: string;
+  classification: string;
+  negative_evidence_permitted: boolean;
+  negative_evidence_statement: string;
+  rationale: string;
+}
+
+export interface NegativeEvidenceStatement {
+  zero_detections_implies_obstacle_free: boolean;
+  unresolved_hazard_classes: string[];
+  minimum_resolvable_feature_m?: number | null;
+  statement: string;
+}
+
+export interface TraversabilityCellBreakdown {
+  evaluated_cell_count: number;
+  known_exclusion_cell_count: number;
+  unknown_insufficient_cell_count: number;
+  evaluated_fraction: number;
+  known_exclusion_fraction: number;
+  unknown_insufficient_fraction: number;
+  quantified_uncertainty_cell_fraction: number;
+  unquantified_uncertainty_cell_fraction: number;
+  traversability_states_present: string[];
+}
+
+export interface CorridorUncertaintyProfile {
+  model_version: string;
+  dataset_profile: DatasetUncertaintyProfile;
+  slope_uncertainty: SlopeUncertaintySummary;
+  roughness_uncertainty: RoughnessUncertaintySummary;
+  registration_uncertainty: RegistrationUncertaintyResult;
+  observability: FeatureObservabilityRecord[];
+  negative_evidence: NegativeEvidenceStatement;
+  traversability_breakdown: TraversabilityCellBreakdown;
+  overlay_legends: Record<string, OverlayLegendDescriptor>;
+  compute_time_ms: number;
+}
+
+export interface DatasetRoleDescriptor {
+  dataset_id_pattern: string;
+  title: string;
+  mission_and_instrument: string;
+  native_scale_description: string;
+  primary_measurement_domain: string;
+  supports: string[];
+  does_not_support: string[];
+  complementary_role: string;
+  isolation_warning?: string | null;
+}
+
+export interface CrossValidationRule {
+  primary_source: string;
+  secondary_source: string;
+  relationship: string;
+  scientific_caution: string;
+}
+
+export interface ComplementarityAssessmentReport {
+  registry_id: string;
+  registry_version: string;
+  active_dataset_ids: string[];
+  dataset_roles: DatasetRoleDescriptor[];
+  cross_validation_rules: CrossValidationRule[];
+  coverage_caveats: string[];
+}
+
+export interface RouteCostDecomposition {
+  base_distance_cost: number;
+  slope_penalty_cost: number;
+  uphill_climb_cost: number;
+  downhill_descent_cost: number;
+  roughness_penalty_cost: number;
+  uncertainty_penalty_cost: number;
+  nodata_proximity_cost: number;
+  science_corridor_reduction: number;
+  total_objective_cost: number;
+  dominant_cost_driver: string;
+  science_bonus_sources_used: string[];
+  unverified_optical_candidates_excluded: boolean;
+}
+
+export interface RouteTraversabilitySummary {
+  evaluated_cell_count: number;
+  known_exclusion_cell_count: number;
+  unknown_insufficient_cell_count: number;
+  evaluated_fraction: number;
+  known_exclusion_fraction: number;
+  unknown_insufficient_fraction: number;
+  unverified_optical_candidates_excluded_from_bonus: boolean;
+}
+
+export interface ScenarioSensitivityOutcome {
+  scenario_id: string;
+  label: string;
+  perturbation_parameter: string;
+  perturbation_description: string;
+  route_found: boolean;
+  path_changed_from_baseline: boolean;
+  path_signature_diff_fraction?: number | null;
+  total_distance_m?: number | null;
+  estimated_time_s?: number | null;
+  max_slope_deg?: number | null;
+  total_objective_cost?: number | null;
+  constraint_status_changed: boolean;
+  notes: string[];
+}
+
+export interface RouteSensitivityReport {
+  policy_id: string;
+  policy_version: string;
+  baseline_route_id: string;
+  stability_status:
+    | "STABLE_ACROSS_EVALUATED_SCENARIOS"
+    | "CHANGES_ACROSS_EVALUATED_SCENARIOS"
+    | "INSUFFICIENT_SCENARIOS"
+    | "NOT_EVALUATED";
+  evaluated_scenario_count: number;
+  scenarios_where_path_changed: number;
+  scenarios_where_infeasible: number;
+  dominant_sensitivity_driver?: string | null;
+  uncertainty_basis_note: string;
+  scenarios: ScenarioSensitivityOutcome[];
+}
+
+export interface DistinctRouteCandidate {
+  candidate_id: string;
+  objective: RouteObjective;
+  objective_label: string;
+  diversification_method: string;
+  max_overlap_with_prior_routes: number;
+  route: RouteComputeResponse;
+  return_computed: boolean;
+  return_status?: string | null;
+  return_distance_m?: number | null;
+  return_elevation_gain_m?: number | null;
+  return_overlap_with_outbound_fraction?: number | null;
+  sensitivity_summary?: RouteSensitivityReport | null;
+  evidence_highlights: string[];
+}
+
+export interface RobustRouteCompareResponse {
+  dataset_id: string;
+  source_product_id: string;
+  alternative_generation_status:
+    | "DISTINCT_ALTERNATIVES_AVAILABLE"
+    | "SINGLE_CORRIDOR_BOTTLENECK"
+    | "INSUFFICIENT_FEASIBLE_ROUTES";
+  recommended_candidate_id?: string | null;
+  recommendation_rationale: string;
+  distinct_candidate_count: number;
+  duplicate_candidates_rejected: number;
+  pairwise_overlap_matrix: Record<string, Record<string, number>>;
+  candidates: DistinctRouteCandidate[];
+  rejected_near_duplicates: Array<Record<string, unknown>>;
+  limitations: string[];
+  compute_time_ms: number;
+}
+
+export interface LocomotionModelSpec {
+  model_id: string;
+  model_version: string;
+  classification: string;
+  description: string;
+  applicable_scope: string;
+  unvalidated_note: string;
+}
+
+export interface TurnbackCheckpointRecord {
+  checkpoint_index: number;
+  lat: number;
+  lon_east: number;
+  outbound_distance_m: number;
+  outbound_elapsed_s?: number | null;
+  return_route_computed: boolean;
+  independent_return_distance_m?: number | null;
+  independent_return_elevation_gain_m?: number | null;
+  independent_return_duration_constant_s?: number | null;
+  independent_return_duration_tobler_s?: number | null;
+  estimated_roundtrip_time_s?: number | null;
+  fits_usable_budget?: boolean | null;
+  return_differs_from_outbound: boolean;
+  failure_reason?: string | null;
+}
+
+export interface IndependentReturnAlternative {
+  alternative_id: string;
+  objective: RouteObjective;
+  strategy_label: string;
+  horizontal_distance_m: number;
+  surface_distance_m: number;
+  elevation_gain_m: number;
+  max_slope_deg: number;
+  mean_slope_deg: number;
+  estimated_time_constant_s?: number | null;
+  estimated_time_tobler_s?: number | null;
+  spatial_overlap_with_primary_fraction: number;
+  overlap_with_outbound_fraction: number;
+  vertices: RouteVertex[];
 }

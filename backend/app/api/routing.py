@@ -7,8 +7,11 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, HTTPException
 
 from app.routing.graph import RoutePlanningError
+from app.routing.models import OBJECTIVE_POLICIES, ROUTE_OBJECTIVES_VERSION
 from app.routing.schemas import (
     NavigationInstruction,
+    RobustRouteCompareRequest,
+    RobustRouteCompareResponse,
     RouteCompareRequest,
     RouteCompareResponse,
     RouteComputeRequest,
@@ -18,6 +21,7 @@ from app.routing.schemas import (
     RouteVertex,
 )
 from app.services.container import routing_service
+from app.terrain_uncertainty.sensitivity import RouteSensitivityReport
 
 router = APIRouter(prefix="/routing", tags=["routing"])
 
@@ -25,6 +29,32 @@ router = APIRouter(prefix="/routing", tags=["routing"])
 @router.get("/status", response_model=RouteStatusResponse)
 async def get_routing_status() -> RouteStatusResponse:
     return routing_service.get_status()
+
+
+@router.get("/objectives")
+async def list_routing_objectives() -> Dict[str, Any]:
+    """Return all seven explicit Prompt 16 RouteObjective policies and cost weights."""
+    return {
+        "policy_version": ROUTE_OBJECTIVES_VERSION,
+        "objectives": [
+            {
+                "objective": obj.value,
+                "legacy_mode": pol.mode.value,
+                "label": pol.label,
+                "description": pol.description,
+                "effective_slope_limit_factor": pol.effective_slope_limit_factor,
+                "slope_weight": pol.slope_weight,
+                "uphill_weight": pol.uphill_weight,
+                "downhill_weight": pol.downhill_weight,
+                "roughness_weight": pol.roughness_weight,
+                "uncertainty_weight": pol.uncertainty_weight,
+                "nodata_proximity_weight": pol.nodata_proximity_weight,
+                "science_corridor_bonus": pol.science_corridor_bonus,
+                "min_cost_multiplier": pol.min_cost_multiplier,
+            }
+            for obj, pol in OBJECTIVE_POLICIES.items()
+        ],
+    }
 
 
 @router.post("/validate", response_model=RouteValidationResponse)
@@ -47,6 +77,26 @@ async def compute_route(req: RouteComputeRequest) -> RouteComputeResponse:
 async def compare_routes(req: RouteCompareRequest) -> RouteCompareResponse:
     try:
         return routing_service.compare_routes(req)
+    except RoutePlanningError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
+
+
+@router.post("/robust-compare", response_model=RobustRouteCompareResponse)
+async def compare_robust_routes(req: RobustRouteCompareRequest) -> RobustRouteCompareResponse:
+    """Generate genuinely distinct alternative routes with return check, cost decomposition, and sensitivity."""
+    try:
+        return routing_service.compute_robust_comparison(req)
+    except RoutePlanningError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail) from exc
+
+
+@router.get("/{route_id}/sensitivity", response_model=RouteSensitivityReport)
+async def get_route_sensitivity(route_id: str) -> RouteSensitivityReport:
+    """Evaluate deterministic scenario perturbation stability for a previously computed route."""
+    try:
+        return routing_service.evaluate_route_sensitivity(route_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RoutePlanningError as exc:
         raise HTTPException(status_code=422, detail=exc.detail) from exc
 

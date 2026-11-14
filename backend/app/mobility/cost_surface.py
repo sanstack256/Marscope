@@ -143,6 +143,15 @@ def build_traversal_cost_surface(
             "configured, or all cells were unknown/excluded)."
         )
 
+    unc_status = "QUANTIFIED_FROM_METADATA" if dataset.vertical_resolution_meters is not None else "UNCERTAINTY_UNQUANTIFIED"
+    if any("QUANT" in f.upper() or "INT" in f.upper() for f in (dataset.quality_flags or [])) or "mola" in dataset.id.lower():
+        unc_status = "QUANTIZATION_LOWER_BOUND_ONLY"
+
+    trav_notes = [
+        "3-state traversability preserves UNKNOWN_TERRAIN, EXPLICIT_SCENARIO_EXCLUSION, and EVALUATED without merging unknown gaps into safe terrain.",
+        "Elevation uncertainty status is strictly separated from cost-surface speed calculations.",
+    ]
+
     return CostSurfaceSummary(
         cost_surface_id=cs_id,
         dataset_id=dataset.id,
@@ -173,4 +182,8 @@ def build_traversal_cost_surface(
         mean_cell_crossing_time_seconds=round(float(np.mean(crossing_times)), 3) if crossing_times else None,
         cells=cost_cells,
         limitations=limitations,
+        uncertainty_status=unc_status,
+        nominal_vertical_precision_m=dataset.vertical_resolution_meters,
+        has_per_pixel_error_raster=False,
+        traversability_state_notes=trav_notes,
     )

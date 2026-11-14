@@ -8,7 +8,8 @@ from pydantic import BaseModel, Field
 
 from app.science.provenance_graph import ProvenanceDependencyGraph
 
-from app.routing.models import PathAlgorithm, RoutingMode
+from app.routing.models import PathAlgorithm, RouteObjective, RoutingMode
+from app.terrain_uncertainty.sensitivity import RouteSensitivityReport
 
 
 class RouteCoordinateInput(BaseModel):
@@ -79,6 +80,14 @@ class RouteComputeRequest(BaseModel):
         default_factory=list, description="Explicit extra coordinate stops (or custom science stops)"
     )
     mode: RoutingMode = Field(RoutingMode.BALANCED)
+    objective: Optional[RouteObjective] = Field(
+        None,
+        description="Explicit Prompt 16 route objective (overrides legacy mode weights when supplied)",
+    )
+    exclude_optical_candidates_from_science_bonus: bool = Field(
+        True,
+        description="Strict science hierarchy: unverified optical contrast anomalies never receive routing bonus",
+    )
     algorithm: PathAlgorithm = Field(PathAlgorithm.ASTAR)
     constraints: RoutePlanningConstraints = Field(default_factory=RoutePlanningConstraints)
 
@@ -241,6 +250,35 @@ class RouteDecisionExplainer(BaseModel):
     decision_trace_summary: str
 
 
+class RouteCostDecomposition(BaseModel):
+    """Explicit itemized traversal objective components summed across route edges."""
+
+    base_distance_cost: float
+    slope_penalty_cost: float
+    uphill_climb_cost: float
+    downhill_descent_cost: float
+    roughness_penalty_cost: float
+    uncertainty_penalty_cost: float
+    nodata_proximity_cost: float
+    science_corridor_reduction: float
+    total_objective_cost: float
+    dominant_cost_driver: str
+    science_bonus_sources_used: List[str] = Field(default_factory=list)
+    unverified_optical_candidates_excluded: bool = True
+
+
+class RouteTraversabilitySummary(BaseModel):
+    """3-state traversability & uncertainty separation across solver grid."""
+
+    evaluated_cell_count: int
+    known_exclusion_cell_count: int
+    unknown_insufficient_cell_count: int
+    evaluated_fraction: float
+    known_exclusion_fraction: float
+    unknown_insufficient_fraction: float
+    unverified_optical_candidates_excluded_from_bonus: bool = True
+
+
 class RouteComputeResponse(BaseModel):
     route_id: str
     route_signature: str
@@ -250,6 +288,7 @@ class RouteComputeResponse(BaseModel):
     crs: str = "IAU2000:49900"
     bearing_convention: str
     mode: RoutingMode
+    objective: Optional[RouteObjective] = None
     mode_label: str
     algorithm: PathAlgorithm
     effective_slope_limit_deg: float
@@ -288,6 +327,9 @@ class RouteComputeResponse(BaseModel):
     provenance: Dict[str, Any] = Field(default_factory=dict)
     provenance_graph: Optional[ProvenanceDependencyGraph] = None
     decision_explainer: Optional[RouteDecisionExplainer] = None
+    cost_decomposition: Optional[RouteCostDecomposition] = None
+    traversability_summary: Optional[RouteTraversabilitySummary] = None
+    uncertainty_status: Optional[str] = None
 
 
 class RouteCompareEntry(BaseModel):
@@ -328,3 +370,68 @@ class RouteStatusResponse(BaseModel):
     stored_route_count: int
     safety_certification_enabled: bool = False
     scientific_constraints: List[str]
+
+
+class RobustRouteCompareRequest(BaseModel):
+    """Request multi-objective distinct alternative route generation, return check, and stability testing."""
+
+    dataset_id: Optional[str] = None
+    start: RouteCoordinateInput
+    destination: RouteCoordinateInput
+    target_ids: List[str] = Field(default_factory=list)
+    waypoints: List[RouteCoordinateInput] = Field(default_factory=list)
+    objectives: List[RouteObjective] = Field(
+        default_factory=lambda: [
+            RouteObjective.BALANCED_MULTIOBJECTIVE,
+            RouteObjective.SHORTEST_TRAVERSABLE,
+            RouteObjective.LOWEST_SLOPE,
+            RouteObjective.LOWEST_CLIMB_ENERGY,
+            RouteObjective.LOWEST_ROUGHNESS,
+            RouteObjective.HIGHEST_EVIDENCE_COVERAGE,
+            RouteObjective.SCIENCE_CORRIDOR,
+        ]
+    )
+    algorithm: PathAlgorithm = Field(PathAlgorithm.ASTAR)
+    constraints: RoutePlanningConstraints = Field(default_factory=RoutePlanningConstraints)
+    walking_speed_mps: Optional[float] = Field(default=None, gt=0.0, le=5.0)
+    use_tobler_grade_approximation: bool = False
+    mission_duration_limit_s: Optional[float] = Field(default=None, gt=0.0)
+    return_reserve_fraction: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    max_overlap_threshold: float = Field(default=0.85, ge=0.1, le=0.99)
+    include_sensitivity: bool = True
+    include_independent_return: bool = True
+
+
+class DistinctRouteCandidate(BaseModel):
+    """One spatially distinct computed route candidate with uncertainty, return, and sensitivity metrics."""
+
+    candidate_id: str
+    objective: RouteObjective
+    objective_label: str
+    diversification_method: str  # objective_weight | spatial_corridor_penalty
+    max_overlap_with_prior_routes: float = 0.0
+    route: RouteComputeResponse
+    return_computed: bool = False
+    return_status: Optional[str] = None
+    return_distance_m: Optional[float] = None
+    return_elevation_gain_m: Optional[float] = None
+    return_overlap_with_outbound_fraction: Optional[float] = None
+    sensitivity_summary: Optional[RouteSensitivityReport] = None
+    evidence_highlights: List[str] = Field(default_factory=list)
+
+
+class RobustRouteCompareResponse(BaseModel):
+    """Robust multi-route comparison matrix distinguishing genuine alternatives from bottlenecks."""
+
+    dataset_id: str
+    source_product_id: str
+    alternative_generation_status: str  # DISTINCT_ALTERNATIVES_AVAILABLE | SINGLE_CORRIDOR_BOTTLENECK | INSUFFICIENT_FEASIBLE_ROUTES
+    recommended_candidate_id: Optional[str] = None
+    recommendation_rationale: str
+    distinct_candidate_count: int
+    duplicate_candidates_rejected: int
+    pairwise_overlap_matrix: Dict[str, Dict[str, float]] = Field(default_factory=dict)
+    candidates: List[DistinctRouteCandidate] = Field(default_factory=list)
+    rejected_near_duplicates: List[Dict[str, Any]] = Field(default_factory=list)
+    limitations: List[str] = Field(default_factory=list)
+    compute_time_ms: float = 0.0

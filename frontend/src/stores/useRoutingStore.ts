@@ -12,6 +12,9 @@ import type {
   SurfacePickMode,
   TerrainMeshManifest,
   TextureOverlayMode,
+  RouteObjective,
+  RouteSensitivityReport,
+  RobustRouteCompareResponse,
 } from "@/types";
 
 export interface CameraFocusTarget {
@@ -108,6 +111,16 @@ interface RoutingStoreState {
   selectInstructionStep: (stepIndex: number | null, focusCamera?: boolean) => void;
   requestCameraFocus: (lat: number, lon_east: number, elevation_m?: number) => void;
   requestCameraPreset: (preset: CameraPresetType) => void;
+
+  activeObjective: RouteObjective | null;
+  robustComparison: RobustRouteCompareResponse | null;
+  robustLoading: boolean;
+  routeSensitivity: RouteSensitivityReport | null;
+  sensitivityLoading: boolean;
+  setActiveObjective: (objective: RouteObjective | null) => void;
+  computeRobustComparison: () => Promise<RobustRouteCompareResponse | null>;
+  evaluateRouteSensitivity: (routeId?: string) => Promise<RouteSensitivityReport | null>;
+  selectRobustCandidate: (candidateId: string) => void;
 }
 
 const DEFAULT_CONSTRAINTS: RoutePlanningConstraints = {
@@ -161,6 +174,7 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
   selectedTargetIds: [],
   customWaypoints: [],
   activeMode: "balanced",
+  activeObjective: null,
   algorithm: "astar",
   constraints: { ...DEFAULT_CONSTRAINTS },
   autoComputeEnabled: true,
@@ -168,8 +182,12 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
 
   activeRoute: null,
   comparisonResult: null,
+  robustComparison: null,
+  routeSensitivity: null,
   routeLoading: false,
   compareLoading: false,
+  robustLoading: false,
+  sensitivityLoading: false,
   routeError: null,
   staleRoute: false,
   staleReason: null,
@@ -228,6 +246,13 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
   setActiveLod: (lod) => set({ activeLod: Math.max(0, Math.min(2, lod)) }),
   setActiveOverlayMode: (overlay) => set({ activeOverlayMode: overlay }),
   setVerticalExaggeration: (exag) => set({ verticalExaggeration: Math.max(1.0, Math.min(5.0, exag)) }),
+  setActiveObjective: (objective) => {
+    set((s) => ({
+      activeObjective: objective,
+      ..._markStaleIfPresent(s, `Route objective set to ${objective ?? "legacy mode"}`),
+    }));
+    get().scheduleAutoCompute();
+  },
   setSurfacePickMode: (mode) => set({ surfacePickMode: mode }),
   setPickedSurfacePoint: (pt) => set({ pickedSurfacePoint: pt }),
 
@@ -269,11 +294,15 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
       selectedTargetIds: [],
       activeRoute: null,
       comparisonResult: null,
+      robustComparison: null,
+      routeSensitivity: null,
       staleRoute: false,
       staleReason: null,
       routeError: null,
       routeLoading: false,
       compareLoading: false,
+      robustLoading: false,
+      sensitivityLoading: false,
       selectedWaypointSeq: null,
       selectedInstructionStep: null,
       studyExampleLoaded: false,
@@ -436,6 +465,7 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
           target_ids: s.selectedTargetIds,
           waypoints: s.customWaypoints,
           mode: s.activeMode,
+          objective: s.activeObjective,
           algorithm: s.algorithm,
           constraints: s.constraints,
         }),
@@ -453,6 +483,7 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
       if (ctrl.signal.aborted) return null;
       set({
         activeRoute: route,
+        routeSensitivity: null,
         routeLoading: false,
         routeError: null,
         staleRoute: false,
@@ -545,6 +576,7 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
       set({
         activeMode: mode,
         activeRoute: match.route,
+        routeSensitivity: null,
         staleRoute: false,
         staleReason: null,
         selectedWaypointSeq: 0,
@@ -552,6 +584,99 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
           match.route.instructions.length > 0 ? match.route.instructions[0].step_index : null,
       });
     }
+  },
+
+  computeRobustComparison: async () => {
+    const s = get();
+    if (!s.startPoint || !s.destinationPoint) {
+      set({ routeError: "Select both a Start and Destination point before robust comparison." });
+      return null;
+    }
+    set({ robustLoading: true, routeError: null });
+    try {
+      const res = await fetch(`${API_BASE_URL}/routing/robust-compare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dataset_id: s.selectedDemDatasetId || null,
+          start: s.startPoint,
+          destination: s.destinationPoint,
+          target_ids: s.selectedTargetIds,
+          waypoints: s.customWaypoints,
+          algorithm: s.algorithm,
+          constraints: s.constraints,
+          walking_speed_mps: s.constraints.walking_speed_m_per_s ?? null,
+          include_sensitivity: true,
+          include_independent_return: true,
+        }),
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        const msg =
+          typeof errBody?.detail === "string"
+            ? errBody.detail
+            : JSON.stringify(errBody?.detail || `HTTP ${res.status}`);
+        throw new Error(msg);
+      }
+      const data: RobustRouteCompareResponse = await res.json();
+      const rec =
+        data.candidates.find((c) => c.candidate_id === data.recommended_candidate_id) ||
+        data.candidates[0] ||
+        null;
+      set({
+        robustComparison: data,
+        robustLoading: false,
+        activeRoute: rec?.route ?? s.activeRoute,
+        activeObjective: rec?.objective ?? s.activeObjective,
+        routeSensitivity: rec?.sensitivity_summary ?? s.routeSensitivity,
+        staleRoute: rec ? false : s.staleRoute,
+        staleReason: rec ? null : s.staleReason,
+      });
+      return data;
+    } catch (err: unknown) {
+      set({
+        robustLoading: false,
+        routeError: err instanceof Error ? err.message : "Robust route comparison failed",
+      });
+      return null;
+    }
+  },
+
+  evaluateRouteSensitivity: async (routeId) => {
+    const targetId = routeId || get().activeRoute?.route_id;
+    if (!targetId) return null;
+    set({ sensitivityLoading: true });
+    try {
+      const res = await fetch(`${API_BASE_URL}/routing/${encodeURIComponent(targetId)}/sensitivity`, {
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        set({ sensitivityLoading: false });
+        return null;
+      }
+      const data: RouteSensitivityReport = await res.json();
+      set({ routeSensitivity: data, sensitivityLoading: false });
+      return data;
+    } catch {
+      set({ sensitivityLoading: false });
+      return null;
+    }
+  },
+
+  selectRobustCandidate: (candidateId) => {
+    const cand = get().robustComparison?.candidates.find((c) => c.candidate_id === candidateId);
+    if (!cand) return;
+    set({
+      activeRoute: cand.route,
+      activeMode: cand.route.mode,
+      activeObjective: cand.objective,
+      routeSensitivity: cand.sensitivity_summary ?? null,
+      staleRoute: false,
+      staleReason: null,
+      selectedWaypointSeq: 0,
+      selectedInstructionStep:
+        cand.route.instructions.length > 0 ? cand.route.instructions[0].step_index : null,
+    });
   },
 
   exportActiveGeoJSON: async () => {

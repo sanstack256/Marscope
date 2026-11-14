@@ -149,6 +149,37 @@ def get_corridor_decision_trace(assessment_id: str):
     }
 
 
+@router.get("/corridor/{assessment_id}/dependency-trace")
+def get_corridor_dependency_trace(assessment_id: str):
+    """Return Prompt 16 assessment dependency signature, version ledger, and cache freshness trace."""
+    assessment = _get_corridor_or_404(assessment_id)
+    current_sig = None
+    if assessment.dependency_signature is not None:
+        s = assessment.dependency_signature
+        dem_path = evidence_intelligence_service.processed_dir / f"{s.dem_dataset_id}_dem.tif"
+        _, obs_sum = evidence_intelligence_service._load_observations_catalog()
+        current_sig = evidence_intelligence_service._build_dependency_signature(
+            dataset_id=s.dem_dataset_id,
+            source_product_id=s.dem_product_id,
+            dem_path=dem_path,
+            ortho_id=s.optical_dataset_id,
+            route=None,
+            route_geom_hash=s.route_geometry_hash,
+            corridor_width_m=s.corridor_width_m,
+            segment_scale_m=s.segment_scale_m,
+            observation_search_radius_m=s.observation_search_radius_m,
+            obs_catalog_checksum=obs_sum,
+            mission_config=None,
+        )
+    return {
+        "assessment_id": assessment.assessment_id,
+        "cache_validity": assessment.cache_validity,
+        "stale_reasons": assessment.stale_reasons,
+        "stored_dependency_signature": assessment.dependency_signature,
+        "current_dependency_signature": current_sig,
+    }
+
+
 @router.post("/routes/compare-evidence", response_model=RouteEvidenceComparisonResponse)
 def compare_routes_evidence(request: RouteEvidenceComparisonRequest):
     """Compare candidate planning modes using corridor terrain, coverage, and observation evidence."""

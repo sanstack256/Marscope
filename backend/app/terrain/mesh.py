@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections import OrderedDict
 import io
 import math
+from pathlib import Path
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -189,6 +190,7 @@ class TerrainMeshManifestResponse(BaseModel):
     roughness_range_m: Optional[Dict[str, float]] = None
     tri_metadata: Optional[Dict[str, Any]] = None
     color_normalizations: Dict[str, ColorNormalizationSpec] = Field(default_factory=dict)
+    overlay_legends: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
 
 class TerrainMeshTileResponse(BaseModel):
@@ -238,12 +240,30 @@ class HeightGridResponse(BaseModel):
 class TerrainMeshService:
     """Thread-safe, memory-bounded DEM mesh & overlay renderer."""
 
-    def __init__(self, catalog_service: DatasetCatalogService, raw_dir, max_cache_items: int = 72):
+    def __init__(
+        self,
+        catalog_service: DatasetCatalogService,
+        raw_dir,
+        max_cache_items: int = 72,
+        uncertainty_service: Optional[Any] = None,
+    ):
         self.catalog_service = catalog_service
         self.raw_dir = raw_dir
         self._max_cache_items = max_cache_items
         self._tile_cache: "OrderedDict[str, Any]" = OrderedDict()
         self._lock = threading.Lock()
+        self.uncertainty_service = uncertainty_service
+
+    def _get_uncertainty_service(self) -> Any:
+        if self.uncertainty_service is None:
+            from app.terrain_uncertainty.service import TerrainUncertaintyService
+
+            self.uncertainty_service = TerrainUncertaintyService(
+                catalog_service=self.catalog_service,
+                raw_dir=Path(self.raw_dir),
+                processed_dir=Path(self.raw_dir).parent / "processed",
+            )
+        return self.uncertainty_service
 
     def _cache_get(self, key: str) -> Optional[Any]:
         with self._lock:
@@ -485,6 +505,27 @@ class TerrainMeshService:
             region_stats=region_stats,
         )
 
+        from app.terrain_uncertainty.elevation_uncertainty import inspect_dataset_elevation_uncertainty
+        from app.terrain_uncertainty.uncertainty_propagation import build_prompt16_overlay_legends
+
+        dem_profile = inspect_dataset_elevation_uncertainty(
+            dataset=ds,
+            raw_dir=Path(self.raw_dir),
+            processed_dir=Path(self.raw_dir).parent / "processed",
+        )
+        el_r = region_stats.get("elevation_range_m") or {}
+        tri_r = region_stats.get("roughness_range_m") or {}
+        el_tuple = (float(el_r["min_m"]), float(el_r["max_m"])) if ("min_m" in el_r and "max_m" in el_r) else None
+        tri_tuple = (float(tri_r["min_m"]), float(tri_r["max_m"])) if ("min_m" in tri_r and "max_m" in tri_r) else None
+        raw_legends = build_prompt16_overlay_legends(
+            dataset=ds,
+            optical_available=ortho_id is not None,
+            dem_profile=dem_profile,
+            elev_range=el_tuple,
+            tri_range=tri_tuple,
+        )
+        overlay_legends = {k: v.model_dump() for k, v in raw_legends.items()}
+
         return TerrainMeshManifestResponse(
             dataset_id=ds.id,
             product_id=ds.product_id,
@@ -505,6 +546,7 @@ class TerrainMeshService:
             roughness_range_m=region_stats.get("roughness_range_m"),
             tri_metadata=region_stats.get("tri_metadata"),
             color_normalizations=color_normalizations,
+            overlay_legends=overlay_legends,
         )
 
     @staticmethod
@@ -1260,13 +1302,34 @@ class TerrainMeshService:
         size: int = 512,
         vmin: Optional[float] = None,
         vmax: Optional[float] = None,
+        max_slope_deg: float = 20.0,
     ) -> bytes:
         """
         Render a georeferenced RGBA PNG texture clipped strictly to (min_lat, max_lat, min_lon, max_lon)
-        for draping real HiRISE orthoimagery or derived elevation/slope/roughness layers onto 3D mesh tiles.
+        for draping real HiRISE orthoimagery, derived elevation/slope/roughness layers, or
+        Prompt 16 uncertainty/3-state traversability/observability overlays onto 3D mesh tiles.
         """
         size = max(64, min(1024, int(size)))
         overlay_l = overlay.strip().lower()
+        uncertainty_overlays = {
+            "uncertainty_status",
+            "traversability_state",
+            "observability",
+            "slope_uncertainty_probe",
+        }
+        if overlay_l in uncertainty_overlays:
+            return self._get_uncertainty_service().render_uncertainty_overlay_png(
+                dataset_id=dataset_id,
+                overlay=overlay_l,
+                min_lat=min_lat,
+                max_lat=max_lat,
+                min_lon=min_lon,
+                max_lon=max_lon,
+                size=min(512, size),
+                max_slope_deg=max_slope_deg,
+                vmin=vmin,
+                vmax=vmax,
+            )
         if overlay_l not in {"ortho", "elevation", "slope", "roughness"}:
             raise ValueError(f"Unsupported texture overlay '{overlay}'.")
 

@@ -22,6 +22,7 @@ from app.services.tracking_service import TrackingService
 from app.evidence_intelligence.report import EvidenceIntelligenceService
 from app.eva_operations.mission import EvaOperationsService
 from app.terrain.mesh import TerrainMeshService
+from app.terrain_uncertainty.service import TerrainUncertaintyService
 
 # Project root path resolution
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
@@ -67,9 +68,15 @@ mobility_service = HumanMobilityService(
     raw_dir=RAW_DIR,
     processed_dir=PROCESSED_DIR,
 )
+terrain_uncertainty_service = TerrainUncertaintyService(
+    catalog_service=catalog_service,
+    raw_dir=RAW_DIR,
+    processed_dir=PROCESSED_DIR,
+)
 terrain_mesh_service = TerrainMeshService(
     catalog_service=catalog_service,
     raw_dir=RAW_DIR,
+    uncertainty_service=terrain_uncertainty_service,
 )
 routing_service = ScienceAwareRoutingService(
     catalog_service=catalog_service,

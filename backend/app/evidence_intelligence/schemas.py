@@ -93,8 +93,17 @@ class AssessmentDependencySignature(BaseModel):
     terrain_assessment_version: str = "terrain_corridor_v3"
     optical_detector_version: str = "optical_candidate_v3"
     observation_matcher_version: str = "obs_strtree_v2"
-    eva_model_version: str = "eva_envelope_v1"
+    eva_model_version: str = "eva_envelope_v2"
     readiness_policy_version: str = "readiness-v2.0"
+    uncertainty_model_version: str = "terrain_uncertainty_v1.0"
+    resolution_policy_version: str = "observability_policy_v1.0"
+    traversability_model_version: str = "traversability_v2.0"
+    locomotion_model_id: str = "MARSCOPE-LOCO"
+    locomotion_model_version: str = "locomotion_v1.0"
+    routing_objectives_version: str = "routing_objectives_v1.0"
+    return_planning_version: str = "return_planning_v2.0"
+    sensitivity_policy_version: str = "sensitivity_v1.0"
+    complementarity_registry_version: str = "complementarity_v1.0"
     mission_config_hash: Optional[str] = None
     signature_digest: str
 
@@ -425,6 +434,7 @@ class MissionDossierRequest(BaseModel):
     return_reserve_fraction: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     astronaut_suit_mass_kg: Optional[float] = Field(default=None, gt=0.0, le=500.0)
     payload_mass_kg: Optional[float] = Field(default=None, ge=0.0, le=500.0)
+    independent_return_computed: bool = False
     force_recompute: bool = False
 
 
@@ -441,6 +451,8 @@ class MissionDossierResponse(BaseModel):
     mobility_assessment: Dict[str, Any] = Field(default_factory=dict)
     scientific_opportunities: List[Dict[str, Any]] = Field(default_factory=list)
     unmodeled_parameters: List[str] = Field(default_factory=list)
+    corridor_uncertainty_profile: Optional[Dict[str, Any]] = None
+    complementarity_report: Optional[Dict[str, Any]] = None
     safety_certification_note: str = (
         "UNVERIFIED / NOT SAFETY CERTIFIED — analytical mission dossier only."
     )

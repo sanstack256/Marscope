@@ -102,7 +102,10 @@ async def get_terrain_heightgrid(
 @router.get("/ortho/{dataset_id}/texture")
 async def get_terrain_texture(
     dataset_id: str,
-    overlay: str = Query("ortho", description="ortho | elevation | slope | roughness"),
+    overlay: str = Query(
+        "ortho",
+        description="ortho | elevation | slope | roughness | uncertainty_status | traversability_state | observability | slope_uncertainty_probe",
+    ),
     min_lat: float = Query(..., ge=-90.0, le=90.0),
     max_lat: float = Query(..., ge=-90.0, le=90.0),
     min_lon: float = Query(..., ge=-180.0, le=360.0),
@@ -110,6 +113,7 @@ async def get_terrain_texture(
     size: int = Query(512, ge=64, le=1024),
     vmin: Optional[float] = Query(None, description="Optional global color scale minimum for cross-tile consistency"),
     vmax: Optional[float] = Query(None, description="Optional global color scale maximum for cross-tile consistency"),
+    max_slope_deg: float = Query(20.0, ge=1.0, le=60.0, description="Slope cap used by 3-state traversability overlay"),
 ) -> Response:
     if min_lat >= max_lat or min_lon >= max_lon:
         raise HTTPException(status_code=422, detail="Invalid bounding box.")
@@ -124,6 +128,7 @@ async def get_terrain_texture(
             size=size,
             vmin=vmin,
             vmax=vmax,
+            max_slope_deg=max_slope_deg,
         )
         return Response(
             content=png_bytes,

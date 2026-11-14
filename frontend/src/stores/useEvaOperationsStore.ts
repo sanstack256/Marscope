@@ -8,10 +8,13 @@ import { useEvidenceStore } from "./useEvidenceStore";
 interface EvaOperationsState {
   evaEnvelope: EvaMissionEnvelopeResponse | null;
   selectedTimelineIndex: number | null;
+  selectedReturnAlternativeId: string | null;
   loadingEva: boolean;
   error: string | null;
 
   setSelectedTimelineStep: (index: number | null, segmentId?: string | null) => void;
+  setSelectedReturnAlternativeId: (alternativeId: string | null) => void;
+  fetchReturnAnalysis: (missionId: string) => Promise<void>;
   evaluateMission: (params: {
     mission_name?: string;
     dataset_id: string;
@@ -32,9 +35,10 @@ interface EvaOperationsState {
   }) => Promise<EvaMissionEnvelopeResponse | null>;
 }
 
-export const useEvaOperationsStore = create<EvaOperationsState>((set) => ({
+export const useEvaOperationsStore = create<EvaOperationsState>((set, get) => ({
   evaEnvelope: null,
   selectedTimelineIndex: null,
+  selectedReturnAlternativeId: null,
   loadingEva: false,
   error: null,
 
@@ -42,6 +46,25 @@ export const useEvaOperationsStore = create<EvaOperationsState>((set) => ({
     set({ selectedTimelineIndex: index });
     if (segmentId !== undefined) {
       useEvidenceStore.getState().setSelectedSegmentId(segmentId);
+    }
+  },
+
+  setSelectedReturnAlternativeId: (alternativeId) => set({ selectedReturnAlternativeId: alternativeId }),
+
+  fetchReturnAnalysis: async (missionId) => {
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/eva-operations/mission/${encodeURIComponent(missionId)}/return-analysis`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) return;
+      const body = await res.json();
+      const cur = get().evaEnvelope;
+      if (cur && cur.mission_id === missionId && body.return_plan) {
+        set({ evaEnvelope: { ...cur, return_plan: body.return_plan } });
+      }
+    } catch {
+      // Keep existing envelope if fetch fails
     }
   },
 
@@ -61,6 +84,7 @@ export const useEvaOperationsStore = create<EvaOperationsState>((set) => ({
       set({
         evaEnvelope: data,
         selectedTimelineIndex: 0,
+        selectedReturnAlternativeId: null,
         loadingEva: false,
       });
       return data;

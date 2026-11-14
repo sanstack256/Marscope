@@ -73,8 +73,26 @@ def evaluate_eva_constraints(
             )
         )
 
-    # 3. Return reserve & asymmetric climb check
-    if return_plan.feasible_within_usable_budget is None:
+    # 3. Return reserve & independent return check
+    if not return_plan.return_route_computed:
+        records.append(
+            ConstraintCheckRecord(
+                constraint_id="return_reserve_feasibility",
+                category="return_reserve",
+                status=(
+                    "FAIL"
+                    if return_plan.return_status.value == "RETURN_COMPUTATION_FAILED"
+                    else "UNAVAILABLE"
+                ),
+                configured_limit="Independent destination->origin return route required",
+                evaluated_value=f"{return_plan.return_status.value} ({return_plan.return_strategy})",
+                explanation=(
+                    return_plan.return_strategy_note
+                    or "Independent return path was not computed; reversed outbound trajectory cannot substitute for verified return feasibility."
+                ),
+            )
+        )
+    elif return_plan.feasible_within_usable_budget is None:
         records.append(
             ConstraintCheckRecord(
                 constraint_id="return_reserve_feasibility",
@@ -96,10 +114,10 @@ def evaluate_eva_constraints(
                 configured_limit=f"Protected reserve {time_budget.reserve_protected_s:.1f} s ({config.return_reserve_fraction * 100:.0f}%)",
                 evaluated_value=(
                     f"Return {return_plan.return_surface_distance_m:.1f} m / +{return_plan.return_elevation_gain_m:.1f} m climb; "
-                    f"PONR {return_plan.point_of_no_return_distance_m} m"
+                    f"Turnback PONR {return_plan.point_of_no_return_distance_m} m ({return_plan.turnback_ponr_method})"
                 ),
                 explanation=(
-                    f"Reverse return strategy '{return_plan.return_strategy}' with asymmetric climb delta {return_plan.asymmetric_climb_delta_m:+.1f} m."
+                    f"Independent return status '{return_plan.return_status.value}' with asymmetric climb delta {return_plan.asymmetric_climb_delta_m:+.1f} m."
                 ),
             )
         )

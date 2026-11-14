@@ -14,7 +14,7 @@ import math
 from pathlib import Path
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 import uuid
 
 import numpy as np
@@ -26,8 +26,56 @@ from app.mobility.terrain_features import mars_great_circle_distance_meters
 from app.physics.models.surface import calculate_gravitational_potential_energy
 from app.routing.graph import RoutePlanningError, TerrainGrid, build_terrain_grid_from_dataset
 from app.routing.instructions import generate_turn_by_turn_instructions
-from app.routing.models import MODE_POLICIES, PathAlgorithm, RoutingMode
-from app.routing.pathfinder import optimize_intermediate_stop_order, simplify_leg_safely, solve_grid_leg
+from app.routing.models import (
+    MODE_POLICIES,
+    PathAlgorithm,
+    ROUTE_OBJECTIVES_VERSION,
+    RouteObjective,
+    RoutingMode,
+    resolve_routing_policy,
+)
+from app.routing.pathfinder import (
+    optimize_intermediate_stop_order,
+    reconstruct_reverse_dijkstra_path,
+    simplify_leg_safely,
+    solve_grid_leg,
+)
+from app.routing.schemas import (
+    BudgetDiagnostic,
+    DistinctRouteCandidate,
+    EdgeEvaluationDetail,
+    NavigationInstruction,
+    RobustRouteCompareRequest,
+    RobustRouteCompareResponse,
+    RouteCompareEntry,
+    RouteCompareRequest,
+    RouteCompareResponse,
+    RouteComputeRequest,
+    RouteComputeResponse,
+    RouteCoordinateInput,
+    RouteCostDecomposition,
+    RouteDecisionExplainer,
+    RouteLegSummary,
+    RoutePlanningConstraints,
+    RouteStatusResponse,
+    RouteTraversabilitySummary,
+    RouteValidationResponse,
+    RouteVertex,
+    ScienceStopSummary,
+    SimplificationDiagnostic,
+    SnapDiagnostic,
+)
+if TYPE_CHECKING:
+    from app.eva_operations.schemas import (
+        IndependentReturnAlternative,
+        TurnbackCheckpointRecord,
+    )
+from app.terrain_uncertainty.sensitivity import (
+    DEFAULT_SENSITIVITY_SCENARIOS,
+    RouteSensitivityReport,
+    ScenarioSensitivityOutcome,
+    summarize_sensitivity_outcomes,
+)
 from app.science.provenance_graph import (
     ProvenanceDependencyGraph,
     ProvenanceStep,
@@ -74,14 +122,23 @@ class ScienceAwareRoutingService:
         self.composition_search = composition_search
         self._max_stored = max_stored_routes
         self._routes: "OrderedDict[str, RouteComputeResponse]" = OrderedDict()
+        self._route_contexts: Dict[str, Tuple[TerrainGrid, RouteComputeRequest]] = {}
         self._lock = threading.Lock()
 
-    def _store_route(self, route: RouteComputeResponse) -> None:
+    def _store_route(
+        self,
+        route: RouteComputeResponse,
+        grid: Optional[TerrainGrid] = None,
+        req: Optional[RouteComputeRequest] = None,
+    ) -> None:
         with self._lock:
             self._routes[route.route_id] = route
             self._routes.move_to_end(route.route_id)
+            if grid is not None and req is not None:
+                self._route_contexts[route.route_id] = (grid, req)
             while len(self._routes) > self._max_stored:
-                self._routes.popitem(last=False)
+                evicted_id, _ = self._routes.popitem(last=False)
+                self._route_contexts.pop(evicted_id, None)
 
     def get_route(self, route_id: str) -> RouteComputeResponse:
         with self._lock:
@@ -314,13 +371,14 @@ class ScienceAwareRoutingService:
         override_grid: Optional[TerrainGrid] = None,
         override_dataset_id: str = "synthetic_test_dem",
         override_product_id: str = "SYNTHETIC_DEM",
+        penalty_grid: Optional[np.ndarray] = None,
     ) -> RouteComputeResponse:
         """
         Compute a full multi-leg science-aware surface route over real DEMs (or an injected
         TerrainGrid for deterministic unit tests).
         """
         t0 = time.perf_counter()
-        policy = MODE_POLICIES[req.mode]
+        policy = resolve_routing_policy(req.mode, req.objective)
         stops, sci_corridor, nearby_lookup, ev_hits = self._gather_stops_and_science(req)
         all_pts = [(req.start.lat, req.start.lon_east)] + [(s[1], s[2]) for s in stops] + [(req.destination.lat, req.destination.lon_east)]
 
@@ -425,7 +483,14 @@ class ScienceAwareRoutingService:
         for leg_i in range(len(node_chain) - 1):
             n_from = node_chain[leg_i]
             n_to = node_chain[leg_i + 1]
-            leg_res = solve_grid_leg(grid, n_from["rc"], n_to["rc"], policy, req.algorithm)
+            leg_res = solve_grid_leg(
+                grid,
+                n_from["rc"],
+                n_to["rc"],
+                policy,
+                req.algorithm,
+                penalty_grid=penalty_grid,
+            )
             total_cost += leg_res.total_cost
             total_expanded += leg_res.nodes_expanded
 
@@ -795,6 +860,54 @@ class ScienceAwareRoutingService:
             validation_state="verified_terrain_route_not_safety_certified",
         )
 
+        explainer_obj = self._build_decision_explainer(
+            req=req,
+            policy=policy,
+            grid=grid,
+            traversed_edge_expls=traversed_edge_expls,
+            rejected_neighbor_expls=rejected_neighbor_expls,
+            sci_reached=sci_reached,
+            tot_horiz=tot_horiz,
+            tot_secs=tot_secs,
+            total_cost=total_cost,
+            ev_hits=ev_hits,
+        )
+        t_counts = grid.traversability_state_counts()
+        t_total = max(1, t_counts["evaluated"] + t_counts["known_exclusion"] + t_counts["unknown_insufficient"])
+        sci_sources: List[str] = []
+        if policy.science_corridor_bonus > 0 and sci_corridor:
+            if req.target_ids:
+                sci_sources.append("verified_target_registry")
+            if ev_hits > 0:
+                sci_sources.append("curiosity_msl_composition_archive")
+            if not sci_sources:
+                sci_sources.append("verified_waypoint_coordinates")
+
+        ct_totals = explainer_obj.total_cost_breakdown
+        cost_decomp = RouteCostDecomposition(
+            base_distance_cost=round(float(ct_totals.get("base_distance_cost", 0.0)), 3),
+            slope_penalty_cost=round(float(ct_totals.get("slope_penalty_cost", 0.0)), 3),
+            uphill_climb_cost=round(float(ct_totals.get("uphill_penalty_cost", 0.0)), 3),
+            downhill_descent_cost=round(float(ct_totals.get("downhill_penalty_cost", 0.0)), 3),
+            roughness_penalty_cost=round(float(ct_totals.get("roughness_penalty_cost", 0.0)), 3),
+            uncertainty_penalty_cost=round(float(ct_totals.get("uncertainty_penalty_cost", 0.0)), 3),
+            nodata_proximity_cost=round(float(ct_totals.get("nodata_proximity_penalty_cost", 0.0)), 3),
+            science_corridor_reduction=round(float(ct_totals.get("science_corridor_bonus_credit", 0.0)), 3),
+            total_objective_cost=round(float(total_cost), 3),
+            dominant_cost_driver=explainer_obj.dominant_cost_driver,
+            science_bonus_sources_used=sci_sources,
+            unverified_optical_candidates_excluded=bool(req.exclude_optical_candidates_from_science_bonus),
+        )
+        trav_summary = RouteTraversabilitySummary(
+            evaluated_cell_count=t_counts["evaluated"],
+            known_exclusion_cell_count=t_counts["known_exclusion"],
+            unknown_insufficient_cell_count=t_counts["unknown_insufficient"],
+            evaluated_fraction=round(t_counts["evaluated"] / t_total, 4),
+            known_exclusion_fraction=round(t_counts["known_exclusion"] / t_total, 4),
+            unknown_insufficient_fraction=round(t_counts["unknown_insufficient"] / t_total, 4),
+            unverified_optical_candidates_excluded_from_bonus=bool(req.exclude_optical_candidates_from_science_bonus),
+        )
+
         resp = RouteComputeResponse(
             route_id=route_id,
             route_signature=sig_hash,
@@ -803,7 +916,8 @@ class ScienceAwareRoutingService:
             bearing_convention=(
                 f"Mars True North [0, 360) CW azimuth; Equirectangular Grid North also reported relative to lon0={central_meridian:.2f}E"
             ),
-            mode=req.mode,
+            mode=policy.mode,
+            objective=policy.objective or req.objective,
             mode_label=policy.label,
             algorithm=req.algorithm,
             effective_slope_limit_deg=round(grid.effective_slope_limit_deg, 2),
@@ -848,20 +962,12 @@ class ScienceAwareRoutingService:
             limitations=limitations,
             provenance=provenance_block,
             provenance_graph=route_prov_graph,
-            decision_explainer=self._build_decision_explainer(
-                req=req,
-                policy=policy,
-                grid=grid,
-                traversed_edge_expls=traversed_edge_expls,
-                rejected_neighbor_expls=rejected_neighbor_expls,
-                sci_reached=sci_reached,
-                tot_horiz=tot_horiz,
-                tot_secs=tot_secs,
-                total_cost=total_cost,
-                ev_hits=ev_hits,
-            ),
+            decision_explainer=explainer_obj,
+            cost_decomposition=cost_decomp,
+            traversability_summary=trav_summary,
+            uncertainty_status=grid.uncertainty_status,
         )
-        self._store_route(resp)
+        self._store_route(resp, grid=grid, req=req)
         return resp
 
     @staticmethod
@@ -1102,3 +1208,714 @@ class ScienceAwareRoutingService:
             "crs_note": f"{rt.crs} (East longitude in [-180, 180] for GeoJSON compatibility, elevation in meters above Mars Areoid datum)",
             "features": features,
         }
+
+    @staticmethod
+    def _polyline_overlap_fraction(
+        verts_a: List[RouteVertex],
+        verts_b: List[RouteVertex],
+        tolerance_m: float = 12.0,
+    ) -> float:
+        """Symmetric vertex-buffer overlap fraction [0.0, 1.0] measuring corridor distinctness."""
+        if not verts_a or not verts_b:
+            return 0.0
+        hits_a = sum(
+            1
+            for va in verts_a
+            if any(mars_great_circle_distance_meters(va.lat, va.lon_east, vb.lat, vb.lon_east) <= tolerance_m for vb in verts_b)
+        )
+        hits_b = sum(
+            1
+            for vb in verts_b
+            if any(mars_great_circle_distance_meters(vb.lat, vb.lon_east, va.lat, va.lon_east) <= tolerance_m for va in verts_a)
+        )
+        return round(min(hits_a / len(verts_a), hits_b / len(verts_b)), 4)
+
+    @staticmethod
+    def _build_corridor_penalty_grid(
+        grid: TerrainGrid,
+        verts: List[RouteVertex],
+        *,
+        penalty_factor: float = 3.5,
+        corridor_radius_m: float = 20.0,
+    ) -> np.ndarray:
+        """Apply interior corridor penalty mask while keeping start/destination terminals unpenalized."""
+        pen = np.ones((grid.rows, grid.cols), dtype=np.float64)
+        if len(verts) < 3:
+            return pen
+        rad_r = max(1, int(round(corridor_radius_m / max(0.5, grid.dy_m))))
+        rad_c = max(1, int(round(corridor_radius_m / max(0.5, grid.dx_m))))
+        sr, sc, _ = grid.latlon_to_rc(verts[0].lat, verts[0].lon_east)
+        gr, gc, _ = grid.latlon_to_rc(verts[-1].lat, verts[-1].lon_east)
+
+        # Penalize interior vertices (skipping start/goal buffers)
+        for v in verts[1:-1]:
+            r, c, in_b = grid.latlon_to_rc(v.lat, v.lon_east)
+            if not in_b:
+                continue
+            r0 = max(0, r - rad_r)
+            r1 = min(grid.rows, r + rad_r + 1)
+            c0 = max(0, c - rad_c)
+            c1 = min(grid.cols, c + rad_c + 1)
+            pen[r0:r1, c0:c1] = np.maximum(pen[r0:r1, c0:c1], penalty_factor)
+
+        for tr, tc in ((sr, sc), (gr, gc)):
+            r0 = max(0, tr - 2)
+            r1 = min(grid.rows, tr + 3)
+            c0 = max(0, tc - 2)
+            c1 = min(grid.cols, tc + 3)
+            pen[r0:r1, c0:c1] = 1.0
+        return pen
+
+    def evaluate_route_sensitivity(
+        self,
+        route_id: str,
+        *,
+        override_grid: Optional[TerrainGrid] = None,
+        override_req: Optional[RouteComputeRequest] = None,
+    ) -> RouteSensitivityReport:
+        """
+        Execute Prompt 16 deterministic scenario perturbation suite over a stored route's
+        TerrainGrid without regenerating rasters or fabricating Monte Carlo draws.
+        """
+        base_route = self.get_route(route_id)
+        with self._lock:
+            ctx = self._route_contexts.get(route_id)
+        if ctx is not None:
+            base_grid, base_req = ctx
+        elif override_grid is not None and override_req is not None:
+            base_grid, base_req = override_grid, override_req
+        else:
+            raise KeyError(f"Routing context grid for '{route_id}' is not cached in active session.")
+
+        base_policy = resolve_routing_policy(base_req.mode, base_req.objective)
+        sig_fallback_deg = 1.5
+        if base_grid.slope_sigma_grid is not None and np.any(np.isfinite(base_grid.slope_sigma_grid)):
+            sig_grid = np.where(np.isfinite(base_grid.slope_sigma_grid), base_grid.slope_sigma_grid, sig_fallback_deg)
+            basis_note = (
+                f"Analytical Horn 3x3 slope sigma sensitivity from {base_route.source_product_id} "
+                f"({base_grid.uncertainty_status}); not a per-pixel empirical stereo error map."
+            )
+        else:
+            sig_grid = np.full_like(base_grid.slope_deg, sig_fallback_deg)
+            basis_note = (
+                f"Fixed scenario probe +/-{sig_fallback_deg:.1f} deg used because DEM lacks metadata/empirical vertical precision."
+            )
+
+        outcomes: List[ScenarioSensitivityOutcome] = []
+        base_budget = base_route.within_budget
+        for sc in DEFAULT_SENSITIVITY_SCENARIOS:
+            slope_arr = base_grid.slope_deg
+            if sc.slope_sigma_multiplier != 0.0:
+                slope_arr = np.maximum(0.0, base_grid.slope_deg + sc.slope_sigma_multiplier * sig_grid)
+
+            tri_arr = base_grid.tri_m
+            if sc.tri_sigma_multiplier != 0.0:
+                tri_arr = np.where(
+                    np.isfinite(base_grid.tri_m),
+                    np.maximum(0.0, base_grid.tri_m + sc.tri_sigma_multiplier * 0.25),
+                    np.nan,
+                )
+
+            eff_cap = max(1.0, base_grid.effective_slope_limit_deg + sc.max_slope_delta_deg)
+            sc_grid = base_grid.clone_with_overrides(
+                effective_slope_limit_deg=eff_cap,
+                slope_deg_override=slope_arr,
+                tri_m_override=tri_arr,
+            )
+
+            sc_policy = base_policy
+            if sc.science_weight_scale != 1.0:
+                from dataclasses import replace
+
+                sc_policy = replace(
+                    base_policy,
+                    science_corridor_bonus=max(0.0, min(0.85, base_policy.science_corridor_bonus * sc.science_weight_scale)),
+                )
+
+            sc_constraints = base_req.constraints.model_copy(
+                update={
+                    "max_slope_deg": round(eff_cap / max(0.1, base_policy.effective_slope_limit_factor), 2),
+                    "walking_speed_m_per_s": (
+                        base_req.constraints.walking_speed_m_per_s * sc.walking_speed_scale
+                        if base_req.constraints.walking_speed_m_per_s
+                        else None
+                    ),
+                }
+            )
+            sc_req = base_req.model_copy(update={"constraints": sc_constraints})
+
+            # Temporarily compute without overriding main route slot or using explicit science override
+            try:
+                orig_policy_mode = base_policy.mode
+                if sc.science_weight_scale != 1.0:
+                    # Run direct grid leg solver to reflect adjusted science bonus deterministically
+                    sr, sc_c, _ = sc_grid.snap_to_traversable(sc_req.start.lat, sc_req.start.lon_east, "start", sc_constraints.snap_radius_m)
+                    gr, gc, _ = sc_grid.snap_to_traversable(sc_req.destination.lat, sc_req.destination.lon_east, "dest", sc_constraints.snap_radius_m)
+                    leg = solve_grid_leg(sc_grid, (sr, sc_c), (gr, gc), sc_policy, sc_req.algorithm)
+                    simp_cells, _ = simplify_leg_safely(sc_grid, leg.cells, epsilon_m=sc_constraints.simplification_epsilon_m)
+                    sc_verts = [
+                        RouteVertex(
+                            seq=idx,
+                            lat=round(float(sc_grid.lats[r]), 7),
+                            lon_east=round(float(sc_grid.lons_east[c]), 7),
+                            elevation_m=round(float(sc_grid.elevation_m[r, c]), 2),
+                            slope_deg=round(float(sc_grid.slope_deg[r, c]), 2) if np.isfinite(sc_grid.slope_deg[r, c]) else None,
+                            cumulative_distance_m=0.0,
+                            segment_distance_m=0.0,
+                        )
+                        for idx, (r, c) in enumerate(simp_cells)
+                    ]
+                    ov = self._polyline_overlap_fraction(base_route.vertices, sc_verts)
+                    outcomes.append(
+                        ScenarioSensitivityOutcome(
+                            scenario_id=sc.scenario_id,
+                            label=sc.label,
+                            perturbation_parameter=sc.perturbation_parameter,
+                            perturbation_description=sc.perturbation_description,
+                            route_found=True,
+                            path_changed_from_baseline=(ov < 0.90),
+                            path_signature_diff_fraction=round(1.0 - ov, 4),
+                            total_distance_m=base_route.total_surface_distance_m,
+                            total_objective_cost=round(leg.total_cost, 2),
+                            constraint_status_changed=False,
+                        )
+                    )
+                else:
+                    sc_rt = self.compute_route(
+                        sc_req,
+                        override_grid=sc_grid,
+                        override_dataset_id=base_route.dataset_id,
+                        override_product_id=base_route.source_product_id,
+                    )
+                    ov = self._polyline_overlap_fraction(base_route.vertices, sc_rt.vertices)
+                    outcomes.append(
+                        ScenarioSensitivityOutcome(
+                            scenario_id=sc.scenario_id,
+                            label=sc.label,
+                            perturbation_parameter=sc.perturbation_parameter,
+                            perturbation_description=sc.perturbation_description,
+                            route_found=True,
+                            path_changed_from_baseline=(ov < 0.90),
+                            path_signature_diff_fraction=round(1.0 - ov, 4),
+                            total_distance_m=sc_rt.total_surface_distance_m,
+                            estimated_time_s=sc_rt.estimated_duration_seconds,
+                            max_slope_deg=sc_rt.max_slope_deg,
+                            total_objective_cost=sc_rt.total_cost,
+                            constraint_status_changed=(sc_rt.within_budget != base_budget),
+                        )
+                    )
+            except RoutePlanningError as exc:
+                outcomes.append(
+                    ScenarioSensitivityOutcome(
+                        scenario_id=sc.scenario_id,
+                        label=sc.label,
+                        perturbation_parameter=sc.perturbation_parameter,
+                        perturbation_description=sc.perturbation_description,
+                        route_found=False,
+                        path_changed_from_baseline=True,
+                        path_signature_diff_fraction=1.0,
+                        constraint_status_changed=True,
+                        notes=[exc.message],
+                    )
+                )
+
+        return summarize_sensitivity_outcomes(
+            baseline_route_id=route_id,
+            outcomes=outcomes,
+            uncertainty_basis_note=basis_note,
+        )
+
+    def compute_robust_comparison(
+        self,
+        req: RobustRouteCompareRequest,
+        override_grid: Optional[TerrainGrid] = None,
+        override_dataset_id: str = "synthetic_test_dem",
+        override_product_id: str = "SYNTHETIC_DEM",
+    ) -> RobustRouteCompareResponse:
+        """
+        Generate genuinely distinct route alternatives across explicit objectives plus spatial
+        penalty diversification, rejecting near-duplicate corridors or reporting bottlenecks.
+        """
+        t0 = time.perf_counter()
+        all_pts = [(req.start.lat, req.start.lon_east), (req.destination.lat, req.destination.lon_east)]
+        req_stub = RouteComputeRequest(
+            dataset_id=req.dataset_id,
+            start=req.start,
+            destination=req.destination,
+            target_ids=req.target_ids,
+            waypoints=req.waypoints,
+            mode=RoutingMode.BALANCED,
+            objective=RouteObjective.BALANCED_MULTIOBJECTIVE,
+            algorithm=req.algorithm,
+            constraints=req.constraints.model_copy(update={"walking_speed_m_per_s": req.walking_speed_mps}),
+        )
+        stops, sci_corridor, _nl, _ev = self._gather_stops_and_science(req_stub)
+        all_pts.extend((s[1], s[2]) for s in stops)
+
+        if override_grid is not None:
+            base_grid = override_grid
+            ds_id = override_dataset_id
+            prod_id = override_product_id
+        else:
+            ds = self._select_dem_for_points(req.dataset_id, all_pts)
+            ds_id = ds.id
+            prod_id = ds.product_id
+            base_grid = build_terrain_grid_from_dataset(
+                ds,
+                self.raw_dir,
+                all_pts,
+                req.constraints,
+                effective_slope_limit_factor=1.0,
+                science_points=sci_corridor,
+            )
+
+        accepted: List[Tuple[DistinctRouteCandidate, RouteComputeResponse, TerrainGrid]] = []
+        rejected: List[Dict[str, Any]] = []
+
+        def _consider_candidate(
+            cand_id: str,
+            obj: RouteObjective,
+            label: str,
+            method: str,
+            rt: RouteComputeResponse,
+            cand_grid: TerrainGrid,
+        ) -> bool:
+            max_ov = 0.0
+            match_id = None
+            for prev_cand, prev_rt, _pg in accepted:
+                ov = self._polyline_overlap_fraction(rt.vertices, prev_rt.vertices)
+                if ov > max_ov:
+                    max_ov = ov
+                    match_id = prev_cand.candidate_id
+            if accepted and max_ov > req.max_overlap_threshold:
+                rejected.append(
+                    {
+                        "candidate_id": cand_id,
+                        "objective": obj.value,
+                        "method": method,
+                        "overlap_with": match_id,
+                        "overlap_fraction": max_ov,
+                        "reason": f"Spatial overlap {max_ov*100:.1f}% exceeds distinctness threshold ({req.max_overlap_threshold*100:.0f}%).",
+                    }
+                )
+                return False
+
+            ret_ok = False
+            ret_stat = None
+            ret_dist = None
+            ret_gain = None
+            ret_ov = None
+            if req.include_independent_return:
+                try:
+                    rev_req = RouteComputeRequest(
+                        dataset_id=ds_id,
+                        start=req.destination,
+                        destination=req.start,
+                        mode=rt.mode,
+                        objective=obj,
+                        algorithm=req.algorithm,
+                        constraints=req_stub.constraints.model_copy(update={"return_to_start": False}),
+                    )
+                    ret_rt = self.compute_route(
+                        rev_req,
+                        override_grid=cand_grid,
+                        override_dataset_id=ds_id,
+                        override_product_id=prod_id,
+                    )
+                    ret_ok = True
+                    ret_stat = "INDEPENDENT_RETURN_COMPUTED"
+                    ret_dist = ret_rt.total_surface_distance_m
+                    ret_gain = ret_rt.total_elevation_gain_m
+                    ret_ov = self._polyline_overlap_fraction(rt.vertices, ret_rt.vertices)
+                except RoutePlanningError as ret_exc:
+                    ret_ok = False
+                    ret_stat = "RETURN_COMPUTATION_FAILED"
+
+            sens_rep = (
+                self.evaluate_route_sensitivity(rt.route_id, override_grid=cand_grid, override_req=req_stub)
+                if req.include_sensitivity
+                else None
+            )
+            highlights = [
+                f"Objective {obj.value}: {rt.total_surface_distance_m:.1f} m surface | +{rt.total_elevation_gain_m:.1f} m climb | max slope {rt.max_slope_deg:.1f} deg",
+                f"Uncertain/unquantified status: {rt.uncertainty_status or cand_grid.uncertainty_status}",
+            ]
+            if ret_ok:
+                highlights.append(f"Independent return verified ({ret_dist:.1f} m, +{ret_gain:.1f} m climb).")
+            else:
+                highlights.append("Independent return trajectory unverified or blocked.")
+
+            cand = DistinctRouteCandidate(
+                candidate_id=cand_id,
+                objective=obj,
+                objective_label=label,
+                diversification_method=method,
+                max_overlap_with_prior_routes=max_ov,
+                route=rt,
+                return_computed=ret_ok,
+                return_status=ret_stat,
+                return_distance_m=ret_dist,
+                return_elevation_gain_m=ret_gain,
+                return_overlap_with_outbound_fraction=ret_ov,
+                sensitivity_summary=sens_rep,
+                evidence_highlights=highlights,
+            )
+            accepted.append((cand, rt, cand_grid))
+            return True
+
+        # 1. Objective-diversified exploration
+        for idx, obj in enumerate(req.objectives):
+            pol = resolve_routing_policy(RoutingMode.BALANCED, obj)
+            obj_grid = base_grid.clone_with_overrides(
+                effective_slope_limit_deg=max(1.0, req.constraints.max_slope_deg * pol.effective_slope_limit_factor)
+            )
+            s_req = req_stub.model_copy(update={"mode": pol.mode, "objective": obj})
+            try:
+                rt = self.compute_route(
+                    s_req,
+                    override_grid=obj_grid,
+                    override_dataset_id=ds_id,
+                    override_product_id=prod_id,
+                )
+                _consider_candidate(f"cand-{idx+1}-{obj.value.lower()}", obj, pol.label, "objective_weight", rt, obj_grid)
+            except RoutePlanningError as exc:
+                rejected.append(
+                    {
+                        "candidate_id": f"cand-{idx+1}-{obj.value.lower()}",
+                        "objective": obj.value,
+                        "method": "objective_weight",
+                        "reason": exc.message,
+                    }
+                )
+
+        # 2. Spatially penalized diversification passes if < 2 distinct corridors found
+        if len(accepted) == 1:
+            prim_cand, prim_rt, prim_grid = accepted[0]
+            pen_grid = self._build_corridor_penalty_grid(prim_grid, prim_rt.vertices, penalty_factor=4.0, corridor_radius_m=18.0)
+            alt_req = req_stub.model_copy(update={"objective": RouteObjective.BALANCED_MULTIOBJECTIVE})
+            try:
+                alt_rt = self.compute_route(
+                    alt_req,
+                    override_grid=prim_grid,
+                    override_dataset_id=ds_id,
+                    override_product_id=prod_id,
+                    penalty_grid=pen_grid,
+                )
+                _consider_candidate(
+                    "cand-spatial-alt-1",
+                    RouteObjective.BALANCED_MULTIOBJECTIVE,
+                    "Spatially Diversified Alternate Corridor",
+                    "spatial_corridor_penalty",
+                    alt_rt,
+                    prim_grid,
+                )
+            except RoutePlanningError as exc:
+                rejected.append({"candidate_id": "cand-spatial-alt-1", "method": "spatial_corridor_penalty", "reason": exc.message})
+
+        # Pairwise spatial overlap matrix across accepted candidates
+        matrix: Dict[str, Dict[str, float]] = {}
+        for c1, r1, _ in accepted:
+            matrix[c1.candidate_id] = {}
+            for c2, r2, _ in accepted:
+                matrix[c1.candidate_id][c2.candidate_id] = (
+                    1.0 if c1.candidate_id == c2.candidate_id else self._polyline_overlap_fraction(r1.vertices, r2.vertices)
+                )
+
+        if len(accepted) >= 2:
+            status = "DISTINCT_ALTERNATIVES_AVAILABLE"
+        elif len(accepted) == 1:
+            status = "SINGLE_CORRIDOR_BOTTLENECK"
+        else:
+            status = "INSUFFICIENT_FEASIBLE_ROUTES"
+
+        rec_id = None
+        rationale = "No traversable route exists under the configured terrain and coverage constraints."
+        if accepted:
+            def _rank_key(item: Tuple[DistinctRouteCandidate, RouteComputeResponse, TerrainGrid]) -> Tuple[int, int, float, float]:
+                cand, rt, _g = item
+                ret_score = 0 if cand.return_computed else 1
+                stab_changes = cand.sensitivity_summary.scenarios_where_path_changed if cand.sensitivity_summary else 5
+                return (ret_score, stab_changes, rt.max_slope_deg, rt.total_surface_distance_m)
+
+            best_cand, best_rt, _ = sorted(accepted, key=_rank_key)[0]
+            rec_id = best_cand.candidate_id
+            rationale = (
+                f"Recommended '{best_cand.objective_label}' ({rec_id}): independent return={'yes' if best_cand.return_computed else 'no'}, "
+                f"peak slope={best_rt.max_slope_deg:.1f} deg, climb=+{best_rt.total_elevation_gain_m:.1f} m, "
+                f"surface distance={best_rt.total_surface_distance_m:.1f} m"
+                + (
+                    f", stability={best_cand.sensitivity_summary.stability_status.value} ({best_cand.sensitivity_summary.scenarios_where_path_changed}/{best_cand.sensitivity_summary.evaluated_scenario_count} scenarios varied)."
+                    if best_cand.sensitivity_summary
+                    else "."
+                )
+            )
+            if status == "SINGLE_CORRIDOR_BOTTLENECK":
+                rationale += " Terrain forms a topological single-corridor bottleneck; rejected near-duplicate variations are explicitly separated."
+
+        return RobustRouteCompareResponse(
+            dataset_id=ds_id,
+            source_product_id=prod_id,
+            alternative_generation_status=status,
+            recommended_candidate_id=rec_id,
+            recommendation_rationale=rationale,
+            distinct_candidate_count=len(accepted),
+            duplicate_candidates_rejected=len(rejected),
+            pairwise_overlap_matrix=matrix,
+            candidates=[c for (c, _rt, _g) in accepted],
+            rejected_near_duplicates=rejected,
+            limitations=[
+                "Route comparisons evaluate meter-scale DEM geometry and coverage limits; sub-meter obstacles (< 0.5 m) remain unresolved.",
+                "Spatial distinctness verifies corridor separation rather than life-safety certification.",
+            ],
+            compute_time_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+        )
+
+    def compute_independent_return_with_checkpoints(
+        self,
+        *,
+        dataset_id: str,
+        outbound_route: RouteComputeResponse,
+        walking_speed_mps: Optional[float],
+        use_tobler_grade_approximation: bool,
+        stop_dwell_total_s: float,
+        operational_overhead_s: float,
+        usable_budget_s: Optional[float],
+        override_grid: Optional[TerrainGrid] = None,
+    ) -> Tuple[RouteComputeResponse, List[IndependentReturnAlternative], List[TurnbackCheckpointRecord]]:
+        """
+        Compute the primary independent destination->start return route, distinct return
+        alternatives, and checkpoint-by-checkpoint turnback evaluation using single-sweep
+        reverse Dijkstra on the directed TerrainGrid.
+        """
+        from app.eva_operations.schemas import (
+            IndependentReturnAlternative,
+            TurnbackCheckpointRecord,
+        )
+
+        out_verts = outbound_route.vertices
+        start_pt = RouteCoordinateInput(
+            lat=out_verts[0].lat, lon_east=out_verts[0].lon_east, label=out_verts[0].stop_label or "Origin"
+        )
+        dest_pt = RouteCoordinateInput(
+            lat=out_verts[-1].lat, lon_east=out_verts[-1].lon_east, label=out_verts[-1].stop_label or "Destination"
+        )
+        ret_constraints = RoutePlanningConstraints(
+            max_slope_deg=outbound_route.effective_slope_limit_deg,
+            walking_speed_m_per_s=walking_speed_mps,
+            return_to_start=False,
+        )
+        ret_policy = resolve_routing_policy(outbound_route.mode, RouteObjective.BALANCED_MULTIOBJECTIVE)
+
+        if override_grid is not None:
+            ret_grid = override_grid
+            ds_id = dataset_id
+            prod_id = outbound_route.source_product_id
+        else:
+            with self._lock:
+                ctx = self._route_contexts.get(outbound_route.route_id)
+            if ctx is not None:
+                ret_grid = ctx[0]
+                ds_id = outbound_route.dataset_id
+                prod_id = outbound_route.source_product_id
+            else:
+                ds = self._select_dem_for_points(dataset_id, [(v.lat, v.lon_east) for v in out_verts])
+                ds_id = ds.id
+                prod_id = ds.product_id
+                ret_grid = build_terrain_grid_from_dataset(
+                    ds,
+                    self.raw_dir,
+                    [(v.lat, v.lon_east) for v in out_verts],
+                    ret_constraints,
+                    effective_slope_limit_factor=1.0,
+                )
+
+        rev_req = RouteComputeRequest(
+            dataset_id=ds_id,
+            start=dest_pt,
+            destination=start_pt,
+            mode=outbound_route.mode,
+            objective=RouteObjective.BALANCED_MULTIOBJECTIVE,
+            algorithm=outbound_route.algorithm,
+            constraints=ret_constraints,
+        )
+        primary_ret = self.compute_route(
+            rev_req,
+            override_grid=ret_grid,
+            override_dataset_id=ds_id,
+            override_product_id=prod_id,
+        )
+
+        # Evaluate distinct independent return alternatives
+        ret_alts: List[IndependentReturnAlternative] = []
+        alt_candidates: List[Tuple[str, RouteObjective, str, Optional[np.ndarray]]] = [
+            ("ret-alt-climb", RouteObjective.LOWEST_CLIMB_ENERGY, "Lowest-Climb Return", None),
+            (
+                "ret-alt-bypass",
+                RouteObjective.BALANCED_MULTIOBJECTIVE,
+                "Spatially Diversified Return Corridor",
+                self._build_corridor_penalty_grid(ret_grid, primary_ret.vertices, penalty_factor=3.5, corridor_radius_m=18.0),
+            ),
+        ]
+        for aid, aobj, albl, apen in alt_candidates:
+            try:
+                apol = resolve_routing_policy(outbound_route.mode, aobj)
+                alt_req = rev_req.model_copy(update={"mode": apol.mode, "objective": aobj})
+                alt_rt = self.compute_route(
+                    alt_req,
+                    override_grid=ret_grid,
+                    override_dataset_id=ds_id,
+                    override_product_id=prod_id,
+                    penalty_grid=apen,
+                )
+                ov_p = self._polyline_overlap_fraction(alt_rt.vertices, primary_ret.vertices)
+                if ov_p <= 0.85:
+                    ret_alts.append(
+                        IndependentReturnAlternative(
+                            alternative_id=aid,
+                            objective=aobj.value,
+                            strategy_label=albl,
+                            horizontal_distance_m=alt_rt.total_horizontal_distance_m,
+                            surface_distance_m=alt_rt.total_surface_distance_m,
+                            elevation_gain_m=alt_rt.total_elevation_gain_m,
+                            max_slope_deg=alt_rt.max_slope_deg,
+                            mean_slope_deg=alt_rt.mean_slope_deg,
+                            estimated_time_constant_s=(
+                                round(alt_rt.total_surface_distance_m / walking_speed_mps, 1)
+                                if (walking_speed_mps and walking_speed_mps > 0)
+                                else None
+                            ),
+                            estimated_time_tobler_s=alt_rt.estimated_duration_seconds,
+                            spatial_overlap_with_primary_fraction=ov_p,
+                            overlap_with_outbound_fraction=self._polyline_overlap_fraction(alt_rt.vertices, out_verts),
+                            vertices=alt_rt.vertices,
+                        )
+                    )
+            except RoutePlanningError:
+                pass
+
+        # Checkpoint-by-checkpoint independent reverse-Dijkstra turnback evaluation
+        origin_r, origin_c, _ = ret_grid.snap_to_traversable(start_pt.lat, start_pt.lon_east, "origin", ret_constraints.snap_radius_m)
+        _dist_map, next_hop = ret_grid.reverse_dijkstra_to_target((origin_r, origin_c), ret_policy)
+
+        n_verts = len(out_verts)
+        step = max(1, (n_verts - 1) // 8)
+        cp_indices = list(range(1, n_verts, step))
+        if (n_verts - 1) not in cp_indices:
+            cp_indices.append(n_verts - 1)
+
+        # Precompute outbound cumulative Tobler time
+        ref_tobler = math.exp(-3.5 * 0.05)
+        out_cum_tobler = [0.0]
+        for idx in range(1, n_verts):
+            h = mars_great_circle_distance_meters(
+                out_verts[idx - 1].lat, out_verts[idx - 1].lon_east, out_verts[idx].lat, out_verts[idx].lon_east
+            )
+            dz = float(out_verts[idx].elevation_m) - float(out_verts[idx - 1].elevation_m)
+            if walking_speed_mps and walking_speed_mps > 0 and h > 1e-6:
+                gf = math.exp(-3.5 * abs((dz / h) + 0.05)) / ref_tobler
+                slp = float(out_verts[idx].slope_deg) if out_verts[idx].slope_deg is not None else math.degrees(math.atan2(abs(dz), h))
+                att = max(0.35, 1.0 - max(0.0, slp) / 55.0)
+                out_cum_tobler.append(out_cum_tobler[-1] + h / (walking_speed_mps * max(0.22, min(1.1, min(gf, att)))))
+            else:
+                out_cum_tobler.append(out_cum_tobler[-1])
+
+        checkpoints: List[TurnbackCheckpointRecord] = []
+        for cp_pos, v_idx in enumerate(cp_indices):
+            v = out_verts[v_idx]
+            out_t = (
+                round(out_cum_tobler[v_idx], 1)
+                if use_tobler_grade_approximation
+                else (round(v.cumulative_distance_m / walking_speed_mps, 1) if (walking_speed_mps and walking_speed_mps > 0) else None)
+            )
+            try:
+                cp_r, cp_c, _ = ret_grid.snap_to_traversable(v.lat, v.lon_east, f"cp-{cp_pos}", ret_constraints.snap_radius_m)
+                cells = reconstruct_reverse_dijkstra_path(next_hop, (cp_r, cp_c), (origin_r, origin_c), ret_grid.cols)
+            except RoutePlanningError as exc:
+                checkpoints.append(
+                    TurnbackCheckpointRecord(
+                        checkpoint_index=cp_pos,
+                        lat=v.lat,
+                        lon_east=v.lon_east,
+                        outbound_distance_m=round(v.cumulative_distance_m, 2),
+                        outbound_elapsed_s=out_t,
+                        return_route_computed=False,
+                        fits_usable_budget=False,
+                        failure_reason=exc.message,
+                    )
+                )
+                continue
+
+            if cells is None or len(cells) < 1:
+                checkpoints.append(
+                    TurnbackCheckpointRecord(
+                        checkpoint_index=cp_pos,
+                        lat=v.lat,
+                        lon_east=v.lon_east,
+                        outbound_distance_m=round(v.cumulative_distance_m, 2),
+                        outbound_elapsed_s=out_t,
+                        return_route_computed=False,
+                        fits_usable_budget=False,
+                        failure_reason="Checkpoint has no valid directed return trajectory to origin under active terrain constraints.",
+                    )
+                )
+                continue
+
+            cp_surf = 0.0
+            cp_gain = 0.0
+            cp_tob = 0.0
+            cp_verts: List[RouteVertex] = []
+            for ci, (cr, cc) in enumerate(cells):
+                z_cur = float(ret_grid.elevation_m[cr, cc])
+                slp_cur = float(ret_grid.slope_deg[cr, cc]) if np.isfinite(ret_grid.slope_deg[cr, cc]) else 0.0
+                cp_verts.append(
+                    RouteVertex(
+                        seq=ci,
+                        lat=float(ret_grid.lats[cr]),
+                        lon_east=float(ret_grid.lons_east[cc]),
+                        elevation_m=z_cur,
+                        slope_deg=slp_cur,
+                        cumulative_distance_m=cp_surf,
+                        segment_distance_m=0.0,
+                    )
+                )
+                if ci > 0:
+                    pr, pc = cells[ci - 1]
+                    h = math.hypot((cc - pc) * ret_grid.dx_m, (cr - pr) * ret_grid.dy_m)
+                    dz = z_cur - float(ret_grid.elevation_m[pr, pc])
+                    cp_surf += math.hypot(h, dz)
+                    if dz > 0:
+                        cp_gain += dz
+                    if walking_speed_mps and walking_speed_mps > 0 and h > 1e-6:
+                        gf = math.exp(-3.5 * abs((dz / h) + 0.05)) / ref_tobler
+                        att = max(0.35, 1.0 - max(0.0, slp_cur) / 55.0)
+                        cp_tob += h / (walking_speed_mps * max(0.22, min(1.1, min(gf, att))))
+
+            cp_const_s = round(cp_surf / walking_speed_mps, 1) if (walking_speed_mps and walking_speed_mps > 0) else None
+            cp_tob_s = round(cp_tob, 1) if (walking_speed_mps and walking_speed_mps > 0) else None
+            active_ret_s = cp_tob_s if use_tobler_grade_approximation else cp_const_s
+            dwell_here = stop_dwell_total_s if (v_idx == n_verts - 1) else 0.0
+            rt_t = (
+                round((out_t or 0.0) + operational_overhead_s + dwell_here + (active_ret_s or 0.0), 1)
+                if (out_t is not None and active_ret_s is not None)
+                else None
+            )
+            fits = (rt_t <= usable_budget_s) if (rt_t is not None and usable_budget_s is not None) else None
+            checkpoints.append(
+                TurnbackCheckpointRecord(
+                    checkpoint_index=cp_pos,
+                    lat=v.lat,
+                    lon_east=v.lon_east,
+                    outbound_distance_m=round(v.cumulative_distance_m, 2),
+                    outbound_elapsed_s=out_t,
+                    return_route_computed=True,
+                    independent_return_distance_m=round(cp_surf, 2),
+                    independent_return_elevation_gain_m=round(cp_gain, 2),
+                    independent_return_duration_constant_s=cp_const_s,
+                    independent_return_duration_tobler_s=cp_tob_s,
+                    estimated_roundtrip_time_s=rt_t,
+                    fits_usable_budget=fits,
+                    return_differs_from_outbound=(self._polyline_overlap_fraction(cp_verts, out_verts[: v_idx + 1]) < 0.85),
+                )
+            )
+
+        return primary_ret, ret_alts, checkpoints

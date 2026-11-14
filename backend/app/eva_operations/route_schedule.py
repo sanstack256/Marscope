@@ -10,9 +10,17 @@ import math
 from typing import Dict, List, Optional
 
 from app.evidence_intelligence.schemas import CorridorAssessment
-from app.eva_operations.schemas import ReturnPlanReport, SegmentScheduleItem
+from app.eva_operations.schemas import (
+    LocomotionModelSpec,
+    ReturnPlanReport,
+    ReturnPlanStatus,
+    SegmentScheduleItem,
+    get_locomotion_model_spec,
+)
 from app.mobility.terrain_features import mars_great_circle_distance_meters
 from app.routing.schemas import RouteCoordinateInput
+
+LOCOMOTION_SPEED_FLOOR_RATIO = 0.22
 
 
 def _approx_tobler_for_vertices(
@@ -30,7 +38,7 @@ def _approx_tobler_for_vertices(
     ref_tobler = math.exp(-3.5 * 0.05)
     grade_factor = math.exp(-3.5 * abs((dz / horiz) + 0.05)) / ref_tobler
     local_atten = max(0.35, 1.0 - max(0.0, float(mean_slope_deg or 0.0)) / 55.0)
-    eff_speed = walking_speed_mps * max(0.22, min(1.1, min(grade_factor, local_atten)))
+    eff_speed = walking_speed_mps * max(LOCOMOTION_SPEED_FLOOR_RATIO, min(1.1, min(grade_factor, local_atten)))
     return round(surface_dist_m / eff_speed, 1)
 
 
@@ -146,8 +154,8 @@ def build_eva_schedule(
         )
         seq += 1
 
-    # Return leg schedule entry
-    if return_plan.return_route_computed:
+    # Return leg schedule entry — only scheduled as a verified return when independently computed
+    if return_plan.return_route_computed and return_plan.return_status != ReturnPlanStatus.REVERSED_OUTBOUND_REFERENCE_ONLY:
         if surface_weight_n is not None:
             cum_climb_j += surface_weight_n * return_plan.return_elevation_gain_m
         d_ret_const = return_plan.return_duration_constant_s

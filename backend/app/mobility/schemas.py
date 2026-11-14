@@ -578,6 +578,10 @@ class CostSurfaceSummary(BaseModel):
     mean_cell_crossing_time_seconds: Optional[float] = None
     cells: List[CostSurfaceCellRecord] = Field(default_factory=list)
     limitations: List[str] = Field(default_factory=list)
+    uncertainty_status: Optional[str] = None
+    nominal_vertical_precision_m: Optional[float] = None
+    has_per_pixel_error_raster: bool = False
+    traversability_state_notes: List[str] = Field(default_factory=list)
 
 
 class MobilityEvaluationResponse(BaseModel):

@@ -71,6 +71,23 @@ def get_eva_mission_return_route(mission_id: str):
     }
 
 
+@router.get("/mission/{mission_id}/return-analysis")
+def get_eva_mission_return_analysis(mission_id: str):
+    """Return Prompt 16 independent return analysis, alternatives, and checkpoint-by-checkpoint turnback PONR."""
+    m = _get_mission_or_404(mission_id)
+    return {
+        "mission_id": m.mission_id,
+        "return_status": m.return_plan.return_status,
+        "return_route_computed": m.return_plan.return_route_computed,
+        "return_plan": m.return_plan,
+        "turnback_checkpoints": m.return_plan.turnback_checkpoints,
+        "return_alternatives": m.return_plan.return_alternatives,
+        "point_of_no_return_distance_m": m.return_plan.point_of_no_return_distance_m,
+        "time_budget": m.time_budget,
+        "outbound_summary": m.outbound_summary,
+    }
+
+
 @router.get("/mission/{mission_id}/resource-budget")
 def get_eva_mission_resource_budget(mission_id: str):
     """Return explicit mechanical climb work and unit-aware consumable budget evaluations."""

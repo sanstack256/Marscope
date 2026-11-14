@@ -110,16 +110,24 @@ export default function MissionReadinessPage() {
     routeComparison,
     missionDossier,
     decisionTrace,
+    dependencyTrace,
+    corridorUncertainty,
+    complementarityReport,
     selectedSegmentId,
     loadingCorridor,
     loadingComparison,
     loadingDossier,
+    loadingUncertainty,
+    loadingComplementarity,
     error: evidenceError,
     overlays,
     setSelectedSegmentId,
     toggleOverlay,
     assessCorridor,
     fetchDecisionTrace,
+    fetchDependencyTrace,
+    fetchCorridorUncertainty,
+    fetchComplementarity,
     compareRoutesEvidence,
     generateMissionDossier,
   } = useEvidenceStore();
@@ -127,9 +135,12 @@ export default function MissionReadinessPage() {
   const {
     evaEnvelope,
     selectedTimelineIndex,
+    selectedReturnAlternativeId,
     loadingEva,
     error: evaError,
     setSelectedTimelineStep,
+    setSelectedReturnAlternativeId,
+    fetchReturnAnalysis,
     evaluateMission,
   } = useEvaOperationsStore();
 
@@ -244,7 +255,10 @@ export default function MissionReadinessPage() {
     });
     if (assessed?.assessment_id) {
       await fetchDecisionTrace(assessed.assessment_id);
+      await fetchDependencyTrace(assessed.assessment_id);
     }
+    await fetchCorridorUncertainty({ dataset_id: selectedDemDatasetId });
+    await fetchComplementarity();
   };
 
   const handleCompareRoutes = () => {
@@ -271,6 +285,7 @@ export default function MissionReadinessPage() {
       return_reserve_fraction: parseOptNum(reserveFrac),
       astronaut_suit_mass_kg: parseOptNum(suitMassKg),
       payload_mass_kg: parseOptNum(payloadMassKg),
+      independent_return_computed: Boolean(evaEnvelope?.return_plan?.return_route_computed),
       force_recompute: forceRecompute,
     });
   };
@@ -278,7 +293,7 @@ export default function MissionReadinessPage() {
   const handleEvaluateEva = async () => {
     const resBuild = buildResourcesPayload();
     if (!resBuild.ok) return;
-    await evaluateMission({
+    const evaRes = await evaluateMission({
       mission_name: missionName,
       dataset_id: selectedDemDatasetId,
       start: effectiveStart,
@@ -296,6 +311,9 @@ export default function MissionReadinessPage() {
       resources: resBuild.items,
       compute_reverse_return_route: computeReverseReturn,
     });
+    if (evaRes?.mission_id) {
+      await fetchReturnAnalysis(evaRes.mission_id);
+    }
   };
 
   const handleRunFullAnalysis = async () => {
@@ -312,7 +330,10 @@ export default function MissionReadinessPage() {
     });
     if (assessed?.assessment_id) {
       await fetchDecisionTrace(assessed.assessment_id);
+      await fetchDependencyTrace(assessed.assessment_id);
     }
+    await fetchCorridorUncertainty({ dataset_id: selectedDemDatasetId });
+    await fetchComplementarity();
     await compareRoutesEvidence({
       dataset_id: selectedDemDatasetId,
       start: effectiveStart,
@@ -320,22 +341,7 @@ export default function MissionReadinessPage() {
       corridor_width_m: corridorWidthM,
       observation_search_radius_m: searchRadiusM,
     });
-    await generateMissionDossier({
-      mission_name: missionName,
-      dataset_id: selectedDemDatasetId,
-      start: effectiveStart,
-      destination: effectiveDest,
-      mode: selectedMode,
-      corridor_width_m: corridorWidthM,
-      observation_search_radius_m: searchRadiusM,
-      walking_speed_mps: parseOptNum(walkingSpeedMps),
-      mission_duration_limit_s: durationLimitSeconds,
-      return_reserve_fraction: parseOptNum(reserveFrac),
-      astronaut_suit_mass_kg: parseOptNum(suitMassKg),
-      payload_mass_kg: parseOptNum(payloadMassKg),
-      force_recompute: forceRecompute,
-    });
-    await evaluateMission({
+    const evaRes = await evaluateMission({
       mission_name: missionName,
       dataset_id: selectedDemDatasetId,
       start: effectiveStart,
@@ -352,6 +358,25 @@ export default function MissionReadinessPage() {
       payload_mass_kg: parseOptNum(payloadMassKg),
       resources: resBuild.items,
       compute_reverse_return_route: computeReverseReturn,
+    });
+    if (evaRes?.mission_id) {
+      await fetchReturnAnalysis(evaRes.mission_id);
+    }
+    await generateMissionDossier({
+      mission_name: missionName,
+      dataset_id: selectedDemDatasetId,
+      start: effectiveStart,
+      destination: effectiveDest,
+      mode: selectedMode,
+      corridor_width_m: corridorWidthM,
+      observation_search_radius_m: searchRadiusM,
+      walking_speed_mps: parseOptNum(walkingSpeedMps),
+      mission_duration_limit_s: durationLimitSeconds,
+      return_reserve_fraction: parseOptNum(reserveFrac),
+      astronaut_suit_mass_kg: parseOptNum(suitMassKg),
+      payload_mass_kg: parseOptNum(payloadMassKg),
+      independent_return_computed: Boolean(evaRes?.return_plan?.return_route_computed),
+      force_recompute: forceRecompute,
     });
   };
 
@@ -518,6 +543,8 @@ export default function MissionReadinessPage() {
     { key: "showOpticalCandidates", label: "Optical Candidates" },
     { key: "showObservations", label: "Rover Observations" },
     { key: "showReturnRoute", label: "Return Route" },
+    { key: "showAlternativeRoutes", label: "Alt Routes" },
+    { key: "showTurnbackPonr", label: "PONR Beacon" },
   ];
 
   const showSection = (s: Exclude<SectionFilter, "all">) =>
@@ -1597,6 +1624,131 @@ export default function MissionReadinessPage() {
               </div>
             </div>
           )}
+
+          {/* Prompt 16: Checkpoint-by-Checkpoint Independent Return Turnback PONR & Return Alternatives */}
+          {evaEnvelope?.return_plan && (
+            <div
+              className="rounded-xl border border-cyan-500/35 bg-slate-950/75 p-4 space-y-3"
+              data-testid="prompt16-turnback-analysis"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-semibold text-white">
+                    Independent Return Verification &amp; Checkpoint Turnback PONR
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Status:{" "}
+                    <span className="font-mono text-cyan-300">
+                      {evaEnvelope.return_plan.return_status ?? evaEnvelope.return_plan.return_strategy}
+                    </span>{" "}
+                    · Method:{" "}
+                    <span className="font-mono text-slate-200">
+                      {evaEnvelope.return_plan.turnback_ponr_method ?? "single_sweep_reverse_dijkstra"}
+                    </span>
+                    {evaEnvelope.return_plan.locomotion_model && (
+                      <>
+                        {" "}
+                        · Locomotion:{" "}
+                        <span className="font-mono text-amber-300">
+                          {evaEnvelope.return_plan.locomotion_model.model_id} (
+                          {evaEnvelope.return_plan.locomotion_model.model_version})
+                        </span>
+                      </>
+                    )}
+                  </p>
+                </div>
+                {evaEnvelope.return_plan.return_alternatives && evaEnvelope.return_plan.return_alternatives.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedReturnAlternativeId(null)}
+                      className={`rounded border px-2 py-1 font-mono ${
+                        selectedReturnAlternativeId === null
+                          ? "border-cyan-400 bg-cyan-500/20 text-cyan-200"
+                          : "border-slate-700 bg-slate-900 text-slate-300"
+                      }`}
+                    >
+                      Primary Return
+                    </button>
+                    {evaEnvelope.return_plan.return_alternatives.map((alt) => (
+                      <button
+                        key={alt.alternative_id}
+                        type="button"
+                        onClick={() => setSelectedReturnAlternativeId(alt.alternative_id)}
+                        className={`rounded border px-2 py-1 font-mono ${
+                          selectedReturnAlternativeId === alt.alternative_id
+                            ? "border-rose-400 bg-rose-500/20 text-rose-200"
+                            : "border-slate-700 bg-slate-900 text-slate-300"
+                        }`}
+                      >
+                        {alt.strategy_label} ({alt.surface_distance_m.toFixed(0)} m / +{alt.elevation_gain_m.toFixed(1)} m)
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {evaEnvelope.return_plan.locomotion_model?.unvalidated_note && (
+                <div className="rounded border border-amber-500/30 bg-amber-950/20 px-3 py-1.5 text-[11px] text-amber-200">
+                  {evaEnvelope.return_plan.locomotion_model.unvalidated_note}
+                </div>
+              )}
+
+              {evaEnvelope.return_plan.turnback_checkpoints && evaEnvelope.return_plan.turnback_checkpoints.length > 0 && (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-[11px] border-collapse font-mono">
+                    <thead>
+                      <tr className="border-b border-slate-800 text-slate-400">
+                        <th className="py-1.5 pr-2">Checkpoint</th>
+                        <th className="py-1.5 pr-2">Outbound Dist</th>
+                        <th className="py-1.5 pr-2">Out Elapsed</th>
+                        <th className="py-1.5 pr-2">Indep. Return Dist / Gain</th>
+                        <th className="py-1.5 pr-2">Indep. Return Time (C/T)</th>
+                        <th className="py-1.5 pr-2">Roundtrip Total</th>
+                        <th className="py-1.5 pr-2">Differs from Outbound</th>
+                        <th className="py-1.5">Budget Fit</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/70">
+                      {evaEnvelope.return_plan.turnback_checkpoints.map((cp) => (
+                        <tr key={cp.checkpoint_index} className="text-slate-300">
+                          <td className="py-1.5 pr-2">
+                            #{cp.checkpoint_index} ({cp.lat.toFixed(4)}°, {cp.lon_east.toFixed(4)}°E)
+                          </td>
+                          <td className="py-1.5 pr-2">{cp.outbound_distance_m.toFixed(1)} m</td>
+                          <td className="py-1.5 pr-2">{formatDuration(cp.outbound_elapsed_s)}</td>
+                          <td className="py-1.5 pr-2">
+                            {cp.return_route_computed
+                              ? `${cp.independent_return_distance_m?.toFixed(1) ?? "?"} m / +${cp.independent_return_elevation_gain_m?.toFixed(1) ?? "0"} m`
+                              : cp.failure_reason ?? "UNREACHABLE"}
+                          </td>
+                          <td className="py-1.5 pr-2">
+                            {formatDuration(cp.independent_return_duration_constant_s)} /{" "}
+                            {formatDuration(cp.independent_return_duration_tobler_s)}
+                          </td>
+                          <td className="py-1.5 pr-2">{formatDuration(cp.estimated_roundtrip_time_s)}</td>
+                          <td className="py-1.5 pr-2">{cp.return_differs_from_outbound ? "YES (Asymmetric)" : "SAME"}</td>
+                          <td className="py-1.5">
+                            <span
+                              className={`rounded border px-1.5 py-0.5 text-[10px] ${
+                                cp.fits_usable_budget === true
+                                  ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                                  : cp.fits_usable_budget === false
+                                  ? "border-red-500/40 bg-red-500/15 text-red-300"
+                                  : "border-slate-700 bg-slate-800 text-slate-300"
+                              }`}
+                            >
+                              {cp.fits_usable_budget === true ? "FITS" : cp.fits_usable_budget === false ? "EXCEEDS" : "UNBOUNDED"}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
         </section>
       )}
 
@@ -2003,6 +2155,256 @@ export default function MissionReadinessPage() {
                   ))}
                 </ul>
               </div>
+            </div>
+          )}
+
+          {/* Prompt 16: PDS3 Elevation Uncertainty, Horn 3x3 / TRI Propagation & 7-Scale Feature Observability */}
+          <div
+            className="rounded-xl border border-cyan-500/35 bg-slate-950/75 p-4 space-y-4"
+            data-testid="prompt16-uncertainty-panel"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-semibold text-white">
+                  Prompt 16 · DEM Uncertainty Propagation, 3-State Traversability &amp; Resolution Observability
+                </h3>
+                <p className="text-[11px] text-slate-400">
+                  Separates PDS3 empirical error maps (when absent: UNQUANTIFIED) from metadata nominal precision probes and Nyquist hazard limits.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void fetchCorridorUncertainty({ dataset_id: selectedDemDatasetId })}
+                  disabled={loadingUncertainty}
+                  className="rounded border border-cyan-500/40 bg-cyan-500/15 px-2.5 py-1 text-[11px] font-mono text-cyan-200 hover:bg-cyan-500/25 disabled:opacity-50"
+                >
+                  {loadingUncertainty ? "Refreshing Uncertainty..." : "Refresh Uncertainty Audit"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void fetchComplementarity()}
+                  disabled={loadingComplementarity}
+                  className="rounded border border-purple-500/40 bg-purple-500/15 px-2.5 py-1 text-[11px] font-mono text-purple-200 hover:bg-purple-500/25 disabled:opacity-50"
+                >
+                  {loadingComplementarity ? "Refreshing Registry..." : "Refresh Complementarity"}
+                </button>
+              </div>
+            </div>
+
+            {corridorUncertainty ? (
+              <div className="space-y-4 text-[11px]">
+                {/* Negative Evidence Prohibition Callout */}
+                <div className="rounded-lg border border-rose-500/40 bg-rose-950/25 p-3 text-rose-200 space-y-1">
+                  <div className="font-bold uppercase tracking-wider text-[10px]">
+                    Negative Evidence Guarantee · zero_detections_implies_obstacle_free ={" "}
+                    {String(corridorUncertainty.negative_evidence.zero_detections_implies_obstacle_free)}
+                  </div>
+                  <div>{corridorUncertainty.negative_evidence.statement}</div>
+                  {corridorUncertainty.negative_evidence.unresolved_hazard_classes.length > 0 && (
+                    <div className="font-mono text-[10px] text-rose-300">
+                      Unresolved Classes: {corridorUncertainty.negative_evidence.unresolved_hazard_classes.join(", ")}
+                    </div>
+                  )}
+                </div>
+
+                {/* Dataset Uncertainty Inventory + Slope / TRI Summary */}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3 space-y-1 font-mono">
+                    <div className="font-bold text-cyan-300">Dataset PDS3 / Dtype Inventory</div>
+                    <div>Product: {corridorUncertainty.dataset_profile.product_id}</div>
+                    <div>Status: {corridorUncertainty.dataset_profile.overall_elevation_uncertainty_status}</div>
+                    <div>
+                      Per-Pixel Error Raster: {String(corridorUncertainty.dataset_profile.has_per_pixel_error_raster)}
+                    </div>
+                    <div>
+                      Bits / Type: {corridorUncertainty.dataset_profile.sample_bits ?? "?"}-bit{" "}
+                      {corridorUncertainty.dataset_profile.sample_type ?? "?"} (int quantized:{" "}
+                      {String(corridorUncertainty.dataset_profile.is_integer_quantized)})
+                    </div>
+                    {corridorUncertainty.dataset_profile.elevation_uncertainty_metrics.map((m) => (
+                      <div key={m.metric_name} className="text-[10px] text-slate-300 border-t border-slate-800 pt-1">
+                        {m.metric_name}: {m.value != null ? `${m.value} ${m.units ?? ""}` : m.status} ({m.status})
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3 space-y-1 font-mono">
+                    <div className="font-bold text-amber-300">Horn 3x3 &amp; Riley TRI Propagation</div>
+                    <div>Slope Probe Status: {corridorUncertainty.slope_uncertainty.status}</div>
+                    <div>
+                      Basis σz:{" "}
+                      {corridorUncertainty.slope_uncertainty.basis_sigma_z_m != null
+                        ? `${corridorUncertainty.slope_uncertainty.basis_sigma_z_m.toFixed(3)} m`
+                        : "Unquantified"}
+                    </div>
+                    <div>
+                      Mean / Max Slope σ:{" "}
+                      {corridorUncertainty.slope_uncertainty.mean_slope_sigma_deg != null
+                        ? `${corridorUncertainty.slope_uncertainty.mean_slope_sigma_deg.toFixed(2)}° / ${corridorUncertainty.slope_uncertainty.max_slope_sigma_deg?.toFixed(2) ?? "?"}°`
+                        : "Unavailable"}
+                    </div>
+                    <div>
+                      Near-Flat Bias Affected:{" "}
+                      {corridorUncertainty.slope_uncertainty.near_flat_bias_affected_fraction != null
+                        ? `${(corridorUncertainty.slope_uncertainty.near_flat_bias_affected_fraction * 100).toFixed(1)}%`
+                        : "—"}
+                    </div>
+                    <div>
+                      TRI Mean / Max σ:{" "}
+                      {corridorUncertainty.roughness_uncertainty.mean_tri_sigma_m != null
+                        ? `${corridorUncertainty.roughness_uncertainty.mean_tri_sigma_m.toFixed(3)} m / ${corridorUncertainty.roughness_uncertainty.max_tri_sigma_m?.toFixed(3) ?? "?"} m`
+                        : "Unavailable"}
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-slate-800 bg-slate-900/60 p-3 space-y-1 font-mono">
+                    <div className="font-bold text-emerald-300">3-State Traversability Breakdown</div>
+                    <div>
+                      Evaluated:{" "}
+                      {(corridorUncertainty.traversability_breakdown.evaluated_fraction * 100).toFixed(1)}% (
+                      {corridorUncertainty.traversability_breakdown.evaluated_cell_count} cells)
+                    </div>
+                    <div>
+                      Known Exclusion:{" "}
+                      {(corridorUncertainty.traversability_breakdown.known_exclusion_fraction * 100).toFixed(1)}% (
+                      {corridorUncertainty.traversability_breakdown.known_exclusion_cell_count} cells)
+                    </div>
+                    <div>
+                      Unknown / Insufficient:{" "}
+                      {(corridorUncertainty.traversability_breakdown.unknown_insufficient_fraction * 100).toFixed(1)}% (
+                      {corridorUncertainty.traversability_breakdown.unknown_insufficient_cell_count} cells)
+                    </div>
+                    <div className="text-[10px] text-slate-400 border-t border-slate-800 pt-1">
+                      Registration: {corridorUncertainty.registration_uncertainty.overall_status}
+                    </div>
+                  </div>
+                </div>
+
+                {/* 7-Scale Feature Observability Table */}
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-[11px] border-collapse font-mono">
+                    <thead>
+                      <tr className="border-b border-slate-800 text-slate-400">
+                        <th className="py-1.5 pr-2">Feature / Scale Category</th>
+                        <th className="py-1.5 pr-2">Observability State</th>
+                        <th className="py-1.5 pr-2">Source Dataset</th>
+                        <th className="py-1.5 pr-2">Min Resolvable (Nyquist)</th>
+                        <th className="py-1.5">Rationale</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/70">
+                      {corridorUncertainty.observability.map((obs) => (
+                        <tr key={obs.category} className="text-slate-300">
+                          <td className="py-1.5 pr-2 font-bold">{obs.category}</td>
+                          <td className="py-1.5 pr-2">
+                            <span
+                              className={`rounded border px-1.5 py-0.5 text-[10px] ${
+                                obs.observability_state === "RESOLVABLE"
+                                  ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                                  : obs.observability_state === "MARGINAL"
+                                  ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
+                                  : "border-rose-500/40 bg-rose-500/15 text-rose-300"
+                              }`}
+                            >
+                              {obs.observability_state}
+                            </span>
+                          </td>
+                          <td className="py-1.5 pr-2">{obs.source_dataset_id}</td>
+                          <td className="py-1.5 pr-2">
+                            {obs.minimum_resolvable_feature_size_m != null
+                              ? `${obs.minimum_resolvable_feature_size_m.toFixed(2)} m`
+                              : "—"}
+                          </td>
+                          <td className="py-1.5 font-sans text-slate-400">{obs.rationale}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <div className="text-xs text-slate-400">
+                Click &ldquo;Refresh Uncertainty Audit&rdquo; or run full mission evaluation to load PDS3 elevation uncertainty, Horn 3x3 slope sigma, and 7-scale observability checks.
+              </div>
+            )}
+          </div>
+
+          {/* Prompt 16: Data Complementarity Registry (supports vs does_not_support) */}
+          {complementarityReport && (
+            <div
+              className="rounded-xl border border-purple-500/35 bg-slate-950/75 p-4 space-y-3 text-[11px]"
+              data-testid="prompt16-complementarity-panel"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-white">
+                  Data Complementarity Registry ({complementarityReport.registry_id} · {complementarityReport.registry_version})
+                </h3>
+                <span className="font-mono text-[10px] text-purple-300">
+                  Active Sources: {complementarityReport.active_dataset_ids.length}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {complementarityReport.dataset_roles.map((role) => (
+                  <div
+                    key={role.dataset_id_pattern}
+                    className="rounded-lg border border-slate-800 bg-slate-900/60 p-3 space-y-1.5"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-cyan-200">{role.title}</span>
+                      <span className="font-mono text-[10px] text-slate-400">{role.mission_and_instrument}</span>
+                    </div>
+                    <div className="text-[10px] font-mono text-slate-400">{role.native_scale_description}</div>
+                    {role.isolation_warning && (
+                      <div className="rounded border border-rose-500/40 bg-rose-950/30 px-2 py-1 text-[10px] text-rose-200">
+                        {role.isolation_warning}
+                      </div>
+                    )}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                      <div>
+                        <div className="font-mono text-[10px] text-emerald-300 font-bold">Supports:</div>
+                        <ul className="list-disc pl-4 space-y-0.5 text-slate-300">
+                          {role.supports.map((s, idx) => (
+                            <li key={idx}>{s}</li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div>
+                        <div className="font-mono text-[10px] text-rose-300 font-bold">Does NOT Support:</div>
+                        <ul className="list-disc pl-4 space-y-0.5 text-slate-400">
+                          {role.does_not_support.map((d, idx) => (
+                            <li key={idx}>{d}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Prompt 16: Dependency Signature & Policy Version Trace */}
+          {dependencyTrace && (
+            <div
+              className="rounded-xl border border-slate-800 bg-slate-950/75 p-4 space-y-2 text-[11px] font-mono"
+              data-testid="prompt16-dependency-trace"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-sm font-sans font-semibold text-white">
+                  Assessment Dependency Signature &amp; Policy Trace
+                </span>
+                <span
+                  className={`rounded border px-2 py-0.5 text-[10px] ${badgeClassForStatus(
+                    String(dependencyTrace.cache_validity ?? "UNAVAILABLE")
+                  )}`}
+                >
+                  {String(dependencyTrace.cache_validity ?? "UNAVAILABLE")}
+                </span>
+              </div>
+              <pre className="max-h-48 overflow-auto rounded border border-slate-800 bg-black/50 p-2 text-[10px] text-slate-300">
+                {JSON.stringify(dependencyTrace.stored_dependency_signature ?? dependencyTrace, null, 2)}
+              </pre>
             </div>
           )}
         </section>

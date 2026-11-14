@@ -10,6 +10,8 @@ import heapq
 import math
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 from app.routing.graph import RoutePlanningError, TerrainGrid
 from app.routing.models import PathAlgorithm, RoutingModePolicy
 from app.routing.schemas import SimplificationDiagnostic
@@ -34,12 +36,43 @@ class LegPathResult:
     nodes_expanded: int
 
 
+def reconstruct_reverse_dijkstra_path(
+    next_hop: Dict[int, int],
+    start_rc: Tuple[int, int],
+    goal_rc: Tuple[int, int],
+    cols: int,
+    max_steps: int = 20000,
+) -> Optional[List[Tuple[int, int]]]:
+    """Trace an optimal directed path from start_rc to goal_rc using a precomputed next_hop table."""
+    if start_rc == goal_rc:
+        return [start_rc]
+    cur = start_rc[0] * cols + start_rc[1]
+    goal_idx = goal_rc[0] * cols + goal_rc[1]
+    if cur not in next_hop:
+        return None
+    cells: List[Tuple[int, int]] = [(cur // cols, cur % cols)]
+    seen = {cur}
+    steps = 0
+    while cur != goal_idx and steps < max_steps:
+        nxt = next_hop.get(cur)
+        if nxt is None or nxt in seen:
+            return None
+        seen.add(nxt)
+        cells.append((nxt // cols, nxt % cols))
+        cur = nxt
+        steps += 1
+    if cur != goal_idx:
+        return None
+    return cells
+
+
 def solve_grid_leg(
     grid: TerrainGrid,
     start_rc: Tuple[int, int],
     goal_rc: Tuple[int, int],
     policy: RoutingModePolicy,
     algorithm: PathAlgorithm = PathAlgorithm.ASTAR,
+    penalty_grid: Optional[np.ndarray] = None,
 ) -> LegPathResult:
     """
     Solve lowest-cost valid surface leg between grid cells start_rc and goal_rc.
@@ -118,7 +151,7 @@ def solve_grid_leg(
             if not grid.can_step(cr, cc, nr, nc):
                 continue
 
-            step_cost = grid.edge_cost(cr, cc, nr, nc, policy)
+            step_cost = grid.edge_cost(cr, cc, nr, nc, policy, penalty_grid=penalty_grid)
             tentative_g = cur_g + step_cost
             prev_g = g_score.get(n_idx)
             if prev_g is None or tentative_g < prev_g - 1e-9:

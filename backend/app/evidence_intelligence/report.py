@@ -49,6 +49,17 @@ from app.evidence_intelligence.schemas import (
 )
 from app.evidence_intelligence.terrain_assessment import assess_corridor_terrain
 from app.evidence_intelligence.uncertainty_assessment import assess_corridor_uncertainty
+from app.routing.models import ROUTE_OBJECTIVES_VERSION
+from app.science.complementarity import (
+    COMPLEMENTARITY_REGISTRY_VERSION,
+    evaluate_data_complementarity,
+)
+from app.terrain_uncertainty.elevation_uncertainty import inspect_dataset_elevation_uncertainty
+from app.terrain_uncertainty.models import (
+    RESOLUTION_OBSERVABILITY_VERSION,
+    UNCERTAINTY_MODEL_VERSION,
+)
+from app.terrain_uncertainty.sensitivity import SENSITIVITY_POLICY_VERSION
 from app.mobility.coverage import _resolve_raw_dem_open_path
 from app.routing.schemas import (
     RouteComputeRequest,
@@ -232,8 +243,17 @@ class EvidenceIntelligenceService:
             "terrain_assessment_version": self.TERRAIN_ASSESS_VERSION,
             "optical_detector_version": self.OPTICAL_DETECTOR_VERSION,
             "observation_matcher_version": self.OBS_MATCHER_VERSION,
-            "eva_model_version": self.EVA_MODEL_VERSION,
+            "eva_model_version": "eva_envelope_v2",
             "readiness_policy_version": READINESS_POLICY["policy_version"],
+            "uncertainty_model_version": UNCERTAINTY_MODEL_VERSION,
+            "resolution_policy_version": RESOLUTION_OBSERVABILITY_VERSION,
+            "traversability_model_version": "traversability_v2.0",
+            "locomotion_model_id": "MARSCOPE-LOCO",
+            "locomotion_model_version": "locomotion_v1.0",
+            "routing_objectives_version": ROUTE_OBJECTIVES_VERSION,
+            "return_planning_version": "return_planning_v2.0",
+            "sensitivity_policy_version": SENSITIVITY_POLICY_VERSION,
+            "complementarity_registry_version": COMPLEMENTARITY_REGISTRY_VERSION,
             "mission_config_hash": m_hash,
         }
         sig_digest = hashlib.sha256(
@@ -279,6 +299,18 @@ class EvidenceIntelligenceService:
             reasons.append("Optical candidate detector version updated.")
         if cur_sig.observation_matcher_version != stored.observation_matcher_version:
             reasons.append("Observation spatial matcher version updated.")
+        for attr, label in (
+            ("uncertainty_model_version", "Terrain uncertainty model"),
+            ("resolution_policy_version", "Resolution observability policy"),
+            ("traversability_model_version", "Traversability classification model"),
+            ("locomotion_model_version", "Locomotion planning model"),
+            ("routing_objectives_version", "Routing objective policies"),
+            ("return_planning_version", "Return planning algorithm"),
+            ("sensitivity_policy_version", "Sensitivity policy"),
+            ("complementarity_registry_version", "Data complementarity registry"),
+        ):
+            if getattr(cur_sig, attr, None) != getattr(stored, attr, None):
+                reasons.append(f"{label} version updated.")
 
         if reasons:
             return CacheValidityState.STALE, reasons
@@ -485,11 +517,21 @@ class EvidenceIntelligenceService:
             segment_bounds=dem_stats["segment_bounds"],
             native_resolution_m=native_res_m,
         )
+        ds_unc_prof = (
+            inspect_dataset_elevation_uncertainty(
+                dataset=ds_meta,
+                raw_dir=self.raw_dir,
+                processed_dir=self.processed_dir,
+            )
+            if ds_meta is not None
+            else None
+        )
         uncertainty = assess_corridor_uncertainty(
             segments=segments,
             native_resolution_m=native_res_m,
             corridor_valid_fraction=dem_stats["corridor_valid_fraction"],
             optical_available=opt_cov_frac > 0.0,
+            dataset_uncertainty_profile=ds_unc_prof,
         )
 
         prov_graph = ProvenanceDependencyGraph(
@@ -828,6 +870,14 @@ class EvidenceIntelligenceService:
         ).hexdigest()[:14]
         dossier_id = f"dos-{dossier_sig}"
 
+        active_ds_ids = [request.dataset_id] + [
+            d.dataset_id for d in corridor.dataset_inventory if d.acquired
+        ]
+        comp_report = evaluate_data_complementarity(
+            active_dataset_ids=active_ds_ids,
+            route_distance_m=route.total_surface_distance_m,
+        ).model_dump()
+
         dossier = MissionDossierResponse(
             dossier_id=dossier_id,
             mission_name=request.mission_name,
@@ -841,6 +891,7 @@ class EvidenceIntelligenceService:
             mobility_assessment=mobility_assessment,
             scientific_opportunities=sci_opportunities,
             unmodeled_parameters=unmodeled_params,
+            complementarity_report=comp_report,
             provenance_graph=corridor.provenance_graph,
             mathematical_assessment_complete=math_complete,
             operational_safety_certified=False,

@@ -24,6 +24,7 @@ from app.api import (
     targets,
     terrain,
     terrain_mesh,
+    terrain_uncertainty,
     tracking,
 )
 
@@ -47,3 +48,4 @@ api_router.include_router(tracking.router)
 api_router.include_router(destinations.router)
 api_router.include_router(evidence_intelligence.router)
 api_router.include_router(eva_operations.router)
+api_router.include_router(terrain_uncertainty.router)
