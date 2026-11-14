@@ -136,7 +136,7 @@ export const useLayerStore = create<LayerStoreState>((set, get) => ({
   markLayerRendered: (id, active) =>
     set((state) => {
       const curr = state.layerStates[id];
-      if (!curr) return state;
+      if (!curr || curr.renderedActive === active) return state;
       return {
         layerStates: {
           ...state.layerStates,
@@ -164,7 +164,7 @@ export const useLayerStore = create<LayerStoreState>((set, get) => ({
   clearTileErrors: (id) =>
     set((state) => {
       const curr = state.layerStates[id];
-      if (!curr) return state;
+      if (!curr || (curr.tileErrorCount === 0 && curr.lastError === null)) return state;
       return {
         layerStates: {
           ...state.layerStates,

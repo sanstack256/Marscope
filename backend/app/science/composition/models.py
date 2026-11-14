@@ -90,15 +90,46 @@ class GenerationBuildStatus(str, Enum):
     FAILED = "failed"
 
 
+class MeasurementCategory(str, Enum):
+    DIRECT_ELEMENTAL_CONCENTRATION = "direct_elemental_concentration"
+    OXIDE_DERIVED_ELEMENTAL_CONCENTRATION = "oxide_derived_elemental_concentration"
+    DIRECT_OXIDE_CONCENTRATION = "direct_oxide_concentration"
+    MINERAL_WEIGHT_PERCENT = "mineral_weight_percent"
+    MINERAL_GROUP_MEMBERSHIP_EVIDENCE = "mineral_group_membership_evidence"
+
+
 class UncertaintyMetadata(BaseModel):
     reported_value: Optional[float] = None
     reported_unit: Optional[str] = None
+    normalized_value: Optional[float] = None
+    normalized_unit: Optional[str] = None
+    is_physical_unit: bool = True
+    source_field_name: Optional[str] = None
+    source_data_type: Optional[str] = None
+    schema_identity: Optional[str] = None
     uncertainty_type: str = "unknown"
     statistical_interpretation: str
     coverage_confidence_level: str = "unspecified"
     source_definition: str
     source_product: str
     conversion_history: List[str] = Field(default_factory=list)
+    limitations: List[str] = Field(default_factory=list)
+
+
+class RelativeUncertaintySummary(BaseModel):
+    available: bool = False
+    value: Optional[float] = None
+    percent: Optional[float] = None
+    numerator_uncertainty: Optional[float] = None
+    numerator_unit: Optional[str] = None
+    denominator_measurement: Optional[float] = None
+    denominator_unit: Optional[str] = None
+    uncertainty_type: Optional[str] = None
+    statistical_interpretation: Optional[str] = None
+    conversion_history: List[str] = Field(default_factory=list)
+    calculation_formula: str = "relative_uncertainty = uncertainty_value / normalized_value"
+    calculation_version: str = "rel_unc_v1"
+    unavailable_reason: Optional[str] = None
 
 
 class SourceArtifactRecord(BaseModel):
@@ -134,28 +165,26 @@ class ProductAuditEntry(BaseModel):
 
 
 class RankingConfiguration(BaseModel):
-    ranking_config_id: str = "heuristic_exploration_priority_v3"
-    ranking_config_version: str = "3.0.0"
+    ranking_config_id: str = "heuristic_exploration_priority_v4"
+    ranking_config_version: str = "4.0.0"
     is_heuristic_only: bool = True
     methodology_note: str = (
         "Heuristic exploration priority weighting ONLY — NOT a validated scientific probability, "
-        "detection confidence, statistical certainty, or physical hazard rating."
+        "detection confidence, calibrated measurement quality score, statistical certainty, or physical hazard rating."
     )
     weights: Dict[str, float] = Field(
         default_factory=lambda: {
-            "evidence_tier": 0.35,
-            "abundance": 0.25,
-            "quality": 0.15,
-            "corroboration": 0.15,
+            "evidence_tier": 0.40,
+            "abundance": 0.30,
+            "corroboration": 0.20,
             "spatial_proximity": 0.10,
         }
     )
     distance_reference_scale_m: float = 2000.0
     quality_scaling_rule: str = (
-        "When cohort uncertainties share one compatible statistical family with documented scale "
-        "and matching units (and positive abundance > 0), quality_component = max(0.05, 1 - min(0.95, uncertainty / abundance)). "
-        "Across incompatible uncertainty types (e.g. ChemCam RMSEP vs APXS precision vs CheMin 2-sigma), "
-        "unspecified sigma scales, or text-only quality flags, quality_component is None (withheld, never fabricated)."
+        "Numerical quality scoring is withheld (quality_component = None) because no separately calibrated "
+        "cross-instrument quality model exists. Derived relative_uncertainty (uncertainty / measurement) "
+        "is reported separately only when units match physically and statistical semantics support ratio interpretation."
     )
     corroboration_rule: str = (
         "Explicit peer corroboration: None when only 1 matching observation exists at the site; "
@@ -338,21 +367,24 @@ class CompositionEvidence(BaseModel):
 
 
 class RankingDimensions(BaseModel):
-    ranking_config_id: str = "heuristic_exploration_priority_v3"
-    ranking_config_version: str = "3.0.0"
+    ranking_config_id: str = "heuristic_exploration_priority_v4"
+    ranking_config_version: str = "4.0.0"
     is_heuristic_only: bool = True
     ranking_methodology_label: str = "HEURISTIC_EXPLORATION_PRIORITY_ONLY"
-    evidence_tier_score: float = Field(..., description="Instrument/methodology tier (1.0=direct mineral/oxide, 0.55=element-bearing host)")
-    abundance_component: Optional[float] = Field(None, description="Normalized abundance contribution [0, 1] within query scale")
+    evidence_tier_score: float = Field(..., description="Instrument/methodology tier (1.0=direct mineral/oxide, 0.60=element-bearing host)")
+    abundance_component: Optional[float] = Field(None, description="Normalized abundance contribution [0, 1] within same measurement category & unit scale")
     quality_component: Optional[float] = Field(
         None,
         description=(
-            "Within-family precision ranking contribution [0, 1]; strictly None when uncertainty is "
-            "unreported, statistically unspecified, or incompatible across cohort uncertainty types."
+            "Strictly None: no separately calibrated numerical quality scoring model exists. "
+            "Relative uncertainty is never disguised as a quality score."
         ),
     )
     uncertainty_compatibility_status: str = "unreported"
-    quality_exclusion_reason: Optional[str] = None
+    quality_exclusion_reason: Optional[str] = (
+        "Numerical measurement quality scoring is withheld because no calibrated quality model exists."
+    )
+    relative_uncertainty: Optional[RelativeUncertaintySummary] = None
     corroboration_component: Optional[float] = Field(
         None, description="Independent instrument/observation corroboration [0, 1]; None for single uncorroborated observation"
     )
@@ -360,7 +392,7 @@ class RankingDimensions(BaseModel):
         None, description="Inverse Mars geodesic distance factor [0, 1] when astronaut position provided"
     )
     composite_rank_score: Optional[float] = Field(
-        None, description="Transparent heuristic weighted priority score (NOT probability or statistical confidence)"
+        None, description="Transparent heuristic weighted priority score (NOT probability, quality, or statistical confidence)"
     )
     unavailable_dimensions: List[str] = Field(default_factory=list)
     score_formula: str = Field(..., description="Exact formula documenting weights & active terms used")
@@ -370,6 +402,7 @@ class RankingDimensions(BaseModel):
 class RankedCompositionHit(BaseModel):
     evidence: CompositionEvidence
     match_type: SearchMatchType
+    measurement_category: Optional[MeasurementCategory] = None
     match_explanation: str
     distance_from_astronaut_m: Optional[float] = None
     bearing_deg: Optional[float] = None
@@ -407,8 +440,17 @@ class CompositionIndexStatus(BaseModel):
     index_available: bool
     integrity_status: IntegrityStatus = IntegrityStatus.UNAVAILABLE
     generation_build_status: GenerationBuildStatus = GenerationBuildStatus.FAILED
+    source_integrity_status: IntegrityStatus = IntegrityStatus.UNAVAILABLE
+    manifest_integrity_status: IntegrityStatus = IntegrityStatus.UNAVAILABLE
+    pointer_integrity_status: IntegrityStatus = IntegrityStatus.UNAVAILABLE
+    database_integrity_status: IntegrityStatus = IntegrityStatus.UNAVAILABLE
     active_generation_id: Optional[str] = None
+    previous_successful_generation_id: Optional[str] = None
+    incomplete_staging_generations: List[str] = Field(default_factory=list)
+    source_artifact_digest: Optional[str] = None
+    complete_manifest_digest: Optional[str] = None
     built_at_utc: Optional[str] = None
+    publication_timestamp_utc: Optional[str] = None
     total_validated_evidence: int = 0
     located_evidence_count: int = 0
     unlocated_evidence_count: int = 0
@@ -430,6 +472,7 @@ class CompositionIndexStatus(BaseModel):
     rtree_enabled: bool = False
     crism_status: str = "unavailable_no_validated_mineral_cube"
     sqlite_path: Optional[str] = None
+    pointer_path: Optional[str] = None
     reproducibility_manifest_path: Optional[str] = None
     product_manifests: List[Dict[str, Any]] = Field(default_factory=list)
     dependency_artifacts: List[Dict[str, Any]] = Field(default_factory=list)

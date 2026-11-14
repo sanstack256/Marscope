@@ -11,6 +11,7 @@ from app.science.composition.models import (
     CandidateDiscoveryLocation,
     CompositionIndexStatus,
     CompositionSearchMode,
+    MeasurementCategory,
     RankedCompositionHit,
     RankingConfiguration,
     SpeciesResolutionResult,
@@ -87,6 +88,8 @@ class CompositionSearchRequest(BaseModel):
     sol_min: Optional[int] = Field(None, ge=0)
     sol_max: Optional[int] = Field(None, ge=0)
     min_value: Optional[float] = Field(None, ge=0.0)
+    max_value: Optional[float] = Field(None, ge=0.0)
+    measurement_category_filter: Optional[MeasurementCategory] = None
     exclude_low_quality: bool = False
     sort_by: str = Field("rank")
     limit: int = Field(50, ge=1, le=500)
@@ -126,6 +129,9 @@ class CompositionSearchResponse(BaseModel):
     index_available: bool
     total_matches: int = 0
     unlocated_matches_count: int = 0
+    measurement_categories_present: List[MeasurementCategory] = Field(default_factory=list)
+    grouped_counts_by_measurement_category: Dict[str, int] = Field(default_factory=dict)
+    applied_filter_scope_note: Optional[str] = None
     results: List[CompositionOccurrence] = Field(default_factory=list)
     hits: List[RankedCompositionHit] = Field(default_factory=list)
     candidate_locations: List[CandidateDiscoveryLocation] = Field(default_factory=list)

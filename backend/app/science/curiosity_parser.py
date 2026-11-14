@@ -1069,7 +1069,22 @@ class CuriosityDataParser:
                     f"CheMin CSV '{csv_path.name}' lacks required mineral/abundance schema columns (got {headers})."
                 )
 
+            schema_id_str = (
+                f"pds3:{pds_meta.get('structure_file') or (lbl_file.name if lbl_file else csv_path.name)}"
+                if lbl_file
+                else "chemin_csv_header"
+            )
             pct_unit = "wt%"
+            pct_schema_unit: Optional[str] = None
+            pct_schema_dtype: Optional[str] = None
+            err_schema_unit: Optional[str] = None
+            err_schema_dtype: Optional[str] = None
+            err_resolved_unit: Optional[str] = None
+            err_is_physical: bool = False
+            err_unit_source: Optional[str] = None
+            err_conv_history: List[str] = []
+            err_limitations: List[str] = []
+
             err_semantics = "chemin_estimated_error_unspecified_sigma"
             err_definition = "Estimated uncertainty without explicit sigma multiplier in PDS3 label."
             desc_low = desc.lower()
@@ -1077,11 +1092,21 @@ class CuriosityDataParser:
                 err_semantics = "chemin_rietveld_2sigma"
                 err_definition = desc.strip()
 
+            from app.science.composition.uncertainty import (
+                SEMANTIC_NON_DIMENSIONAL_UNCERTAINTY_UNITS,
+                convert_uncertainty_to_unit,
+                normalize_uncertainty_unit,
+            )
+
             field_mappings: List[ParserFieldMapping] = []
             for idx, h in enumerate(headers):
                 cmeta = next((c for c in columns if str(c.get("NAME") or "").strip().upper() == h.strip().upper()), {})
                 cdesc = str(cmeta.get("DESCRIPTION") or "")
                 cunit = str(cmeta.get("UNIT") or "").strip()
+                cdtype = str(cmeta.get("DATA_TYPE") or "").strip() or None
+                mapped_unit: Optional[str] = None
+                mapped_unit_src: Optional[str] = "pds3_fmt_unit" if cunit else None
+
                 if h == pct_col:
                     if cunit and cunit.upper() not in {"WEIGHT_PERCENT", "WT%", "PERCENT", "WT_PCT"}:
                         raise MalformedObservationError(
@@ -1091,20 +1116,63 @@ class CuriosityDataParser:
                         raise MalformedObservationError(
                             f"CheMin schema column '{h}' lacks required quantitative UNIT (expected WEIGHT_PERCENT)."
                         )
-                if h == err_col:
+                    pct_schema_unit = cunit or "WEIGHT_PERCENT"
+                    pct_schema_dtype = cdtype
+                    mapped_unit = pct_unit
+                elif h == err_col:
+                    err_schema_unit = cunit or None
+                    err_schema_dtype = cdtype
                     if cdesc and ("2-sigma" in cdesc.lower() or "2 sigma" in cdesc.lower()):
                         err_semantics = "chemin_rietveld_2sigma"
                         err_definition = cdesc.strip()
                     elif cunit and err_semantics != "chemin_rietveld_2sigma":
                         err_definition = f"CHEMIN_MIN.FMT UNIT={cunit}; sigma multiplier not specified in companion label."
+                    elif not cunit:
+                        err_unit_source = "missing_in_schema"
+                        err_limitations.append(
+                            f"Uncertainty column '{h}' lacks UNIT in companion schema; physical unit unknown and NOT coerced to wt%."
+                        )
+                        if not cdesc and err_semantics != "chemin_rietveld_2sigma":
+                            err_definition = f"Uncertainty column '{h}' lacks both UNIT and DESCRIPTION in companion schema."
+
+                    if cunit:
+                        canon_u, is_phys = normalize_uncertainty_unit(cunit)
+                        if is_phys and canon_u is not None:
+                            err_resolved_unit = canon_u
+                            err_is_physical = True
+                            err_unit_source = "pds3_fmt_unit"
+                        elif canon_u in SEMANTIC_NON_DIMENSIONAL_UNCERTAINTY_UNITS:
+                            # Explicitly preserve semantic units like ESTIMATED_ERROR without casting to wt%
+                            err_resolved_unit = canon_u
+                            err_is_physical = False
+                            err_unit_source = "pds3_fmt_semantic_unit"
+                            err_limitations.append(
+                                f"Schema declares semantic unit '{canon_u}' rather than physical mass % unit ('wt%'); original semantic unit preserved."
+                            )
+                        elif cunit.upper() in {"N/A", "NONE", "UNKNOWN"}:
+                            err_resolved_unit = None
+                            err_is_physical = False
+                            err_unit_source = "unreported_in_schema"
+                            err_limitations.append(
+                                f"Schema declares non-dimensional/absent unit '{cunit}' for '{h}'; physical unit unknown."
+                            )
+                        else:
+                            raise MalformedObservationError(
+                                f"Incompatible or non-concentration CheMin error unit '{cunit}' declared in schema column '{h}'."
+                            )
+                        mapped_unit = err_resolved_unit
+                        mapped_unit_src = err_unit_source
+                    else:
+                        mapped_unit = None
+                        mapped_unit_src = "missing_in_schema"
                 field_mappings.append(
                     ParserFieldMapping(
                         schema_field_name=str(cmeta.get("NAME") or h),
                         resolved_header_name=h,
                         column_index=idx,
-                        data_type=str(cmeta.get("DATA_TYPE") or "") or None,
-                        unit=pct_unit if h in {pct_col, err_col} else None,
-                        unit_source="pds3_fmt_unit" if cunit else None,
+                        data_type=cdtype,
+                        unit=mapped_unit,
+                        unit_source=mapped_unit_src,
                         description=cdesc or None,
                     )
                 )
@@ -1130,16 +1198,41 @@ class CuriosityDataParser:
                         }
                     )
                     continue
-                err = _safe_float(raw_err) if raw_err else None
+                raw_err_val = _safe_float(raw_err) if raw_err else None
+                norm_err_val = raw_err_val
+                norm_err_unit = err_resolved_unit
+                row_err_history = list(err_conv_history)
+                if raw_err_val is not None and err_is_physical and err_resolved_unit and err_resolved_unit != pct_unit:
+                    norm_err_val, norm_err_unit, chist, conv_ok = convert_uncertainty_to_unit(
+                        raw_err_val, err_resolved_unit, pct_unit
+                    )
+                    if not conv_ok:
+                        raise MalformedObservationError(
+                            f"Incompatible CheMin error conversion from '{err_resolved_unit}' to '{pct_unit}'."
+                        )
+                    row_err_history.extend(chist)
                 minerals.append(
                     {
                         "row_index": idx,
                         "mineral": mineral_name,
                         "weight_percent": pct,
-                        "estimated_error": err,
+                        "estimated_error": raw_err_val,
+                        "normalized_error": norm_err_val,
                         "unit": pct_unit,
+                        "abundance_schema_field": pct_col,
+                        "abundance_schema_unit": pct_schema_unit,
+                        "abundance_schema_data_type": pct_schema_dtype,
+                        "error_schema_field": err_col,
+                        "error_schema_unit": err_schema_unit,
+                        "error_schema_data_type": err_schema_dtype,
+                        "error_unit": err_resolved_unit,
+                        "normalized_error_unit": norm_err_unit,
+                        "error_is_physical_unit": err_is_physical,
+                        "error_conversion_history": row_err_history,
+                        "error_limitations": list(err_limitations),
                         "error_semantics": err_semantics,
                         "error_definition": err_definition,
+                        "schema_identity": schema_id_str,
                     }
                 )
 

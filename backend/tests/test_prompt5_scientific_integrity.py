@@ -439,7 +439,7 @@ def test_deterministic_rebuild_and_integrity_drift(tmp_path: Path):
     assert missing_st.integrity_status == IntegrityStatus.SOURCE_FILES_MISSING
     assert len(missing_st.missing_source_files) >= 1
 
-    # API endpoint reproducibility-manifest works cleanly
+    # API endpoint reproducibility-manifest returns authenticated manifest (200), unbuilt (404), or unauthenticated legacy (422)
     client = TestClient(app)
     res_man = client.get("/api/composition/reproducibility-manifest")
-    assert res_man.status_code in (200, 404)
+    assert res_man.status_code in (200, 404, 422)

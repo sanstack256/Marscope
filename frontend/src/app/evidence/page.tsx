@@ -407,6 +407,24 @@ export default function EvidenceProvenancePage() {
             <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536] text-[10px] font-mono text-slate-300 flex flex-wrap gap-x-4 gap-y-1">
               <span>Scope: {indexStatus.discovery_scope || "static_seed_manifest"}</span>
               <span>
+                Integrity Breakdown: Src={indexStatus.source_integrity_status || "?"} · Manifest=
+                {indexStatus.manifest_integrity_status || "?"} · Ptr={indexStatus.pointer_integrity_status || "?"} · DB=
+                {indexStatus.database_integrity_status || "?"}
+              </span>
+              {indexStatus.source_artifact_digest && (
+                <span title={indexStatus.source_artifact_digest}>
+                  Source Digest: {indexStatus.source_artifact_digest.slice(0, 12)}...
+                </span>
+              )}
+              {indexStatus.complete_manifest_digest && (
+                <span title={indexStatus.complete_manifest_digest}>
+                  Manifest Digest: {indexStatus.complete_manifest_digest.slice(0, 12)}...
+                </span>
+              )}
+              {indexStatus.previous_successful_generation_id && (
+                <span>Prev Gen: {indexStatus.previous_successful_generation_id}</span>
+              )}
+              <span>
                 Products: {indexStatus.ingested_products_count}/{indexStatus.expected_products_count ?? "?"} ingested
               </span>
               {indexStatus.rights_summary?.counts && (

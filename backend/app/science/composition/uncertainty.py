@@ -9,8 +9,15 @@ and enforces strict comparability guards so heterogeneous statistical metrics
 are never merged into a single misleading "quality" or "confidence" score.
 """
 
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 from pydantic import BaseModel, Field
+
+
+SEMANTIC_NON_DIMENSIONAL_UNCERTAINTY_UNITS = {
+    "ESTIMATED_ERROR",
+    "UNSPECIFIED_IN_SCHEMA",
+    "NON_DIMENSIONAL",
+}
 
 
 class UncertaintyTypeSpec(BaseModel):
@@ -19,7 +26,8 @@ class UncertaintyTypeSpec(BaseModel):
     statistical_interpretation: str
     coverage_confidence_level: str
     comparability_group: str
-    allows_within_family_quality_scoring: bool
+    allows_within_family_quality_scoring: bool = False
+    allows_relative_uncertainty: bool = False
     default_source_definition: str
 
 
@@ -34,6 +42,7 @@ UNCERTAINTY_COMPATIBILITY_REGISTRY: Dict[str, UncertaintyTypeSpec] = {
         coverage_confidence_level="unspecified_in_pds4_label",
         comparability_group="apxs_analytical_precision",
         allows_within_family_quality_scoring=True,
+        allows_relative_uncertainty=True,
         default_source_definition="Precision Error in Oxide/Element Concentration (PDS4 Field_Delimited description)",
     ),
     "chemcam_pls_rmsep": UncertaintyTypeSpec(
@@ -47,6 +56,7 @@ UNCERTAINTY_COMPATIBILITY_REGISTRY: Dict[str, UncertaintyTypeSpec] = {
         coverage_confidence_level="model_rmsep_test_set",
         comparability_group="chemcam_pls_rmsep",
         allows_within_family_quality_scoring=True,
+        allows_relative_uncertainty=True,
         default_source_definition="Predicted <OXIDE>_RMSEP (ChemCam MOC PDS3 SPREADSHEET FIELD)",
     ),
     "chemcam_shots_stdev": UncertaintyTypeSpec(
@@ -59,6 +69,7 @@ UNCERTAINTY_COMPATIBILITY_REGISTRY: Dict[str, UncertaintyTypeSpec] = {
         coverage_confidence_level="1_sigma_sample_stdev",
         comparability_group="chemcam_shots_stdev",
         allows_within_family_quality_scoring=True,
+        allows_relative_uncertainty=True,
         default_source_definition="<OXIDE>_SHOTS_STDEV standard deviation (ChemCam MOC PDS3 SPREADSHEET FIELD)",
     ),
     "chemin_rietveld_2sigma": UncertaintyTypeSpec(
@@ -66,11 +77,13 @@ UNCERTAINTY_COMPATIBILITY_REGISTRY: Dict[str, UncertaintyTypeSpec] = {
         statistical_family="rietveld_refinement_2sigma_error",
         statistical_interpretation=(
             "Estimated 2-sigma analytical uncertainty from TOPAS/JADE Rietveld XRD whole-pattern refinement "
-            "(nominal ~95% interval under model assumptions) as explicitly documented in the CheMin PDS3 label."
+            "(nominal ~95% interval under model assumptions) as explicitly documented in the CheMin PDS3 label. "
+            "In CHEMIN_MIN.FMT, ERROR uses semantic UNIT='ESTIMATED_ERROR' rather than an explicit physical wt% unit."
         ),
         coverage_confidence_level="2_sigma_documented",
         comparability_group="chemin_rietveld_2sigma",
         allows_within_family_quality_scoring=True,
+        allows_relative_uncertainty=True,
         default_source_definition="CHEMIN_MIN.FMT ERROR (ESTIMATED_ERROR) qualified by PDS3 SPREADSHEET DESCRIPTION (2-sigma analytical errors)",
     ),
     "chemin_estimated_error_unspecified_sigma": UncertaintyTypeSpec(
@@ -83,6 +96,7 @@ UNCERTAINTY_COMPATIBILITY_REGISTRY: Dict[str, UncertaintyTypeSpec] = {
         coverage_confidence_level="unspecified",
         comparability_group="incompatible_unspecified",
         allows_within_family_quality_scoring=False,
+        allows_relative_uncertainty=False,
         default_source_definition="CHEMIN_MIN.FMT ERROR (UNIT = ESTIMATED_ERROR; sigma not stated in PDS3 label)",
     ),
     "unknown": UncertaintyTypeSpec(
@@ -94,6 +108,7 @@ UNCERTAINTY_COMPATIBILITY_REGISTRY: Dict[str, UncertaintyTypeSpec] = {
         coverage_confidence_level="unspecified",
         comparability_group="incompatible_unknown",
         allows_within_family_quality_scoring=False,
+        allows_relative_uncertainty=False,
         default_source_definition="Unreported or unverified uncertainty definition",
     ),
 }
@@ -167,3 +182,56 @@ def evaluate_uncertainty_compatibility(
             )
 
     return True, "compatible_single_family", None
+
+
+def normalize_uncertainty_unit(raw_unit: Optional[str]) -> Tuple[Optional[str], bool]:
+    """
+    Canonicalize a schema-declared uncertainty unit without inferring a physical unit from abundance.
+    Returns (canonical_unit_or_None, is_physical_concentration_unit).
+    """
+    if raw_unit is None:
+        return None, False
+    cleaned = raw_unit.strip()
+    if not cleaned:
+        return None, False
+    up = cleaned.upper()
+    if up in {"WEIGHT_PERCENT", "WT%", "WT_PCT", "PERCENT", "%"}:
+        return "wt%", True
+    if up in {"PPM", "PARTS_PER_MILLION", "UG/G", "MG/KG"}:
+        return "ppm", True
+    if up in SEMANTIC_NON_DIMENSIONAL_UNCERTAINTY_UNITS or up in {"N/A", "NONE", "UNKNOWN"}:
+        if up in {"N/A", "NONE", "UNKNOWN"}:
+            return None, False
+        return up, False
+    return cleaned, False
+
+
+def convert_uncertainty_to_unit(
+    val: Optional[float],
+    raw_unit: Optional[str],
+    target_physical_unit: Optional[str],
+) -> Tuple[Optional[float], Optional[str], List[str], bool]:
+    """
+    Convert a physical concentration uncertainty strictly when mathematically valid.
+    Returns (converted_value, result_unit, conversion_history, converted_or_compatible).
+    Never silently casts ESTIMATED_ERROR or missing/non-physical units into wt%.
+    """
+    if val is None:
+        return None, None, [], False
+    canon_raw, is_phys = normalize_uncertainty_unit(raw_unit)
+    if not is_phys or canon_raw is None:
+        return val, canon_raw, [], False
+    if not target_physical_unit:
+        return val, canon_raw, [], True
+    tgt, tgt_phys = normalize_uncertainty_unit(target_physical_unit)
+    if not tgt_phys or tgt is None:
+        return val, canon_raw, [], False
+    if canon_raw == tgt:
+        return val, canon_raw, [], True
+    if canon_raw == "ppm" and tgt == "wt%":
+        conv = round(float(val) / 10000.0, 8)
+        return conv, "wt%", [f"unit_conversion:ppm->wt% ({val} ppm -> {conv} wt%)"], True
+    if canon_raw == "wt%" and tgt == "ppm":
+        conv = round(float(val) * 10000.0, 4)
+        return conv, "ppm", [f"unit_conversion:wt%->ppm ({val} wt% -> {conv} ppm)"], True
+    return val, canon_raw, [], False

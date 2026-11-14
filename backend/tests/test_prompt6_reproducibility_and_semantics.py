@@ -281,9 +281,10 @@ def test_uncertainty_compatibility_and_withheld_cross_type_quality():
     assert "quality_component" in ranks_mixed.unavailable_dimensions
     assert ranks_mixed.uncertainty_compatibility_status == "incompatible_mixed_uncertainty_types"
     assert ranks_mixed.quality_exclusion_reason is not None
-    assert ranks_mixed.ranking_config_version == "3.0.0"
+    assert ranks_mixed.ranking_config_version == "4.0.0"
 
-    # Homogeneous compatible cohort allows within-family quality_component
+    # Homogeneous compatible cohort still keeps quality_component=None (no numerical quality scoring model),
+    # while exposing valid derived relative_uncertainty separately
     ranks_homog = compute_ranking_dimensions(
         ev=ev_apxs,
         match_type=SearchMatchType.EXACT_SPECIES,
@@ -292,7 +293,9 @@ def test_uncertainty_compatibility_and_withheld_cross_type_quality():
         nearby_count=1,
         cohort_uncertainty_types=["apxs_analytical_precision"],
     )
-    assert ranks_homog.quality_component is not None
+    assert ranks_homog.quality_component is None
+    assert ranks_homog.relative_uncertainty is not None
+    assert ranks_homog.relative_uncertainty.available is True
     assert ranks_homog.uncertainty_compatibility_status == "compatible_single_family"
 
     # Qualitative quality_flag ("high"/"poor"/"fair") without quantitative uncertainty NEVER yields float score

@@ -42,20 +42,39 @@ def _build_uncertainty_metadata(
     source_product: str,
     source_definition: Optional[str] = None,
     conversion_history: Optional[List[str]] = None,
+    source_field_name: Optional[str] = None,
+    source_data_type: Optional[str] = None,
+    schema_identity: Optional[str] = None,
+    normalized_value: Optional[float] = None,
+    normalized_unit: Optional[str] = None,
+    is_physical_unit: Optional[bool] = None,
+    limitations: Optional[List[str]] = None,
 ) -> Optional[UncertaintyMetadata]:
-    """Construct complete traceable uncertainty semantics without fabricating coverage levels."""
+    """Construct complete traceable uncertainty semantics without fabricating units or coverage levels."""
     if reported_value is None or not uncertainty_type:
         return None
     spec = get_uncertainty_spec(uncertainty_type)
+    inferred_phys = (
+        is_physical_unit
+        if is_physical_unit is not None
+        else bool(reported_unit and reported_unit.strip().lower() in {"wt%", "ppm"})
+    )
     return UncertaintyMetadata(
         reported_value=reported_value,
         reported_unit=reported_unit,
+        normalized_value=normalized_value if normalized_value is not None else reported_value,
+        normalized_unit=normalized_unit if normalized_unit is not None else reported_unit,
+        is_physical_unit=inferred_phys,
+        source_field_name=source_field_name,
+        source_data_type=source_data_type,
+        schema_identity=schema_identity,
         uncertainty_type=spec.uncertainty_type,
         statistical_interpretation=spec.statistical_interpretation,
         coverage_confidence_level=spec.coverage_confidence_level,
         source_definition=source_definition or spec.default_source_definition,
         source_product=source_product,
         conversion_history=conversion_history or [],
+        limitations=limitations or [],
     )
 
 
@@ -622,6 +641,10 @@ class CheMinEvidenceAdapter:
             raw_min = m["mineral"]
             wt_pct = m.get("weight_percent")
             err = m.get("estimated_error")
+            norm_err = m.get("normalized_error", err)
+            raw_err_unit = m.get("error_schema_unit") or m.get("error_unit")
+            norm_err_unit = m.get("normalized_error_unit")
+            err_is_phys = bool(m.get("error_is_physical_unit", False))
             err_sem = m.get("error_semantics") or "chemin_estimated_error_unspecified_sigma"
             err_def = m.get("error_definition")
             chemin_unc_type = (
@@ -632,9 +655,17 @@ class CheMinEvidenceAdapter:
             chemin_unc = _build_uncertainty_metadata(
                 chemin_unc_type,
                 err,
-                "wt%",
+                raw_err_unit,
                 source_product=pid,
                 source_definition=err_def,
+                conversion_history=list(m.get("error_conversion_history") or []),
+                source_field_name=m.get("error_schema_field"),
+                source_data_type=m.get("error_schema_data_type"),
+                schema_identity=m.get("schema_identity") or parsed_res.schema_version,
+                normalized_value=norm_err,
+                normalized_unit=norm_err_unit,
+                is_physical_unit=err_is_phys,
+                limitations=list(m.get("error_limitations") or []),
             )
             res = resolve_species_query(raw_min)
             spec = res.species if res.resolved else None
@@ -697,8 +728,8 @@ class CheMinEvidenceAdapter:
                 normalized_value=norm_val,
                 normalized_unit=norm_unit,
                 normalization_formula=norm_formula,
-                uncertainty_value=err,
-                uncertainty_unit="wt%" if err is not None else None,
+                uncertainty_value=norm_err if err is not None else None,
+                uncertainty_unit=norm_err_unit if err is not None else None,
                 uncertainty_type=chemin_unc_type if err is not None else None,
                 uncertainty_semantics=(chemin_unc.statistical_interpretation if chemin_unc else None),
                 uncertainty_metadata=chemin_unc,
@@ -707,7 +738,7 @@ class CheMinEvidenceAdapter:
                 methodology="CheMin Co K-alpha X-Ray Diffraction TOPAS Rietveld refinement",
                 provenance_url=provenance_url,
                 source_reference=f"PDS3:{parsed.get('data_set_id')}:{pid}",
-                citation="Blake et al., MSL CheMin PDS3 RDR5 Mineral Abundance Table (CHEMIN_MIN.FMT 2-sigma error)",
+                citation="Blake et al., MSL CheMin PDS3 RDR5 Mineral Abundance Table",
                 location_verified=loc_verified,
                 location_semantic_type=loc_semantic,
                 latitude=lat,

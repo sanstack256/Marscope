@@ -233,6 +233,8 @@ def validate_composition_evidence(
     ok(8, "unit_normalization_validation", f"Normalized from {ev.raw_unit} to {ev.normalized_unit}.")
 
     # Stage 9: Uncertainty & quality metadata integrity
+    from app.science.composition.uncertainty import SEMANTIC_NON_DIMENSIONAL_UNCERTAINTY_UNITS
+
     if ev.uncertainty_value is not None:
         if not math.isfinite(ev.uncertainty_value) or ev.uncertainty_value < 0.0:
             return fail(
@@ -241,13 +243,32 @@ def validate_composition_evidence(
                 "INVALID_UNCERTAINTY",
                 f"Uncertainty value ({ev.uncertainty_value}) must be finite and non-negative.",
             )
-        if not ev.uncertainty_unit or ev.uncertainty_unit != ev.normalized_unit:
-            return fail(
-                9,
-                "uncertainty_and_quality_metadata",
-                "UNCERTAINTY_UNIT_MISMATCH",
-                f"Uncertainty unit '{ev.uncertainty_unit}' incompatible with measurement unit '{ev.normalized_unit}'.",
-            )
+        um_meta = ev.uncertainty_metadata
+        is_semantic_non_phys = (
+            ev.uncertainty_unit is not None
+            and ev.uncertainty_unit.strip().upper() in SEMANTIC_NON_DIMENSIONAL_UNCERTAINTY_UNITS
+        )
+        missing_unit_documented = (
+            ev.uncertainty_unit is None
+            and um_meta is not None
+            and not um_meta.is_physical_unit
+            and any("lacks UNIT" in lim or "absent unit" in lim for lim in (um_meta.limitations or []))
+        )
+        if not missing_unit_documented:
+            if not ev.uncertainty_unit:
+                return fail(
+                    9,
+                    "uncertainty_and_quality_metadata",
+                    "UNCERTAINTY_UNIT_MISMATCH",
+                    f"Uncertainty unit '{ev.uncertainty_unit}' incompatible with measurement unit '{ev.normalized_unit}'.",
+                )
+            if not is_semantic_non_phys and ev.uncertainty_unit != ev.normalized_unit:
+                return fail(
+                    9,
+                    "uncertainty_and_quality_metadata",
+                    "UNCERTAINTY_UNIT_MISMATCH",
+                    f"Uncertainty unit '{ev.uncertainty_unit}' incompatible with measurement unit '{ev.normalized_unit}'.",
+                )
         if not ev.uncertainty_type or not ev.uncertainty_type.strip():
             return fail(
                 9,

@@ -106,22 +106,22 @@ All endpoints are served under the `/api` prefix by the FastAPI backend. Standar
 - **Description:** Queries the controlled geochemical vocabulary (`element`, `oxide`, `mineral`, `mineral_group`). Supports optional `?q=` substring/alias filter.
 
 ### `GET /api/composition/index/status`
-- **Description:** Returns live SQLite R*Tree spatial index generation metadata (`active_generation_id`, `located_evidence_count`, `unlocated_evidence_count`, `rejected_record_count`, `instruments_indexed`, `checksum_valid`, `rtree_enabled`, `crism_status`).
+- **Description:** Returns separated integrity, completeness, digest, and pointer telemetry (`integrity_status`, `source_integrity_status`, `manifest_integrity_status`, `pointer_integrity_status`, `database_integrity_status`, `active_generation_id`, `previous_successful_generation_id`, `incomplete_staging_generations`, `source_artifact_digest`, `complete_manifest_digest`, `pointer_path`, `reproducibility_manifest_path`, `rtree_enabled`, `crism_status`).
 
 ### `POST /api/composition/index/rebuild`
-- **Description:** Scans `datasets/raw/`, runs PDS3/PDS4 adapters + coordinate association + 12-stage validation, and atomically publishes a new generation in `datasets/index/composition_index.sqlite`.
+- **Description:** Acquires `.publish.lock`, scans `datasets/raw/`, runs PDS3/PDS4 adapters + coordinate association + 12-stage validation, and atomically publishes a new immutable generation directory under `datasets/index/generations/<gen_id>__<nonce>/`, updating `active_generation.json`.
 
 ### `POST /api/composition/search` (and `POST /api/destinations/search-composition`)
-- **Description:** Resolves an element/oxide/mineral query (`search_mode`: `auto | element | mineral | element_bearing_mineral`), applies R*Tree spatial bounding boxes & filters, computes Mars IAU2000 geodesic distance/bearing from astronaut coordinates, and returns ranked `hits`, clustered `candidate_locations`, `unlocated_matches_count`, and `scientific_warnings`.
+- **Description:** Resolves an element/oxide/mineral query (`search_mode`: `auto | element | mineral | element_bearing_mineral`), supports `measurement_category_filter`, `min_value`/`max_value` (strictly scoped by category & physical unit; raises HTTP `422` on ambiguous mixed-unit bounds), and `sort_by` (`rank | distance | category_abundance | abundance | sol`; raises HTTP `422` on flat `abundance` across mixed categories/units). Returns `measurement_categories_present`, `grouped_counts_by_measurement_category`, `applied_filter_scope_note`, ranked `hits` (each with `quality_component=null` and optional separate `relative_uncertainty`), clustered `candidate_locations`, `unlocated_matches_count`, and `scientific_warnings`.
 
 ### `GET /api/composition/evidence/{evidence_id}`
-- **Description:** Returns full `CompositionEvidence` provenance, raw vs stoichiometric conversion formula, coordinate derivation source, and all 12 `validation_stages`.
+- **Description:** Returns full `CompositionEvidence` provenance, raw vs stoichiometric conversion formula, coordinate derivation source, field-level `uncertainty_metadata` (`source_field_name`, `source_data_type`, `schema_identity`, `is_physical_unit`, `limitations`), and all 12 `validation_stages`.
 
 ### `GET /api/composition/rejected`
 - **Description:** Returns paginated `RejectionRecord` audit log (`?limit=50&offset=0`) showing why passive PSVs, REMS tables, `<LOD` measurements, unknown CheMin species, or invalid records were excluded.
 
 ### `GET /api/composition/reproducibility-manifest`
-- **Description:** Returns `datasets/index/reproducibility_manifest.json` containing `generation_id`, `generation_build_status` (`complete | complete_with_declared_unavailable_sources | partial | failed`), `discovery_scope`, `source_manifest_checksum`, `products`, `dependency_artifacts` (primary + companion `.LBL`/`.XML`/`.FMT`/`msl_waypoints.json` with `license_status` and `retrieval_timestamp_utc`), `product_audit`, `rights_summary`, `retrieval_metadata`, and `RankingConfiguration` (`heuristic_exploration_priority_v3` `3.0.0`). Raises HTTP `422` if the manifest JSON is malformed or invalid. Also `GET /api/composition/index/status` exposes `integrity_status` (`verified | source_files_missing | checksum_mismatch | manifest_invalid | stale | incomplete | unavailable`), `generation_build_status`, `source_dependencies_valid`, `manifest_valid`, `missing_dependency_files`, `dependency_checksum_mismatches`, `missing_expected_products`, and `manifest_validation_errors`.
+- **Description:** Atomically resolves the active manifest through `active_generation.json` (`reproducibility_manifest_v3`) and authenticates canonical `complete_manifest_digest` plus SQLite `index_generations` agreement before returning JSON. Contains `generation_id`, `publication_nonce`, `previous_successful_generation_id`, `source_artifact_digest`, `complete_manifest_digest`, `generation_build_status`, `products`, `dependency_artifacts`, `product_audit`, `rights_summary`, `retrieval_metadata`, and `RankingConfiguration` (`heuristic_exploration_priority_v4` `4.0.0`). Raises HTTP `404` if unbuilt or HTTP `422` on any tampering, corruption, or DB/pointer mismatch.
 
 ### `POST /api/targets/generate`
 - **Description:** Deterministically generates `evidence_backed` `ScienceTarget` records from top-ranked composition discovery clusters, storing immutable `evidence_ids` and distance/rationale metadata. Also `GET /api/sources/msl/archive-query` exposes live NASA PDS/ODE archive product discovery.

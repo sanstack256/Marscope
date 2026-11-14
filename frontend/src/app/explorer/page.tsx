@@ -32,6 +32,7 @@ import {
   CompositionIndexStatus,
   CompositionSearchMode,
   CompositionSearchResponse,
+  MeasurementCategory,
   ScienceTarget,
   SpeciesRecord,
 } from "../../types";
@@ -50,6 +51,7 @@ export default function SurfaceExplorerPage() {
 
   const [compositionQuery, setCompositionQuery] = useState<string>("Fe");
   const [compositionMode, setCompositionMode] = useState<CompositionSearchMode>("auto");
+  const [measurementCategoryFilter, setMeasurementCategoryFilter] = useState<MeasurementCategory | "">("");
   const [includeBearingMinerals, setIncludeBearingMinerals] = useState<boolean>(false);
   const [excludeLowQuality, setExcludeLowQuality] = useState<boolean>(false);
   const [sortBy, setSortBy] = useState<string>("rank");
@@ -169,6 +171,7 @@ export default function SurfaceExplorerPage() {
           query: q,
           search_mode: compositionMode,
           include_element_bearing_minerals: includeBearingMinerals,
+          measurement_category_filter: measurementCategoryFilter || null,
           use_active_astronaut_position: true,
           instruments: selectedInstruments.length > 0 ? selectedInstruments : null,
           exclude_low_quality: excludeLowQuality,
@@ -177,7 +180,8 @@ export default function SurfaceExplorerPage() {
         }),
       });
       if (!res.ok) {
-        throw new Error(`HTTP ${res.status} searching composition index`);
+        const errBody = await res.json().catch(() => null);
+        throw new Error(errBody?.detail || `HTTP ${res.status} searching composition index`);
       }
       const data: CompositionSearchResponse = await res.json();
       setCompositionResult(data);
@@ -870,6 +874,11 @@ export default function SurfaceExplorerPage() {
                         Instruments: {indexStatus.instruments_indexed.join(", ") || "None"} · R*Tree:{" "}
                         {indexStatus.rtree_enabled ? "ON" : "OFF"} · Gen: {indexStatus.active_generation_id || "N/A"}
                       </div>
+                      <div className="text-[9px] text-slate-400">
+                        Src: {indexStatus.source_integrity_status || "?"} · Manifest:{" "}
+                        {indexStatus.manifest_integrity_status || "?"} · Ptr: {indexStatus.pointer_integrity_status || "?"} · DB:{" "}
+                        {indexStatus.database_integrity_status || "?"}
+                      </div>
                       {(!indexStatus.checksum_valid ||
                         indexStatus.source_dependencies_valid === false ||
                         indexStatus.manifest_valid === false) && (
@@ -956,10 +965,24 @@ export default function SurfaceExplorerPage() {
                     >
                       <option value="rank">Sort: Composite Rank</option>
                       <option value="distance">Sort: Nearest to Explorer</option>
-                      <option value="abundance">Sort: Highest Value</option>
+                      <option value="category_abundance">Sort: Within Category</option>
+                      <option value="abundance">Sort: Same-Scale Abundance</option>
                       <option value="sol">Sort: Latest Sol</option>
                     </select>
                   </div>
+
+                  <select
+                    value={measurementCategoryFilter}
+                    onChange={(e) => setMeasurementCategoryFilter(e.target.value as MeasurementCategory | "")}
+                    className="w-full px-2 py-1 rounded bg-[#121622] border border-[#252f44] text-[10px] text-slate-200"
+                  >
+                    <option value="">Category: All Matching Categories</option>
+                    <option value="direct_elemental_concentration">Direct Elemental Concentration</option>
+                    <option value="oxide_derived_elemental_concentration">Oxide-Derived Elemental (Stoich.)</option>
+                    <option value="direct_oxide_concentration">Direct Oxide Concentration</option>
+                    <option value="mineral_weight_percent">Mineral Weight Percent (XRD)</option>
+                    <option value="mineral_group_membership_evidence">Mineral Group Member</option>
+                  </select>
 
                   {/* Instrument Filter Chips */}
                   <div className="flex flex-wrap items-center gap-1 text-[10px]">
@@ -1041,6 +1064,26 @@ export default function SurfaceExplorerPage() {
                       {compositionResult.resolution?.explanation && (
                         <div className="text-[10px] text-slate-300">
                           {compositionResult.resolution.explanation}
+                        </div>
+                      )}
+
+                      {compositionResult.grouped_counts_by_measurement_category &&
+                        Object.keys(compositionResult.grouped_counts_by_measurement_category).length > 0 && (
+                          <div className="flex flex-wrap gap-1 pt-0.5">
+                            {Object.entries(compositionResult.grouped_counts_by_measurement_category).map(([cat, cnt]) => (
+                              <span
+                                key={cat}
+                                className="px-1.5 py-0.5 rounded bg-[#0d111a] border border-[#252f44] text-[9px] font-mono text-sky-200"
+                              >
+                                {cat}: {cnt}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
+                      {compositionResult.applied_filter_scope_note && (
+                        <div className="text-[10px] text-sky-200/90 bg-sky-950/30 border border-sky-800/40 rounded px-2 py-1">
+                          {compositionResult.applied_filter_scope_note}
                         </div>
                       )}
 
@@ -1271,6 +1314,12 @@ export default function SurfaceExplorerPage() {
 
                             <div className="text-[10px] text-slate-400 leading-snug">
                               {cand.ranking.rationale}
+                            </div>
+                            <div className="text-[9px] font-mono text-slate-300 leading-snug">
+                              {cand.ranking.relative_uncertainty?.available &&
+                              cand.ranking.relative_uncertainty.percent != null
+                                ? `Relative Uncert: ${cand.ranking.relative_uncertainty.percent.toFixed(2)}% (reported separately; never quality score)`
+                                : `Relative Uncert: Withheld (${cand.ranking.relative_uncertainty?.unavailable_reason || "unit/measurement incompatible"})`}
                             </div>
                             {cand.ranking.quality_exclusion_reason && (
                               <div className="text-[9px] text-amber-300/90 leading-snug">

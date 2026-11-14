@@ -11,13 +11,16 @@ Stores validated geochemical and mineralogical CompositionEvidence in SQLite wit
 """
 
 from datetime import datetime, timezone
+import fcntl
 import fnmatch
 import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import sqlite3
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+import uuid
 from app.geospatial.crs import normalize_longitude_360
 from app.ingestion.pds_label import extract_pds3_metadata, parse_pds4_table_delimited
 from app.science.composition.adapters import (
@@ -51,6 +54,58 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: fh.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+MANIFEST_REQUIRED_KEYS = {
+    "manifest_format_version",
+    "generation_id",
+    "publication_nonce",
+    "generation_build_status",
+    "discovery_scope",
+    "built_at_utc",
+    "publication_timestamp_utc",
+    "source_artifact_digest",
+    "source_manifest_checksum",
+    "sqlite_path",
+    "determinism_version",
+    "validation_pipeline_version",
+    "ranking_config_id",
+    "ranking_config_version",
+    "total_validated_evidence",
+    "located_evidence_count",
+    "unlocated_evidence_count",
+    "rejected_record_count",
+    "expected_products_count",
+    "missing_expected_products",
+    "crism_status",
+    "rights_summary",
+    "retrieval_metadata",
+    "products",
+    "dependency_artifacts",
+    "product_audit",
+    "notes",
+    "complete_manifest_digest",
+}
+
+
+def canonical_manifest_bytes(manifest_payload: Dict[str, Any]) -> bytes:
+    """
+    Serialize the canonical reproducibility manifest payload (excluding only its
+    self-referential `complete_manifest_digest` key) into deterministic UTF-8 JSON bytes.
+    """
+    body = {k: v for k, v in manifest_payload.items() if k != "complete_manifest_digest"}
+    return json.dumps(
+        body,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def compute_complete_manifest_digest(manifest_payload: Dict[str, Any]) -> str:
+    """Compute SHA-256 over every field of the canonical reproducibility manifest."""
+    return hashlib.sha256(canonical_manifest_bytes(manifest_payload)).hexdigest()
 
 
 EXPECTED_COMPOSITION_PRODUCTS: List[Dict[str, Any]] = [
@@ -224,28 +279,122 @@ def _make_source_artifact_record(
 
 
 class CompositionSpatialIndex:
-    """Persistent, transaction-safe SQLite spatial index for verified planetary composition."""
+    """
+    Persistent, transaction-safe SQLite spatial index for verified planetary composition.
+
+    Prompt 7 publication model:
+      - Concurrent rebuilds serialize via an exclusive flock on `.publish.lock`
+      - Builds stage cleanly inside `<generations_dir>/.staging_<gen_id>__<nonce>_pid<pid>/`
+      - Immature or failing builds leave the active generation untouched and clean staging dirs
+      - Completed generations promote atomically into immutable `<generations_dir>/<gen_id>__<nonce>/`
+      - Readers resolve DB + canonical manifest atomically through `active_generation.json`
+    """
 
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.rtree_enabled = self._init_schema()
+        self.rtree_enabled = self._detect_rtree_support()
+        if self.db_path.exists() and not self._pointer_path().exists():
+            self.rtree_enabled = self._init_schema_on(self.db_path, wal_mode=True)
 
-    def _manifest_path(self) -> Path:
-        if self.db_path.name == "composition_index.sqlite":
+    def _is_default_db_name(self) -> bool:
+        return self.db_path.name == "composition_index.sqlite"
+
+    def _generations_dir(self) -> Path:
+        if self._is_default_db_name():
+            return self.db_path.parent / "generations"
+        return self.db_path.parent / f"{self.db_path.stem}_generations"
+
+    def _pointer_path(self) -> Path:
+        if self._is_default_db_name():
+            return self.db_path.parent / "active_generation.json"
+        return self.db_path.parent / f"{self.db_path.stem}_active_generation.json"
+
+    def _lock_path(self) -> Path:
+        if self._is_default_db_name():
+            return self.db_path.parent / ".publish.lock"
+        return self.db_path.parent / f".{self.db_path.stem}.publish.lock"
+
+    def _legacy_manifest_path(self) -> Path:
+        if self._is_default_db_name():
             return self.db_path.parent / "reproducibility_manifest.json"
         return self.db_path.parent / f"{self.db_path.stem}_reproducibility_manifest.json"
 
-    def _connect_path(self, target_db: Path, wal_mode: bool = True) -> sqlite3.Connection:
+    def _list_incomplete_staging_dirs(self) -> List[str]:
+        gdir = self._generations_dir()
+        if not gdir.exists():
+            return []
+        return sorted(p.name for p in gdir.iterdir() if p.is_dir() and p.name.startswith(".staging_"))
+
+    def _read_pointer(self) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+        ppath = self._pointer_path()
+        if not ppath.exists():
+            return None, []
+        try:
+            obj = json.loads(ppath.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return None, [f"Active generation pointer unreadable/corrupt JSON: {exc}"]
+        if not isinstance(obj, dict):
+            return None, ["Active generation pointer root is not a JSON object."]
+        req_ptr = {
+            "active_generation_id",
+            "sqlite_path",
+            "reproducibility_manifest_path",
+            "source_artifact_digest",
+            "complete_manifest_digest",
+        }
+        missing = sorted(req_ptr - set(obj.keys()))
+        if missing:
+            return None, [f"Active generation pointer missing required fields: {missing}"]
+        return obj, []
+
+    def _resolve_active_paths(self) -> Tuple[Optional[Path], Optional[Path], Optional[Dict[str, Any]], List[str]]:
+        ptr, ptr_errs = self._read_pointer()
+        if ptr_errs:
+            return None, None, None, ptr_errs
+        if ptr is not None:
+            db_p = Path(str(ptr["sqlite_path"]))
+            mf_p = Path(str(ptr["reproducibility_manifest_path"]))
+            errs: List[str] = []
+            if not db_p.exists():
+                errs.append(f"Active generation pointer SQLite DB missing at '{db_p}'.")
+            if not mf_p.exists():
+                errs.append(f"Active generation pointer manifest missing at '{mf_p}'.")
+            return db_p, mf_p, ptr, errs
+        # Fallback for pre-Prompt-7 legacy single-file DB layout
+        if self.db_path.exists():
+            return self.db_path, self._legacy_manifest_path(), None, []
+        return None, None, None, []
+
+    def _manifest_path(self) -> Path:
+        _, mf_p, _, _ = self._resolve_active_paths()
+        if mf_p is not None:
+            return mf_p
+        return self._legacy_manifest_path()
+
+    def _detect_rtree_support(self) -> bool:
+        try:
+            with sqlite3.connect(":memory:") as conn:
+                conn.execute("CREATE VIRTUAL TABLE _t USING rtree(id, x0, x1, y0, y1)")
+            return True
+        except sqlite3.OperationalError:
+            return False
+
+    def _connect_path(self, target_db: Path, wal_mode: bool = True, read_only: bool = False) -> sqlite3.Connection:
         conn = sqlite3.connect(str(target_db), timeout=30.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;" if wal_mode else "PRAGMA journal_mode=DELETE;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
+        if read_only:
+            conn.execute("PRAGMA query_only=ON;")
+        else:
+            conn.execute("PRAGMA journal_mode=WAL;" if wal_mode else "PRAGMA journal_mode=DELETE;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA foreign_keys=ON;")
         return conn
 
     def _connect(self) -> sqlite3.Connection:
-        return self._connect_path(self.db_path, wal_mode=True)
+        db_p, _, _, _ = self._resolve_active_paths()
+        target = db_p if (db_p is not None and db_p.exists()) else self.db_path
+        return self._connect_path(target, wal_mode=False, read_only=True)
 
     def _init_schema_on(self, target_db: Path, wal_mode: bool = True) -> bool:
         with self._connect_path(target_db, wal_mode=wal_mode) as conn:
@@ -257,7 +406,12 @@ class CompositionSpatialIndex:
                     generation_build_status TEXT NOT NULL DEFAULT 'partial',
                     discovery_scope TEXT NOT NULL DEFAULT 'static_seed_manifest',
                     created_at_utc TEXT NOT NULL,
+                    publication_timestamp_utc TEXT NOT NULL DEFAULT '',
+                    publication_nonce TEXT NOT NULL DEFAULT '',
+                    previous_successful_generation_id TEXT,
                     source_manifest_checksum TEXT NOT NULL,
+                    source_artifact_digest TEXT NOT NULL DEFAULT '',
+                    complete_manifest_digest TEXT NOT NULL DEFAULT '',
                     evidence_count INTEGER NOT NULL DEFAULT 0,
                     located_count INTEGER NOT NULL DEFAULT 0,
                     unlocated_count INTEGER NOT NULL DEFAULT 0,
@@ -368,6 +522,11 @@ class CompositionSpatialIndex:
                 "dependency_artifacts_json": "TEXT NOT NULL DEFAULT '[]'",
                 "rights_summary_json": "TEXT NOT NULL DEFAULT '{}'",
                 "retrieval_metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+                "source_artifact_digest": "TEXT NOT NULL DEFAULT ''",
+                "complete_manifest_digest": "TEXT NOT NULL DEFAULT ''",
+                "publication_nonce": "TEXT NOT NULL DEFAULT ''",
+                "publication_timestamp_utc": "TEXT NOT NULL DEFAULT ''",
+                "previous_successful_generation_id": "TEXT",
             }
             for col_name, col_ddl in migrations.items():
                 if col_name not in gen_cols:
@@ -379,10 +538,21 @@ class CompositionSpatialIndex:
         return self._init_schema_on(self.db_path, wal_mode=True)
 
     def get_active_generation(self) -> Optional[sqlite3.Row]:
-        with self._connect() as conn:
-            return conn.execute(
-                "SELECT * FROM index_generations WHERE status = 'active' ORDER BY created_at_utc DESC LIMIT 1"
-            ).fetchone()
+        db_p, _, ptr, ptr_errs = self._resolve_active_paths()
+        if ptr_errs or db_p is None or not db_p.exists():
+            return None
+        try:
+            with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
+                if ptr and ptr.get("active_generation_id"):
+                    return conn.execute(
+                        "SELECT * FROM index_generations WHERE generation_id = ? AND status = 'active' LIMIT 1",
+                        (ptr["active_generation_id"],),
+                    ).fetchone()
+                return conn.execute(
+                    "SELECT * FROM index_generations WHERE status = 'active' ORDER BY created_at_utc DESC LIMIT 1"
+                ).fetchone()
+        except sqlite3.Error:
+            return None
 
     def _validate_staged_generation(
         self,
@@ -393,6 +563,8 @@ class CompositionSpatialIndex:
     ) -> None:
         """
         Verify a staged generation DB and staged manifest completely before atomic cutover.
+        Authenticates every field via canonical `complete_manifest_digest`, verifies DB vs
+        manifest agreement, deterministic evidence IDs, counts, and source artifact hashes.
         Raises RuntimeError on any integrity, count, checksum, or schema violation.
         """
         if not staging_db.exists() or not staging_manifest.exists():
@@ -402,20 +574,21 @@ class CompositionSpatialIndex:
         except Exception as exc:
             raise RuntimeError(f"Staging manifest JSON is unreadable: {exc}") from exc
 
-        req_keys = {
-            "manifest_format_version",
-            "generation_id",
-            "source_manifest_checksum",
-            "generation_build_status",
-            "products",
-            "dependency_artifacts",
-        }
-        missing_keys = req_keys - set(manifest_obj.keys())
+        if not isinstance(manifest_obj, dict):
+            raise RuntimeError("Staging manifest root must be a JSON object.")
+
+        missing_keys = MANIFEST_REQUIRED_KEYS - set(manifest_obj.keys())
         if missing_keys:
             raise RuntimeError(f"Staging manifest missing required keys: {sorted(missing_keys)}")
         if manifest_obj.get("generation_id") != expected_gen_id:
             raise RuntimeError(
                 f"Manifest generation_id '{manifest_obj.get('generation_id')}' != '{expected_gen_id}'."
+            )
+
+        recomputed_manifest_digest = compute_complete_manifest_digest(manifest_obj)
+        if manifest_obj.get("complete_manifest_digest") != recomputed_manifest_digest:
+            raise RuntimeError(
+                f"Staging complete_manifest_digest mismatch: {manifest_obj.get('complete_manifest_digest')} != {recomputed_manifest_digest}."
             )
 
         with self._connect_path(staging_db, wal_mode=False) as conn:
@@ -425,8 +598,12 @@ class CompositionSpatialIndex:
             ).fetchone()
             if gen_row is None:
                 raise RuntimeError(f"Staging DB lacks active generation '{expected_gen_id}'.")
-            if gen_row["source_manifest_checksum"] != manifest_obj["source_manifest_checksum"]:
-                raise RuntimeError("Staging DB manifest checksum disagrees with staging manifest JSON.")
+            if gen_row["source_manifest_checksum"] != manifest_obj["source_artifact_digest"]:
+                raise RuntimeError("Staging DB source_artifact_digest disagrees with staging manifest JSON.")
+            if gen_row["complete_manifest_digest"] != manifest_obj["complete_manifest_digest"]:
+                raise RuntimeError("Staging DB complete_manifest_digest disagrees with staging manifest JSON.")
+            if gen_row["generation_build_status"] != manifest_obj["generation_build_status"]:
+                raise RuntimeError("Staging DB generation_build_status disagrees with staging manifest JSON.")
 
             ev_cnt, loc_cnt = conn.execute(
                 "SELECT COUNT(*), SUM(CASE WHEN location_verified = 1 THEN 1 ELSE 0 END) FROM composition_evidence WHERE generation_id = ?",
@@ -485,14 +662,22 @@ class CompositionSpatialIndex:
         notes: Optional[List[str]] = None,
         generation_id: Optional[str] = None,
         simulate_failure_before_cutover: bool = False,
+        failure_stage: Optional[str] = None,
     ) -> CompositionIndexStatus:
         """
-        Build a candidate index generation inside an isolated staging SQLite database,
-        verify all counts, deterministic IDs, checksums, and manifest integrity, and
-        atomically replace the active database & reproducibility manifest only if every
-        check passes. On any failure, preserves the previous active generation untouched.
+        Transaction-safe immutable generation publication:
+          1. Acquire exclusive flock lock on `.publish.lock`.
+          2. Stage complete SQLite DB and canonical reproducibility manifest inside `.staging_*`.
+          3. Authenticate full canonical manifest (`complete_manifest_digest`), DB agreement,
+             deterministic IDs, counts, and source dependency hashes.
+          4. Promote staged dir to immutable `<generations_dir>/<gen_id>__<nonce>/`.
+          5. Atomically swap `active_generation.json` via temp file + `os.replace`.
+          6. Retain previous successful generation for recovery and clean staging leftovers.
         """
+        effective_failure_stage = failure_stage or ("before_dir_publish" if simulate_failure_before_cutover else None)
         now_utc = datetime.now(timezone.utc).isoformat()
+        pub_nonce = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:8]}"
+
         manifests = sorted(
             product_manifests or [],
             key=lambda m: (str(m.get("dataset_id", "")), str(m.get("product_id", ""))),
@@ -501,18 +686,17 @@ class CompositionSpatialIndex:
             dependency_artifacts or [],
             key=lambda d: (str(d.get("artifact_role", "")), str(d.get("file_path", ""))),
         )
-        dep_digest_items = [
-            (d.get("artifact_id", ""), d.get("sha256_checksum", "")) for d in deps
-        ] + [
-            (m.get("product_id", ""), m.get("sha256_checksum", "")) for m in manifests
-        ]
-        manifest_digest = hashlib.sha256(
-            json.dumps(dep_digest_items, sort_keys=True).encode("utf-8")
+        dep_digest_items = sorted(
+            [(d.get("artifact_id", ""), d.get("sha256_checksum", "")) for d in deps]
+            + [(m.get("product_id", ""), m.get("sha256_checksum", "")) for m in manifests]
+        )
+        source_artifact_digest = hashlib.sha256(
+            json.dumps(dep_digest_items, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         ev_digest = hashlib.sha256(
             "|".join(e.evidence_id for e in sorted(evidence_records, key=lambda x: x.evidence_id)).encode("utf-8")
         ).hexdigest()
-        gen_id = generation_id or f"gen_{hashlib.sha256(f'{manifest_digest}|{ev_digest}|{len(rejected_records)}'.encode()).hexdigest()[:12]}"
+        gen_id = generation_id or f"gen_{hashlib.sha256(f'{source_artifact_digest}|{ev_digest}|{len(rejected_records)}'.encode()).hexdigest()[:12]}"
 
         located_count = sum(1 for e in evidence_records if e.location_verified)
         unlocated_count = len(evidence_records) - located_count
@@ -522,225 +706,294 @@ class CompositionSpatialIndex:
             else (GenerationBuildStatus.PARTIAL if len(evidence_records) > 0 else GenerationBuildStatus.FAILED)
         )
 
-        staging_db = self.db_path.parent / f".{self.db_path.name}.staging.sqlite"
-        manifest_path = self._manifest_path()
-        staging_manifest = manifest_path.parent / f".{manifest_path.name}.staging.json"
-        for leftover in (
-            staging_db,
-            Path(f"{staging_db}-wal"),
-            Path(f"{staging_db}-shm"),
-            staging_manifest,
-        ):
-            if leftover.exists():
-                leftover.unlink()
+        generations_dir = self._generations_dir()
+        generations_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self._lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-        try:
-            staging_rtree = self._init_schema_on(staging_db, wal_mode=False)
-            with self._connect_path(staging_db, wal_mode=False) as sconn:
-                sconn.execute("BEGIN IMMEDIATE;")
-                sconn.execute(
-                    """
-                    INSERT INTO index_generations (
-                        generation_id, status, generation_build_status, discovery_scope,
-                        created_at_utc, source_manifest_checksum,
-                        evidence_count, located_count, unlocated_count, rejected_count,
-                        expected_products_count, crism_status, notes_json,
-                        missing_expected_json, product_audit_json, dependency_artifacts_json,
-                        rights_summary_json, retrieval_metadata_json
-                    ) VALUES (?, 'building', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        gen_id,
-                        build_status.value,
-                        discovery_scope,
-                        now_utc,
-                        manifest_digest,
-                        len(evidence_records),
-                        located_count,
-                        unlocated_count,
-                        len(rejected_records),
-                        int(expected_products_count),
-                        crism_status,
-                        json.dumps(notes or []),
-                        json.dumps(missing_expected_products or []),
-                        json.dumps(product_audit or []),
-                        json.dumps(deps),
-                        json.dumps(rights_summary or {}),
-                        json.dumps(retrieval_metadata or {}),
-                    ),
-                )
+        with lock_path.open("a+", encoding="utf-8") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            try:
+                prev_ptr, _ = self._read_pointer()
+                prev_gen_id = prev_ptr.get("active_generation_id") if prev_ptr else None
 
-                for m in manifests:
-                    sconn.execute(
-                        """
-                        INSERT OR REPLACE INTO ingested_products (
-                            generation_id, dataset_id, product_id, file_path,
-                            sha256_checksum, record_count, rejected_count, ingested_at_utc, manifest_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            gen_id,
-                            m["dataset_id"],
-                            m["product_id"],
-                            m["file_path"],
-                            m["sha256_checksum"],
-                            int(m.get("record_count", 0)),
-                            int(m.get("rejected_count", 0)),
-                            now_utc,
-                            json.dumps(m, sort_keys=True),
-                        ),
-                    )
+                # Remove any stale orphaned staging dirs from crashed earlier runs before staging
+                for old_stage in generations_dir.glob(".staging_*"):
+                    if old_stage.is_dir():
+                        shutil.rmtree(old_stage, ignore_errors=True)
 
-                for ev in evidence_records:
-                    ev_copy = ev.model_copy(update={"generation_id": gen_id})
-                    lon_360 = normalize_longitude_360(ev_copy.longitude_east) if ev_copy.longitude_east is not None else None
-                    min_lon = normalize_longitude_360(ev_copy.min_lon_east) if ev_copy.min_lon_east is not None else lon_360
-                    max_lon = normalize_longitude_360(ev_copy.max_lon_east) if ev_copy.max_lon_east is not None else lon_360
-                    cur = sconn.execute(
-                        """
-                        INSERT INTO composition_evidence (
-                            generation_id, evidence_id, source_dataset_id, product_id,
-                            instrument_id, target_name, sol, canonical_species_id,
-                            species_category, evidence_type, evidence_status,
-                            raw_value, raw_unit, normalized_value, normalized_unit,
-                            uncertainty_value, quality_flag, location_verified,
-                            latitude, longitude_east, min_lat, max_lat,
-                            min_lon_east, max_lon_east, payload_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            gen_id,
-                            ev_copy.evidence_id,
-                            ev_copy.source_dataset_id,
-                            ev_copy.product_id,
-                            ev_copy.instrument_id,
-                            ev_copy.target_name,
-                            ev_copy.sol,
-                            ev_copy.canonical_species_id,
-                            ev_copy.species_category.value,
-                            ev_copy.evidence_type.value,
-                            ev_copy.evidence_status.value,
-                            ev_copy.raw_value,
-                            ev_copy.raw_unit,
-                            ev_copy.normalized_value,
-                            ev_copy.normalized_unit,
-                            ev_copy.uncertainty_value,
-                            ev_copy.quality_flag,
-                            1 if ev_copy.location_verified else 0,
-                            ev_copy.latitude,
-                            lon_360,
-                            ev_copy.min_lat if ev_copy.min_lat is not None else ev_copy.latitude,
-                            ev_copy.max_lat if ev_copy.max_lat is not None else ev_copy.latitude,
-                            min_lon,
-                            max_lon,
-                            ev_copy.model_dump_json(),
-                        ),
-                    )
-                    row_id = cur.lastrowid
-                    if (
-                        staging_rtree
-                        and ev_copy.location_verified
-                        and ev_copy.latitude is not None
-                        and min_lon is not None
-                        and max_lon is not None
-                    ):
-                        mn_lat = ev_copy.min_lat if ev_copy.min_lat is not None else ev_copy.latitude
-                        mx_lat = ev_copy.max_lat if ev_copy.max_lat is not None else ev_copy.latitude
-                        if min_lon <= max_lon:
+                staging_dir = generations_dir / f".staging_{gen_id}__{pub_nonce}_pid{os.getpid()}"
+                staging_dir.mkdir(parents=True, exist_ok=True)
+                target_dir = generations_dir / f"{gen_id}__{pub_nonce}"
+                target_db = target_dir / "composition_index.sqlite"
+                target_manifest = target_dir / "reproducibility_manifest.json"
+                staging_db = staging_dir / "composition_index.sqlite"
+                staging_manifest = staging_dir / "reproducibility_manifest.json"
+
+                repro_payload: Dict[str, Any] = {
+                    "manifest_format_version": "reproducibility_manifest_v3",
+                    "generation_id": gen_id,
+                    "publication_nonce": pub_nonce,
+                    "previous_successful_generation_id": prev_gen_id,
+                    "generation_build_status": build_status.value,
+                    "discovery_scope": discovery_scope,
+                    "built_at_utc": now_utc,
+                    "publication_timestamp_utc": now_utc,
+                    "source_artifact_digest": source_artifact_digest,
+                    "source_manifest_checksum": source_artifact_digest,
+                    "sqlite_path": str(target_db),
+                    "determinism_version": EVIDENCE_ID_DETERMINISM_VERSION,
+                    "validation_pipeline_version": "12_stage_v3",
+                    "ranking_config_id": DEFAULT_HEURISTIC_RANKING_CONFIG.ranking_config_id,
+                    "ranking_config_version": DEFAULT_HEURISTIC_RANKING_CONFIG.ranking_config_version,
+                    "total_validated_evidence": len(evidence_records),
+                    "located_evidence_count": located_count,
+                    "unlocated_evidence_count": unlocated_count,
+                    "rejected_record_count": len(rejected_records),
+                    "expected_products_count": int(expected_products_count),
+                    "missing_expected_products": list(missing_expected_products or []),
+                    "crism_status": crism_status,
+                    "rights_summary": rights_summary or {},
+                    "retrieval_metadata": retrieval_metadata or {},
+                    "products": manifests,
+                    "dependency_artifacts": deps,
+                    "product_audit": product_audit or [],
+                    "notes": list(notes or []),
+                }
+                complete_manifest_digest = compute_complete_manifest_digest(repro_payload)
+                repro_payload["complete_manifest_digest"] = complete_manifest_digest
+
+                pointer_swapped = False
+                try:
+                    staging_rtree = self._init_schema_on(staging_db, wal_mode=False)
+                    sconn = self._connect_path(staging_db, wal_mode=False)
+                    try:
+                        sconn.execute("BEGIN IMMEDIATE;")
+                        sconn.execute(
+                            """
+                            INSERT INTO index_generations (
+                                generation_id, status, generation_build_status, discovery_scope,
+                                created_at_utc, publication_timestamp_utc, publication_nonce,
+                                previous_successful_generation_id,
+                                source_manifest_checksum, source_artifact_digest, complete_manifest_digest,
+                                evidence_count, located_count, unlocated_count, rejected_count,
+                                expected_products_count, crism_status, notes_json,
+                                missing_expected_json, product_audit_json, dependency_artifacts_json,
+                                rights_summary_json, retrieval_metadata_json
+                            ) VALUES (?, 'building', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                gen_id,
+                                build_status.value,
+                                discovery_scope,
+                                now_utc,
+                                now_utc,
+                                pub_nonce,
+                                prev_gen_id,
+                                source_artifact_digest,
+                                source_artifact_digest,
+                                complete_manifest_digest,
+                                len(evidence_records),
+                                located_count,
+                                unlocated_count,
+                                len(rejected_records),
+                                int(expected_products_count),
+                                crism_status,
+                                json.dumps(notes or []),
+                                json.dumps(missing_expected_products or []),
+                                json.dumps(product_audit or []),
+                                json.dumps(deps),
+                                json.dumps(rights_summary or {}),
+                                json.dumps(retrieval_metadata or {}),
+                            ),
+                        )
+
+                        for m in manifests:
                             sconn.execute(
-                                "INSERT INTO evidence_rtree (row_id, min_lon, max_lon, min_lat, max_lat) VALUES (?, ?, ?, ?, ?)",
-                                (row_id, min_lon, max_lon, mn_lat, mx_lat),
+                                """
+                                INSERT OR REPLACE INTO ingested_products (
+                                    generation_id, dataset_id, product_id, file_path,
+                                    sha256_checksum, record_count, rejected_count, ingested_at_utc, manifest_json
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    gen_id,
+                                    m["dataset_id"],
+                                    m["product_id"],
+                                    m["file_path"],
+                                    m["sha256_checksum"],
+                                    int(m.get("record_count", 0)),
+                                    int(m.get("rejected_count", 0)),
+                                    now_utc,
+                                    json.dumps(m, sort_keys=True),
+                                ),
                             )
 
-                for rej in rejected_records:
-                    sconn.execute(
-                        """
-                        INSERT INTO rejected_records (
-                            generation_id, rejection_id, source_dataset_id, product_id,
-                            instrument_id, rejection_stage, rejection_code, reason, payload_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            gen_id,
-                            rej.rejection_id,
-                            rej.source_dataset_id,
-                            rej.product_id,
-                            rej.instrument_id,
-                            rej.rejection_stage,
-                            rej.rejection_code,
-                            rej.reason,
-                            rej.model_dump_json(),
-                        ),
-                    )
+                        for ev in evidence_records:
+                            ev_copy = ev.model_copy(update={"generation_id": gen_id})
+                            lon_360 = normalize_longitude_360(ev_copy.longitude_east) if ev_copy.longitude_east is not None else None
+                            min_lon = normalize_longitude_360(ev_copy.min_lon_east) if ev_copy.min_lon_east is not None else lon_360
+                            max_lon = normalize_longitude_360(ev_copy.max_lon_east) if ev_copy.max_lon_east is not None else lon_360
+                            cur = sconn.execute(
+                                """
+                                INSERT INTO composition_evidence (
+                                    generation_id, evidence_id, source_dataset_id, product_id,
+                                    instrument_id, target_name, sol, canonical_species_id,
+                                    species_category, evidence_type, evidence_status,
+                                    raw_value, raw_unit, normalized_value, normalized_unit,
+                                    uncertainty_value, quality_flag, location_verified,
+                                    latitude, longitude_east, min_lat, max_lat,
+                                    min_lon_east, max_lon_east, payload_json
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    gen_id,
+                                    ev_copy.evidence_id,
+                                    ev_copy.source_dataset_id,
+                                    ev_copy.product_id,
+                                    ev_copy.instrument_id,
+                                    ev_copy.target_name,
+                                    ev_copy.sol,
+                                    ev_copy.canonical_species_id,
+                                    ev_copy.species_category.value,
+                                    ev_copy.evidence_type.value,
+                                    ev_copy.evidence_status.value,
+                                    ev_copy.raw_value,
+                                    ev_copy.raw_unit,
+                                    ev_copy.normalized_value,
+                                    ev_copy.normalized_unit,
+                                    ev_copy.uncertainty_value,
+                                    ev_copy.quality_flag,
+                                    1 if ev_copy.location_verified else 0,
+                                    ev_copy.latitude,
+                                    lon_360,
+                                    ev_copy.min_lat if ev_copy.min_lat is not None else ev_copy.latitude,
+                                    ev_copy.max_lat if ev_copy.max_lat is not None else ev_copy.latitude,
+                                    min_lon,
+                                    max_lon,
+                                    ev_copy.model_dump_json(),
+                                ),
+                            )
+                            row_id = cur.lastrowid
+                            if (
+                                staging_rtree
+                                and ev_copy.location_verified
+                                and ev_copy.latitude is not None
+                                and min_lon is not None
+                                and max_lon is not None
+                            ):
+                                mn_lat = ev_copy.min_lat if ev_copy.min_lat is not None else ev_copy.latitude
+                                mx_lat = ev_copy.max_lat if ev_copy.max_lat is not None else ev_copy.latitude
+                                if min_lon <= max_lon:
+                                    sconn.execute(
+                                        "INSERT INTO evidence_rtree (row_id, min_lon, max_lon, min_lat, max_lat) VALUES (?, ?, ?, ?, ?)",
+                                        (row_id, min_lon, max_lon, mn_lat, mx_lat),
+                                    )
 
-                sconn.execute("UPDATE index_generations SET status = 'active' WHERE generation_id = ?", (gen_id,))
-                sconn.commit()
+                        for rej in rejected_records:
+                            sconn.execute(
+                                """
+                                INSERT INTO rejected_records (
+                                    generation_id, rejection_id, source_dataset_id, product_id,
+                                    instrument_id, rejection_stage, rejection_code, reason, payload_json
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    gen_id,
+                                    rej.rejection_id,
+                                    rej.source_dataset_id,
+                                    rej.product_id,
+                                    rej.instrument_id,
+                                    rej.rejection_stage,
+                                    rej.rejection_code,
+                                    rej.reason,
+                                    rej.model_dump_json(),
+                                ),
+                            )
 
-            repro_payload = {
-                "manifest_format_version": "reproducibility_manifest_v2",
-                "generation_id": gen_id,
-                "generation_build_status": build_status.value,
-                "discovery_scope": discovery_scope,
-                "built_at_utc": now_utc,
-                "source_manifest_checksum": manifest_digest,
-                "sqlite_path": str(self.db_path),
-                "determinism_version": EVIDENCE_ID_DETERMINISM_VERSION,
-                "validation_pipeline_version": "12_stage_v3",
-                "ranking_config_id": DEFAULT_HEURISTIC_RANKING_CONFIG.ranking_config_id,
-                "ranking_config_version": DEFAULT_HEURISTIC_RANKING_CONFIG.ranking_config_version,
-                "total_validated_evidence": len(evidence_records),
-                "located_evidence_count": located_count,
-                "unlocated_evidence_count": unlocated_count,
-                "rejected_record_count": len(rejected_records),
-                "expected_products_count": int(expected_products_count),
-                "missing_expected_products": missing_expected_products or [],
-                "crism_status": crism_status,
-                "rights_summary": rights_summary or {},
-                "retrieval_metadata": retrieval_metadata or {},
-                "products": manifests,
-                "dependency_artifacts": deps,
-                "product_audit": product_audit or [],
-                "notes": notes or [],
-            }
-            staging_manifest.write_text(json.dumps(repro_payload, indent=2), encoding="utf-8")
+                        if effective_failure_stage == "before_db_commit":
+                            raise RuntimeError("Simulated failure before staging DB commit.")
 
-            # Pre-cutover strict verification in isolated staging area
-            self._validate_staged_generation(
-                staging_db,
-                staging_manifest,
-                expected_gen_id=gen_id,
-                require_source_files=bool(manifests or deps),
-            )
-            if simulate_failure_before_cutover:
-                raise RuntimeError("Simulated pre-cutover failure: aborting atomic cutover.")
-
-            # Switch existing DB out of WAL mode / clean stray WAL sidecars before atomic os.replace
-            for stale_wal in (Path(f"{self.db_path}-wal"), Path(f"{self.db_path}-shm")):
-                if stale_wal.exists():
-                    try:
-                        with self._connect_path(self.db_path, wal_mode=False) as pconn:
-                            pconn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                        sconn.execute("UPDATE index_generations SET status = 'active' WHERE generation_id = ?", (gen_id,))
+                        sconn.commit()
                     except Exception:
-                        pass
-                    if stale_wal.exists():
-                        stale_wal.unlink()
+                        sconn.rollback()
+                        raise
+                    finally:
+                        sconn.close()
 
-            os.replace(staging_db, self.db_path)
-            os.replace(staging_manifest, manifest_path)
-        finally:
-            for leftover in (
-                staging_db,
-                Path(f"{staging_db}-wal"),
-                Path(f"{staging_db}-shm"),
-                staging_manifest,
-            ):
-                if leftover.exists():
-                    try:
-                        leftover.unlink()
-                    except OSError:
-                        pass
+                    if effective_failure_stage == "after_db_commit":
+                        raise RuntimeError("Simulated failure after staging DB commit.")
+                    if effective_failure_stage == "before_manifest_write":
+                        raise RuntimeError("Simulated failure before staging manifest write.")
 
-        self.rtree_enabled = self._init_schema()
+                    staging_manifest.write_text(
+                        json.dumps(repro_payload, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False),
+                        encoding="utf-8",
+                    )
+                    if effective_failure_stage == "before_staging_validation":
+                        raise RuntimeError("Simulated failure before staging validation.")
+
+                    self._validate_staged_generation(
+                        staging_db,
+                        staging_manifest,
+                        expected_gen_id=gen_id,
+                        require_source_files=bool(manifests or deps),
+                    )
+                    if effective_failure_stage == "before_dir_publish":
+                        raise RuntimeError("Simulated pre-cutover failure: aborting atomic cutover.")
+
+                    # Promote staged directory to immutable generation directory before pointer swap
+                    os.replace(staging_dir, target_dir)
+
+                    if effective_failure_stage == "before_pointer_replace":
+                        raise RuntimeError("Simulated failure before active_generation pointer swap.")
+
+                    pointer_payload = {
+                        "pointer_format_version": "active_generation_pointer_v1",
+                        "active_generation_id": gen_id,
+                        "previous_successful_generation_id": prev_gen_id,
+                        "publication_nonce": pub_nonce,
+                        "publication_timestamp_utc": now_utc,
+                        "generation_dir": str(target_dir),
+                        "sqlite_path": str(target_db),
+                        "reproducibility_manifest_path": str(target_manifest),
+                        "source_artifact_digest": source_artifact_digest,
+                        "complete_manifest_digest": complete_manifest_digest,
+                    }
+                    ptr_path = self._pointer_path()
+                    tmp_ptr = ptr_path.parent / f".{ptr_path.name}.{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp"
+                    with tmp_ptr.open("w", encoding="utf-8") as pfh:
+                        pfh.write(json.dumps(pointer_payload, indent=2, sort_keys=True, ensure_ascii=False))
+                        pfh.flush()
+                        os.fsync(pfh.fileno())
+                    os.replace(tmp_ptr, ptr_path)
+                    pointer_swapped = True
+
+                    # Prune old superseded generation directories beyond active + most recent previous (keep 2)
+                    keep_dirs = {target_dir.name}
+                    if prev_ptr and prev_ptr.get("generation_dir"):
+                        keep_dirs.add(Path(str(prev_ptr["generation_dir"])).name)
+                    for gd in sorted(
+                        (p for p in generations_dir.iterdir() if p.is_dir() and not p.name.startswith(".")),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    ):
+                        if gd.name in keep_dirs:
+                            continue
+                        if len(keep_dirs) < 2:
+                            keep_dirs.add(gd.name)
+                            continue
+                        shutil.rmtree(gd, ignore_errors=True)
+                finally:
+                    if staging_dir.exists():
+                        shutil.rmtree(staging_dir, ignore_errors=True)
+                    if not pointer_swapped and target_dir.exists():
+                        shutil.rmtree(target_dir, ignore_errors=True)
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+        self.rtree_enabled = staging_rtree
         return self.get_status()
 
     @staticmethod
@@ -809,6 +1062,7 @@ class CompositionSpatialIndex:
         declared_unavailable_sources: Optional[List[str]] = None,
         strict_mode: bool = False,
         simulate_failure_before_cutover: bool = False,
+        failure_stage: Optional[str] = None,
     ) -> CompositionIndexStatus:
         """
         Discover and parse verified NASA PDS raw artifacts inside raw_dir, track
@@ -1292,27 +1546,148 @@ class CompositionSpatialIndex:
             crism_status=crism_status,
             notes=notes,
             simulate_failure_before_cutover=simulate_failure_before_cutover,
+            failure_stage=failure_stage,
         )
 
+    def _authenticate_manifest_and_snapshot(
+        self,
+    ) -> Tuple[Optional[Path], Optional[Path], Optional[Dict[str, Any]], Optional[sqlite3.Row], Optional[Dict[str, Any]], List[str], List[str], List[str]]:
+        """
+        Atomically resolve pointer -> DB + manifest, verify canonical `complete_manifest_digest`
+        and cross-check DB/pointer/manifest consistency on a single consistent snapshot.
+        Returns (db_p, mf_p, ptr, gen_row, manifest_obj, pointer_errors, manifest_errors, db_errors).
+        """
+        db_p, mf_p, ptr, ptr_errs = self._resolve_active_paths()
+        manifest_errors: List[str] = []
+        db_errors: List[str] = []
+        gen_row: Optional[sqlite3.Row] = None
+        manifest_obj: Optional[Dict[str, Any]] = None
+
+        if db_p is not None and db_p.exists():
+            try:
+                with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
+                    if ptr and ptr.get("active_generation_id"):
+                        gen_row = conn.execute(
+                            "SELECT * FROM index_generations WHERE generation_id = ? AND status = 'active' LIMIT 1",
+                            (ptr["active_generation_id"],),
+                        ).fetchone()
+                        if gen_row is None:
+                            db_errors.append(
+                                f"Active generation '{ptr['active_generation_id']}' missing from '{db_p.name}'."
+                            )
+                    else:
+                        gen_row = conn.execute(
+                            "SELECT * FROM index_generations WHERE status = 'active' ORDER BY created_at_utc DESC LIMIT 1"
+                        ).fetchone()
+            except sqlite3.Error as exc:
+                db_errors.append(f"SQLite snapshot unreadable ({db_p.name}): {exc}")
+
+        if mf_p is None or not mf_p.exists():
+            manifest_errors.append(
+                f"Reproducibility manifest missing at {mf_p.name if mf_p else 'active_generation'}."
+            )
+        else:
+            try:
+                raw_m = json.loads(mf_p.read_text(encoding="utf-8"))
+                if not isinstance(raw_m, dict):
+                    manifest_errors.append("Reproducibility manifest JSON root is not an object.")
+                else:
+                    manifest_obj = raw_m
+                    missing_keys = sorted(MANIFEST_REQUIRED_KEYS - set(raw_m.keys()))
+                    if missing_keys:
+                        manifest_errors.append(f"Manifest missing required authenticated fields: {missing_keys}")
+                    else:
+                        recomputed = compute_complete_manifest_digest(raw_m)
+                        if raw_m.get("complete_manifest_digest") != recomputed:
+                            manifest_errors.append(
+                                "Canonical complete_manifest_digest mismatch: manifest contents were modified or corrupted."
+                            )
+            except Exception as exc:
+                manifest_errors.append(f"Reproducibility manifest corrupt/unparseable: {exc}")
+
+        if gen_row is not None and manifest_obj is not None:
+            gen_id = str(gen_row["generation_id"])
+            if manifest_obj.get("generation_id") != gen_id:
+                manifest_errors.append(
+                    f"Manifest generation_id '{manifest_obj.get('generation_id')}' != active DB '{gen_id}'."
+                )
+            db_src_digest = gen_row["source_artifact_digest"] if "source_artifact_digest" in gen_row.keys() and gen_row["source_artifact_digest"] else gen_row["source_manifest_checksum"]
+            if manifest_obj.get("source_artifact_digest") != db_src_digest or manifest_obj.get("source_manifest_checksum") != gen_row["source_manifest_checksum"]:
+                manifest_errors.append("Manifest source_artifact_digest disagrees with active DB generation.")
+            db_cmd = gen_row["complete_manifest_digest"] if "complete_manifest_digest" in gen_row.keys() else ""
+            if db_cmd and manifest_obj.get("complete_manifest_digest") != db_cmd:
+                manifest_errors.append("Manifest complete_manifest_digest disagrees with active DB complete_manifest_digest.")
+            if manifest_obj.get("generation_build_status") != gen_row["generation_build_status"]:
+                manifest_errors.append("Manifest generation_build_status disagrees with active DB.")
+            if manifest_obj.get("total_validated_evidence") != int(gen_row["evidence_count"]):
+                manifest_errors.append("Manifest total_validated_evidence disagrees with active DB evidence_count.")
+            if manifest_obj.get("rejected_record_count") != int(gen_row["rejected_count"]):
+                manifest_errors.append("Manifest rejected_record_count disagrees with active DB rejected_count.")
+
+        if ptr is not None and manifest_obj is not None:
+            if ptr.get("complete_manifest_digest") != manifest_obj.get("complete_manifest_digest"):
+                manifest_errors.append("Active pointer complete_manifest_digest disagrees with manifest file.")
+            if ptr.get("source_artifact_digest") != manifest_obj.get("source_artifact_digest"):
+                manifest_errors.append("Active pointer source_artifact_digest disagrees with manifest file.")
+
+        return db_p, mf_p, ptr, gen_row, manifest_obj, ptr_errs, manifest_errors, db_errors
+
+    def get_authenticated_manifest(self) -> Dict[str, Any]:
+        """
+        Return the cryptographically authenticated manifest dict if and only if pointer,
+        SQLite generation header, and canonical `complete_manifest_digest` all agree.
+        Raises LookupError if unbuilt, or ValueError if any tampering/mismatch is detected.
+        """
+        _, mf_p, ptr, gen_row, manifest_obj, ptr_errs, mf_errs, db_errs = (
+            self._authenticate_manifest_and_snapshot()
+        )
+        if ptr is None and gen_row is None and not ptr_errs and (mf_p is None or not mf_p.exists()):
+            raise LookupError("Reproducibility manifest unavailable; rebuild composition index first.")
+        all_errs = ptr_errs + mf_errs + db_errs
+        if all_errs or manifest_obj is None:
+            raise ValueError("; ".join(all_errs) if all_errs else "Reproducibility manifest authentication failed.")
+        return manifest_obj
+
     def get_status(self) -> CompositionIndexStatus:
-        gen = self.get_active_generation()
-        manifest_path = self._manifest_path()
+        incomplete_staging = self._list_incomplete_staging_dirs()
+        db_p, mf_p, ptr, gen, manifest_obj, ptr_errs, manifest_errors, db_errors = (
+            self._authenticate_manifest_and_snapshot()
+        )
+        prev_gen_id = ptr.get("previous_successful_generation_id") if ptr else None
+        ptr_path = self._pointer_path()
+
         if gen is None:
+            overall = IntegrityStatus.MANIFEST_INVALID if (ptr_errs or db_errors) else IntegrityStatus.UNAVAILABLE
             return CompositionIndexStatus(
                 index_available=False,
-                integrity_status=IntegrityStatus.UNAVAILABLE,
+                integrity_status=overall,
                 generation_build_status=GenerationBuildStatus.FAILED,
+                source_integrity_status=IntegrityStatus.UNAVAILABLE,
+                manifest_integrity_status=IntegrityStatus.MANIFEST_INVALID if manifest_errors else IntegrityStatus.UNAVAILABLE,
+                pointer_integrity_status=IntegrityStatus.MANIFEST_INVALID if ptr_errs else IntegrityStatus.UNAVAILABLE,
+                database_integrity_status=IntegrityStatus.INCOMPLETE if db_errors else IntegrityStatus.UNAVAILABLE,
+                previous_successful_generation_id=prev_gen_id,
+                incomplete_staging_generations=incomplete_staging,
+                manifest_validation_errors=ptr_errs + manifest_errors + db_errors,
                 rtree_enabled=self.rtree_enabled,
-                sqlite_path=str(self.db_path),
-                reproducibility_manifest_path=str(manifest_path) if manifest_path.exists() else None,
-                notes=["No active composition index generation has been built yet."],
+                sqlite_path=str(db_p or self.db_path),
+                pointer_path=str(ptr_path) if ptr_path.exists() else None,
+                reproducibility_manifest_path=str(mf_p) if (mf_p and mf_p.exists()) else None,
+                notes=(ptr_errs + db_errors + manifest_errors) or ["No active composition index generation has been built yet."],
             )
+
         gen_id = gen["generation_id"]
-        with self._connect() as conn:
+        with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
             species_cnt = conn.execute(
                 "SELECT COUNT(DISTINCT canonical_species_id) FROM composition_evidence WHERE generation_id = ?",
                 (gen_id,),
             ).fetchone()[0]
+            actual_ev_cnt = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM composition_evidence WHERE generation_id = ?",
+                    (gen_id,),
+                ).fetchone()[0]
+            )
             inst_rows = conn.execute(
                 "SELECT DISTINCT instrument_id FROM composition_evidence WHERE generation_id = ? ORDER BY instrument_id",
                 (gen_id,),
@@ -1370,56 +1745,65 @@ class CompositionSpatialIndex:
                 dep_mismatches.append(dp.name)
                 notes.append(f"Dependency checksum drift detected for {dp.name}; index rebuild required.")
 
-        # Verify reproducibility manifest JSON presence, syntax, schema keys & generation alignment
-        manifest_valid = True
-        manifest_errors: List[str] = []
-        if not manifest_path.exists():
-            manifest_valid = False
-            manifest_errors.append(f"Reproducibility manifest missing at {manifest_path.name}.")
-        else:
-            try:
-                m_json = json.loads(manifest_path.read_text(encoding="utf-8"))
-                if not isinstance(m_json, dict):
-                    manifest_valid = False
-                    manifest_errors.append("Reproducibility manifest JSON root is not an object.")
-                else:
-                    if m_json.get("generation_id") != gen_id:
-                        manifest_valid = False
-                        manifest_errors.append(
-                            f"Manifest generation_id '{m_json.get('generation_id')}' != active DB '{gen_id}'."
-                        )
-                    if m_json.get("source_manifest_checksum") != gen["source_manifest_checksum"]:
-                        manifest_valid = False
-                        manifest_errors.append("Manifest source_manifest_checksum disagrees with active DB generation.")
-                    if not isinstance(m_json.get("products"), list):
-                        manifest_valid = False
-                        manifest_errors.append("Manifest missing valid 'products' list.")
-            except Exception as exc:
-                manifest_valid = False
-                manifest_errors.append(f"Reproducibility manifest corrupt/unparseable: {exc}")
+        ev_cnt = int(gen["evidence_count"])
+        if actual_ev_cnt != ev_cnt:
+            db_errors.append(
+                f"SQLite row count ({actual_ev_cnt}) disagrees with generation header ({ev_cnt})."
+            )
 
-        notes.extend(manifest_errors)
+        pointer_valid = len(ptr_errs) == 0
+        manifest_valid = len(manifest_errors) == 0
+        db_valid = (len(db_errors) == 0) and (ev_cnt > 0)
         checksum_valid = (len(missing_files) == 0) and (len(mismatches) == 0) and (len(missing_deps) == 0) and (len(dep_mismatches) == 0)
         deps_valid = (len(missing_deps) == 0) and (len(dep_mismatches) == 0)
-        ev_cnt = int(gen["evidence_count"])
 
-        if not manifest_valid:
-            integrity = IntegrityStatus.MANIFEST_INVALID
-        elif mismatches or dep_mismatches:
-            integrity = IntegrityStatus.CHECKSUM_MISMATCH
+        notes.extend(ptr_errs)
+        notes.extend(manifest_errors)
+        notes.extend(db_errors)
+
+        pointer_integrity = IntegrityStatus.VERIFIED if pointer_valid else IntegrityStatus.MANIFEST_INVALID
+        manifest_integrity = IntegrityStatus.VERIFIED if manifest_valid else IntegrityStatus.MANIFEST_INVALID
+        db_integrity = IntegrityStatus.VERIFIED if db_valid else IntegrityStatus.INCOMPLETE
+        if mismatches or dep_mismatches:
+            source_integrity = IntegrityStatus.CHECKSUM_MISMATCH
         elif missing_files or missing_deps:
-            integrity = IntegrityStatus.SOURCE_FILES_MISSING
-        elif ev_cnt <= 0:
-            integrity = IntegrityStatus.INCOMPLETE
+            source_integrity = IntegrityStatus.SOURCE_FILES_MISSING
         else:
-            integrity = IntegrityStatus.VERIFIED
+            source_integrity = IntegrityStatus.VERIFIED
+
+        if not pointer_valid or not manifest_valid:
+            overall_integrity = IntegrityStatus.MANIFEST_INVALID
+        elif not db_valid:
+            overall_integrity = IntegrityStatus.INCOMPLETE
+        elif source_integrity != IntegrityStatus.VERIFIED:
+            overall_integrity = source_integrity
+        else:
+            overall_integrity = IntegrityStatus.VERIFIED
+
+        src_digest = (
+            gen["source_artifact_digest"]
+            if ("source_artifact_digest" in gen.keys() and gen["source_artifact_digest"])
+            else gen["source_manifest_checksum"]
+        )
+        cmd = gen["complete_manifest_digest"] if "complete_manifest_digest" in gen.keys() else None
+        pub_ts = gen["publication_timestamp_utc"] if ("publication_timestamp_utc" in gen.keys() and gen["publication_timestamp_utc"]) else gen["created_at_utc"]
+        db_prev_gen = gen["previous_successful_generation_id"] if "previous_successful_generation_id" in gen.keys() else None
 
         return CompositionIndexStatus(
             index_available=ev_cnt > 0,
-            integrity_status=integrity,
+            integrity_status=overall_integrity,
             generation_build_status=gen_build_status,
+            source_integrity_status=source_integrity,
+            manifest_integrity_status=manifest_integrity,
+            pointer_integrity_status=pointer_integrity,
+            database_integrity_status=db_integrity,
             active_generation_id=gen_id,
+            previous_successful_generation_id=prev_gen_id or db_prev_gen,
+            incomplete_staging_generations=incomplete_staging,
+            source_artifact_digest=src_digest or None,
+            complete_manifest_digest=cmd or None,
             built_at_utc=gen["created_at_utc"],
+            publication_timestamp_utc=pub_ts,
             total_validated_evidence=ev_cnt,
             located_evidence_count=int(gen["located_count"]),
             unlocated_evidence_count=int(gen["unlocated_count"]),
@@ -1431,17 +1815,18 @@ class CompositionSpatialIndex:
             instruments_indexed=[r[0] for r in inst_rows],
             checksum_valid=checksum_valid,
             source_dependencies_valid=deps_valid,
-            manifest_valid=manifest_valid,
+            manifest_valid=manifest_valid and pointer_valid,
             missing_source_files=missing_files,
             checksum_mismatches=mismatches,
             missing_dependency_files=missing_deps,
             dependency_checksum_mismatches=dep_mismatches,
             missing_expected_products=missing_expected,
-            manifest_validation_errors=manifest_errors,
+            manifest_validation_errors=ptr_errs + manifest_errors + db_errors,
             rtree_enabled=self.rtree_enabled,
             crism_status=gen["crism_status"],
-            sqlite_path=str(self.db_path),
-            reproducibility_manifest_path=str(manifest_path) if manifest_path.exists() else None,
+            sqlite_path=str(db_p),
+            pointer_path=str(ptr_path) if ptr_path.exists() else None,
+            reproducibility_manifest_path=str(mf_p) if (mf_p and mf_p.exists()) else None,
             product_manifests=product_manifests,
             dependency_artifacts=dep_artifacts,
             product_audit=product_audit,
@@ -1463,61 +1848,84 @@ class CompositionSpatialIndex:
         Query validated evidence for one or more canonical species IDs from the active generation.
         bbox = (min_lat, max_lat, min_lon_east, max_lon_east), supporting [0, 360) antimeridian wrap.
         """
-        gen = self.get_active_generation()
-        if gen is None:
-            return []
-        gen_id = gen["generation_id"]
         sp_list = list(species_ids)
         if not sp_list:
             return []
+        db_p, _, ptr, ptr_errs = self._resolve_active_paths()
+        if ptr_errs or db_p is None or not db_p.exists():
+            return []
 
-        placeholders = ",".join("?" for _ in sp_list)
-        clauses = [
-            "ce.generation_id = ?",
-            f"ce.canonical_species_id IN ({placeholders})",
-        ]
-        params: List[Any] = [gen_id, *sp_list]
-
-        if located_only:
-            clauses.append("ce.location_verified = 1")
-        if instruments:
-            ip = ",".join("?" for _ in instruments)
-            clauses.append(f"ce.instrument_id IN ({ip})")
-            params.extend(instruments)
-        if sol_min is not None:
-            clauses.append("ce.sol >= ?")
-            params.append(sol_min)
-        if sol_max is not None:
-            clauses.append("ce.sol <= ?")
-            params.append(sol_max)
-
-        join_sql = ""
-        if bbox is not None:
-            min_lat, max_lat, min_lon_raw, max_lon_raw = bbox
-            mn_lon = normalize_longitude_360(min_lon_raw)
-            mx_lon = normalize_longitude_360(max_lon_raw)
-            if self.rtree_enabled and mn_lon <= mx_lon:
-                join_sql = "JOIN evidence_rtree rt ON ce.row_id = rt.row_id"
-                clauses.append("rt.min_lat <= ? AND rt.max_lat >= ? AND rt.min_lon <= ? AND rt.max_lon >= ?")
-                params.extend([max_lat, min_lat, mx_lon, mn_lon])
-            elif mn_lon <= mx_lon:
-                clauses.append("ce.min_lat <= ? AND ce.max_lat >= ? AND ce.min_lon_east <= ? AND ce.max_lon_east >= ?")
-                params.extend([max_lat, min_lat, mx_lon, mn_lon])
+        with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
+            if ptr and ptr.get("active_generation_id"):
+                gen = conn.execute(
+                    "SELECT * FROM index_generations WHERE generation_id = ? AND status = 'active' LIMIT 1",
+                    (ptr["active_generation_id"],),
+                ).fetchone()
             else:
-                # Antimeridian crossing in [0, 360): [mn_lon, 360] OR [0, mx_lon]
-                clauses.append("ce.min_lat <= ? AND ce.max_lat >= ? AND (ce.max_lon_east >= ? OR ce.min_lon_east <= ?)")
-                params.extend([max_lat, min_lat, mn_lon, mx_lon])
+                gen = conn.execute(
+                    "SELECT * FROM index_generations WHERE status = 'active' ORDER BY created_at_utc DESC LIMIT 1"
+                ).fetchone()
+            if gen is None:
+                return []
+            gen_id = gen["generation_id"]
 
-        sql = f"SELECT ce.payload_json FROM composition_evidence ce {join_sql} WHERE {' AND '.join(clauses)}"
-        with self._connect() as conn:
+            placeholders = ",".join("?" for _ in sp_list)
+            clauses = [
+                "ce.generation_id = ?",
+                f"ce.canonical_species_id IN ({placeholders})",
+            ]
+            params: List[Any] = [gen_id, *sp_list]
+
+            if located_only:
+                clauses.append("ce.location_verified = 1")
+            if instruments:
+                ip = ",".join("?" for _ in instruments)
+                clauses.append(f"ce.instrument_id IN ({ip})")
+                params.extend(instruments)
+            if sol_min is not None:
+                clauses.append("ce.sol >= ?")
+                params.append(sol_min)
+            if sol_max is not None:
+                clauses.append("ce.sol <= ?")
+                params.append(sol_max)
+
+            join_sql = ""
+            if bbox is not None:
+                min_lat, max_lat, min_lon_raw, max_lon_raw = bbox
+                mn_lon = normalize_longitude_360(min_lon_raw)
+                mx_lon = normalize_longitude_360(max_lon_raw)
+                if self.rtree_enabled and mn_lon <= mx_lon:
+                    join_sql = "JOIN evidence_rtree rt ON ce.row_id = rt.row_id"
+                    clauses.append("rt.min_lat <= ? AND rt.max_lat >= ? AND rt.min_lon <= ? AND rt.max_lon >= ?")
+                    params.extend([max_lat, min_lat, mx_lon, mn_lon])
+                elif mn_lon <= mx_lon:
+                    clauses.append("ce.min_lat <= ? AND ce.max_lat >= ? AND ce.min_lon_east <= ? AND ce.max_lon_east >= ?")
+                    params.extend([max_lat, min_lat, mx_lon, mn_lon])
+                else:
+                    # Antimeridian crossing in [0, 360): [mn_lon, 360] OR [0, mx_lon]
+                    clauses.append("ce.min_lat <= ? AND ce.max_lat >= ? AND (ce.max_lon_east >= ? OR ce.min_lon_east <= ?)")
+                    params.extend([max_lat, min_lat, mn_lon, mx_lon])
+
+            sql = f"SELECT ce.payload_json FROM composition_evidence ce {join_sql} WHERE {' AND '.join(clauses)}"
             rows = conn.execute(sql, params).fetchall()
         return [CompositionEvidence.model_validate_json(r[0]) for r in rows]
 
     def get_evidence_by_id(self, evidence_id: str) -> Optional[CompositionEvidence]:
-        gen = self.get_active_generation()
-        if gen is None:
+        db_p, _, ptr, ptr_errs = self._resolve_active_paths()
+        if ptr_errs or db_p is None or not db_p.exists():
             return None
-        with self._connect() as conn:
+        with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
+            if ptr and ptr.get("active_generation_id"):
+                gen = conn.execute(
+                    "SELECT generation_id FROM index_generations WHERE generation_id = ? AND status = 'active' LIMIT 1",
+                    (ptr["active_generation_id"],),
+                ).fetchone()
+            else:
+                gen = conn.execute(
+                    "SELECT generation_id FROM index_generations WHERE status = 'active' ORDER BY created_at_utc DESC LIMIT 1"
+                ).fetchone()
+            if gen is None:
+                return None
             row = conn.execute(
                 "SELECT payload_json FROM composition_evidence WHERE generation_id = ? AND evidence_id = ? LIMIT 1",
                 (gen["generation_id"], evidence_id),
@@ -1525,11 +1933,22 @@ class CompositionSpatialIndex:
         return CompositionEvidence.model_validate_json(row[0]) if row else None
 
     def list_rejected_records(self, limit: int = 100, offset: int = 0) -> Tuple[int, List[RejectionRecord]]:
-        gen = self.get_active_generation()
-        if gen is None:
+        db_p, _, ptr, ptr_errs = self._resolve_active_paths()
+        if ptr_errs or db_p is None or not db_p.exists():
             return 0, []
-        gen_id = gen["generation_id"]
-        with self._connect() as conn:
+        with self._connect_path(db_p, wal_mode=False, read_only=True) as conn:
+            if ptr and ptr.get("active_generation_id"):
+                gen = conn.execute(
+                    "SELECT generation_id FROM index_generations WHERE generation_id = ? AND status = 'active' LIMIT 1",
+                    (ptr["active_generation_id"],),
+                ).fetchone()
+            else:
+                gen = conn.execute(
+                    "SELECT generation_id FROM index_generations WHERE status = 'active' ORDER BY created_at_utc DESC LIMIT 1"
+                ).fetchone()
+            if gen is None:
+                return 0, []
+            gen_id = gen["generation_id"]
             total = conn.execute(
                 "SELECT COUNT(*) FROM rejected_records WHERE generation_id = ?", (gen_id,)
             ).fetchone()[0]

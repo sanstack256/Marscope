@@ -15,9 +15,14 @@ from app.science.composition.models import (
     EvidenceType,
     RankingConfiguration,
     RankingDimensions,
+    RelativeUncertaintySummary,
     SearchMatchType,
 )
-from app.science.composition.uncertainty import evaluate_uncertainty_compatibility
+from app.science.composition.uncertainty import (
+    evaluate_uncertainty_compatibility,
+    get_uncertainty_spec,
+    normalize_uncertainty_unit,
+)
 
 # Authoritative Mars IAU2000 ellipsoidal geodesic calculator
 MARS_GEOD = Geod(a=MARS_EQUATORIAL_RADIUS_M, b=MARS_POLAR_RADIUS_M)
@@ -42,6 +47,83 @@ def mars_geodesic_distance_and_bearing(
     return float(dist_m), float(bearing)
 
 
+def compute_relative_uncertainty(ev: CompositionEvidence) -> RelativeUncertaintySummary:
+    """
+    Compute derived relative_uncertainty = uncertainty_value / normalized_value cleanly
+    ONLY when uncertainty & measurement are finite, positive measurement (> 0),
+    physically commensurable (identical physical concentration unit), and statistically
+    defined. Never converts relative uncertainty into a numerical quality score.
+    """
+    if ev.uncertainty_value is None or not math.isfinite(ev.uncertainty_value):
+        return RelativeUncertaintySummary(
+            available=False,
+            numerator_uncertainty=ev.uncertainty_value,
+            numerator_unit=ev.uncertainty_unit,
+            denominator_measurement=ev.normalized_value,
+            denominator_unit=ev.normalized_unit,
+            uncertainty_type=ev.uncertainty_type,
+            unavailable_reason="Source record reports no quantitative uncertainty value.",
+        )
+    if ev.normalized_value is None or not math.isfinite(ev.normalized_value) or ev.normalized_value <= 0.0:
+        return RelativeUncertaintySummary(
+            available=False,
+            numerator_uncertainty=ev.uncertainty_value,
+            numerator_unit=ev.uncertainty_unit,
+            denominator_measurement=ev.normalized_value,
+            denominator_unit=ev.normalized_unit,
+            uncertainty_type=ev.uncertainty_type,
+            unavailable_reason=(
+                "Measurement value is zero, negative, or missing; relative uncertainty "
+                "(uncertainty / measurement) is mathematically undefined."
+            ),
+        )
+    unc_unit_canon, unc_is_phys = normalize_uncertainty_unit(ev.uncertainty_unit)
+    norm_unit_canon, norm_is_phys = normalize_uncertainty_unit(ev.normalized_unit)
+    if not unc_is_phys or not norm_is_phys or unc_unit_canon != norm_unit_canon:
+        return RelativeUncertaintySummary(
+            available=False,
+            numerator_uncertainty=ev.uncertainty_value,
+            numerator_unit=ev.uncertainty_unit,
+            denominator_measurement=ev.normalized_value,
+            denominator_unit=ev.normalized_unit,
+            uncertainty_type=ev.uncertainty_type,
+            unavailable_reason=(
+                f"Uncertainty unit '{ev.uncertainty_unit or 'missing'}' is not physically commensurable "
+                f"with measurement unit '{ev.normalized_unit or 'missing'}'; ratio withheld."
+            ),
+        )
+    spec = get_uncertainty_spec(ev.uncertainty_type)
+    if not spec.allows_relative_uncertainty:
+        return RelativeUncertaintySummary(
+            available=False,
+            numerator_uncertainty=ev.uncertainty_value,
+            numerator_unit=unc_unit_canon,
+            denominator_measurement=ev.normalized_value,
+            denominator_unit=norm_unit_canon,
+            uncertainty_type=spec.uncertainty_type,
+            statistical_interpretation=spec.statistical_interpretation,
+            unavailable_reason=(
+                f"Uncertainty type '{spec.uncertainty_type}' lacks a validated statistical scale "
+                f"({spec.coverage_confidence_level}); relative uncertainty withheld."
+            ),
+        )
+
+    ratio = round(float(ev.uncertainty_value) / float(ev.normalized_value), 6)
+    hist = list(ev.uncertainty_metadata.conversion_history) if ev.uncertainty_metadata else []
+    return RelativeUncertaintySummary(
+        available=True,
+        value=ratio,
+        percent=round(ratio * 100.0, 4),
+        numerator_uncertainty=float(ev.uncertainty_value),
+        numerator_unit=unc_unit_canon,
+        denominator_measurement=float(ev.normalized_value),
+        denominator_unit=norm_unit_canon,
+        uncertainty_type=spec.uncertainty_type,
+        statistical_interpretation=spec.statistical_interpretation,
+        conversion_history=hist,
+    )
+
+
 def compute_ranking_dimensions(
     ev: CompositionEvidence,
     match_type: SearchMatchType,
@@ -55,9 +137,8 @@ def compute_ranking_dimensions(
     """
     Compute deterministic, explicitly heuristic exploration-priority ranking components.
 
-    Never fabricates quality scores from unquantified text flags, never assigns a cross-instrument
-    quality score across incompatible statistical uncertainty definitions, and never invents default
-    corroboration (None when single observation).
+    Never converts relative uncertainty into a numerical quality score, never treats unvalidated
+    uncertainty types as comparable, and never invents default corroboration.
     """
     cfg = config or DEFAULT_HEURISTIC_RANKING_CONFIG
     unavailable: List[str] = []
@@ -74,54 +155,30 @@ def compute_ranking_dimensions(
     else:
         tier = 0.50
 
-    # 2. Abundance normalized cleanly within observed result set
+    # 2. Abundance normalized cleanly within the compatible measurement category & unit scale
     abundance_comp: Optional[float] = None
     if ev.normalized_value is not None and math.isfinite(ev.normalized_value):
-        val = float(ev.normalized_value)
-        if ev.normalized_unit == "ppm":
-            val_wt = val / 10000.0
-            max_wt = max(max_observed_abundance / 10000.0, 1e-6)
-        else:
-            val_wt = val
-            max_wt = max(max_observed_abundance, 1e-6)
-        abundance_comp = round(min(1.0, max(0.0, val_wt / max_wt)), 4) if max_wt > 0 else 0.0
+        val_num = float(ev.normalized_value)
+        max_num = max(float(max_observed_abundance), 1e-6)
+        abundance_comp = round(min(1.0, max(0.0, val_num / max_num)), 4) if max_num > 0 else 0.0
     else:
-        val = 0.0
         unavailable.append("abundance_component")
 
-    # 3. Statistical uncertainty precision contribution (strict compatibility check)
-    # Never conflate RMSEP, APXS analytical precision, ChemCam shot stdev, CheMin 2-sigma, or text flags.
+    # 3. Quality scoring strictly withheld (no calibrated quality model exists); evaluate compatibility + relative uncertainty separately
     quality_comp: Optional[float] = None
-    compatible_unc, compat_status, compat_reason = evaluate_uncertainty_compatibility(
+    _, compat_status, compat_reason = evaluate_uncertainty_compatibility(
         ev.uncertainty_type,
         ev.uncertainty_value,
         cohort_uncertainty_types=cohort_uncertainty_types,
     )
-    if (
-        compatible_unc
-        and ev.uncertainty_value is not None
-        and ev.normalized_value is not None
-        and ev.normalized_value > 0
-    ):
-        unc_unit = (ev.uncertainty_unit or ev.normalized_unit or "").strip().lower()
-        val_unit = (ev.normalized_unit or "").strip().lower()
-        if unc_unit == val_unit:
-            rel_err = float(ev.uncertainty_value) / float(ev.normalized_value)
-            quality_comp = round(max(0.05, min(1.0, 1.0 - min(0.95, rel_err))), 4)
-        else:
-            compat_status = "unit_mismatch_with_normalized_value"
-            compat_reason = (
-                f"Uncertainty unit '{ev.uncertainty_unit}' differs from normalized abundance unit "
-                f"'{ev.normalized_unit}'; quality_component withheld."
-            )
-            unavailable.append("quality_component")
-    else:
-        if ev.quality_flag and compat_status == "unreported":
-            compat_reason = (
-                f"Qualitative flag '{ev.quality_flag}' without compatible quantitative uncertainty "
-                "cannot be converted into a numeric quality score; quality_component withheld."
-            )
-        unavailable.append("quality_component")
+    rel_unc = compute_relative_uncertainty(ev)
+    unavailable.append("quality_component")
+    quality_reason = (
+        "Numerical quality scoring withheld: no independently validated measurement-quality model exists "
+        "(relative_uncertainty is reported separately when valid and is never mapped to quality)."
+    )
+    if compat_reason:
+        quality_reason += f" {compat_reason}"
 
     # 4. Multi-instrument / repeated observation corroboration (None when only 1 observation exists)
     n_inst = len(set(corroborating_instruments))
@@ -144,17 +201,15 @@ def compute_ranking_dimensions(
     else:
         unavailable.append("spatial_proximity_component")
 
-    # Weighted linear sum re-normalized across available components only
+    # Weighted linear sum re-normalized solely across justified heuristic dimensions (never includes quality)
     w = cfg.weights
     active_terms: List[Tuple[str, float, float]] = [
-        ("evidence_tier", float(w.get("evidence_tier", 0.35)), round(tier, 4))
+        ("evidence_tier", float(w.get("evidence_tier", 0.40)), round(tier, 4))
     ]
     if abundance_comp is not None:
-        active_terms.append(("abundance", float(w.get("abundance", 0.25)), abundance_comp))
-    if quality_comp is not None:
-        active_terms.append(("quality", float(w.get("quality", 0.15)), quality_comp))
+        active_terms.append(("abundance", float(w.get("abundance", 0.30)), abundance_comp))
     if corrob_comp is not None:
-        active_terms.append(("corroboration", float(w.get("corroboration", 0.15)), corrob_comp))
+        active_terms.append(("corroboration", float(w.get("corroboration", 0.20)), corrob_comp))
     if prox_comp is not None:
         active_terms.append(("spatial_proximity", float(w.get("spatial_proximity", 0.10)), prox_comp))
 
@@ -166,21 +221,25 @@ def compute_ranking_dimensions(
     formula_parts = [f"{round(weight / weight_sum, 3)}*{name}" for name, weight, _ in active_terms] if weight_sum > 0 else []
     formula = f"[{cfg.ranking_config_id} v{cfg.ranking_config_version} HEURISTIC] " + " + ".join(formula_parts)
     if unavailable:
-        formula += f" (unreported/excluded: {', '.join(unavailable)})"
+        formula += f" (withheld/unavailable: {', '.join(unavailable)})"
 
     val_str = f"{ev.normalized_value:.3g} {ev.normalized_unit}" if ev.normalized_value is not None else "N/A"
     err_str = (
-        f" +/- {ev.uncertainty_value:.3g} {ev.uncertainty_unit or ''} ({ev.uncertainty_type or 'unknown'})"
+        f" +/- {ev.uncertainty_value:.3g} {ev.uncertainty_unit or 'unitless'} ({ev.uncertainty_type or 'unknown'})"
         if ev.uncertainty_value is not None
         else " (uncertainty unreported)"
     )
+    rel_str = (
+        f" [rel_unc={rel_unc.percent:.2f}%]"
+        if rel_unc.available and rel_unc.percent is not None
+        else ""
+    )
     dist_str = f"; {distance_m:.0f} m geodesic from astronaut" if distance_m is not None else ""
     rationale = (
-        f"[Heuristic priority only — NOT probability/certainty] {ev.instrument_id} {ev.canonical_species_id}={val_str}{err_str} "
+        f"[Heuristic priority only — NOT scientific confidence or calibrated quality] "
+        f"{ev.instrument_id} {ev.canonical_species_id}={val_str}{err_str}{rel_str} "
         f"({match_type.value}); {n_inst} instrument(s), {nearby_count} obs at cluster{dist_str}."
     )
-    if compat_reason and quality_comp is None:
-        rationale += f" {compat_reason}"
 
     return RankingDimensions(
         ranking_config_id=cfg.ranking_config_id,
@@ -191,7 +250,8 @@ def compute_ranking_dimensions(
         abundance_component=abundance_comp,
         quality_component=quality_comp,
         uncertainty_compatibility_status=compat_status,
-        quality_exclusion_reason=compat_reason if quality_comp is None else None,
+        quality_exclusion_reason=quality_reason,
+        relative_uncertainty=rel_unc,
         corroboration_component=corrob_comp,
         spatial_proximity_component=prox_comp,
         composite_rank_score=composite_score,

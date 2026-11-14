@@ -6,6 +6,7 @@ Martian Surface Intelligence & Exploration System
 import json
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, status
+from app.science.composition.index import CompositionSpatialIndex
 from app.science.composition.models import (
     CompositionEvidence,
     CompositionIndexStatus,
@@ -82,7 +83,13 @@ async def search_composition_structured(req: StructuredCompositionQuery) -> Stru
                     "astronaut_longitude": pos.longitude,
                 }
             )
-    return composition_search_service.search(req)
+    try:
+        return composition_search_service.search(req)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get("/evidence/{evidence_id}", response_model=CompositionEvidence)
@@ -114,20 +121,24 @@ async def list_rejected_composition_records(
 
 @router.get("/reproducibility-manifest")
 async def get_reproducibility_manifest() -> Dict[str, Any]:
-    """Return the active deterministic build reproducibility manifest for all ingested NASA PDS artifacts."""
-    manifest_path = INDEX_DIR / "reproducibility_manifest.json"
-    if not manifest_path.exists():
+    """
+    Return the cryptographically authenticated reproducibility manifest resolved through
+    the active generation pointer (`complete_manifest_digest` + DB + pointer verified).
+    """
+    target_idx = (
+        composition_index
+        if INDEX_DIR == composition_index.db_path.parent
+        else CompositionSpatialIndex(INDEX_DIR / "composition_index.sqlite")
+    )
+    try:
+        return target_idx.get_authenticated_manifest()
+    except LookupError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Reproducibility manifest unavailable; rebuild composition index first.",
-        )
-    try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            raise ValueError("Manifest root JSON is not an object.")
-        return payload
-    except Exception as exc:
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Reproducibility manifest is invalid or corrupted: {exc}",
+            detail=f"Reproducibility manifest authentication failed: {exc}",
         ) from exc

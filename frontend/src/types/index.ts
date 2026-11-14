@@ -412,15 +412,45 @@ export type GenerationBuildStatus =
   | "partial"
   | "failed";
 
+export type MeasurementCategory =
+  | "direct_elemental_concentration"
+  | "oxide_derived_elemental_concentration"
+  | "direct_oxide_concentration"
+  | "mineral_weight_percent"
+  | "mineral_group_membership_evidence";
+
 export interface UncertaintyMetadata {
   reported_value?: number | null;
   reported_unit?: string | null;
+  normalized_value?: number | null;
+  normalized_unit?: string | null;
+  is_physical_unit?: boolean;
+  source_field_name?: string | null;
+  source_data_type?: string | null;
+  schema_identity?: string | null;
   uncertainty_type: string;
   statistical_interpretation: string;
   coverage_confidence_level: string;
   source_definition: string;
   source_product: string;
   conversion_history?: string[];
+  limitations?: string[];
+}
+
+export interface RelativeUncertaintySummary {
+  available: boolean;
+  value?: number | null;
+  percent?: number | null;
+  numerator_uncertainty?: number | null;
+  numerator_unit?: string | null;
+  denominator_measurement?: number | null;
+  denominator_unit?: string | null;
+  uncertainty_type?: string | null;
+  statistical_interpretation?: string | null;
+  conversion_history?: string[];
+  calculation_formula: string;
+  calculation_version: string;
+  unavailable_reason?: string | null;
 }
 
 export interface SourceArtifactRecord {
@@ -546,6 +576,7 @@ export interface RankingDimensions {
   unavailable_dimensions?: string[];
   uncertainty_compatibility_status?: string;
   quality_exclusion_reason?: string | null;
+  relative_uncertainty?: RelativeUncertaintySummary | null;
   score_formula: string;
   rationale: string;
 }
@@ -553,6 +584,7 @@ export interface RankingDimensions {
 export interface RankedCompositionHit {
   evidence: CompositionEvidence;
   match_type: string;
+  measurement_category?: MeasurementCategory | null;
   match_explanation: string;
   distance_from_astronaut_m?: number | null;
   bearing_deg?: number | null;
@@ -615,8 +647,18 @@ export interface CompositionIndexStatus {
   index_available: boolean;
   integrity_status?: IntegrityStatus;
   generation_build_status?: GenerationBuildStatus;
+  source_integrity_status?: IntegrityStatus;
+  manifest_integrity_status?: IntegrityStatus;
+  pointer_integrity_status?: IntegrityStatus;
+  database_integrity_status?: IntegrityStatus;
   active_generation_id?: string | null;
+  previous_successful_generation_id?: string | null;
+  incomplete_staging_generations?: string[];
+  source_artifact_digest?: string | null;
+  complete_manifest_digest?: string | null;
   built_at_utc?: string | null;
+  publication_timestamp_utc?: string | null;
+  pointer_path?: string | null;
   total_validated_evidence: number;
   located_evidence_count: number;
   unlocated_evidence_count: number;
@@ -662,6 +704,11 @@ export interface ReproducibilityManifest {
   generation_build_status?: GenerationBuildStatus;
   discovery_scope?: string;
   built_at_utc?: string;
+  publication_timestamp_utc?: string;
+  publication_nonce?: string;
+  previous_successful_generation_id?: string | null;
+  source_artifact_digest?: string;
+  complete_manifest_digest?: string;
   source_manifest_checksum?: string;
   determinism_version: string;
   validation_pipeline_version?: string;
@@ -709,6 +756,9 @@ export interface CompositionSearchResponse {
   index_available: boolean;
   total_matches: number;
   unlocated_matches_count: number;
+  measurement_categories_present?: MeasurementCategory[];
+  grouped_counts_by_measurement_category?: Record<string, number>;
+  applied_filter_scope_note?: string | null;
   results: Record<string, unknown>[];
   hits: RankedCompositionHit[];
   candidate_locations: CandidateDiscoveryLocation[];
