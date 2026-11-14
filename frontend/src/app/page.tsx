@@ -1,198 +1,269 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import Image from "next/image";
-import { PageHeader } from "../components/PageHeader";
-import { StatusCard } from "../components/StatusCard";
-import { EmptyState } from "../components/EmptyState";
 import {
-  Globe2,
+  Activity,
+  ArrowRight,
   Compass,
+  Database,
+  Globe2,
+  Layers,
   Mountain,
   Telescope,
-  Thermometer,
-  Gauge,
-  Radiation,
-  Layers,
-  ArrowRight,
 } from "lucide-react";
-import { STUDY_AREA_NAME, MARS_FACTS } from "../lib/constants";
+import { PageHeader } from "../components/PageHeader";
+import { StatusBadge } from "../components/StatusBadge";
+import { API_BASE_URL } from "../lib/constants";
+import {
+  Dataset,
+  LayerCatalogResponse,
+  LocalizationStatusResponse,
+  Observation,
+  SystemHealth,
+  TerrainSummaryResponse,
+} from "../types";
 
 export default function MissionOverviewPage() {
+  const [health, setHealth] = useState<SystemHealth | null>(null);
+  const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [layers, setLayers] = useState<LayerCatalogResponse | null>(null);
+  const [terrain, setTerrain] = useState<TerrainSummaryResponse | null>(null);
+  const [observations, setObservations] = useState<Observation[]>([]);
+  const [localization, setLocalization] = useState<LocalizationStatusResponse | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    async function loadOverview() {
+      setLoading(true);
+      setError(null);
+      try {
+        const [hRes, dRes, lRes, tRes, oRes, locRes] = await Promise.all([
+          fetch(`${API_BASE_URL}/health`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/datasets`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/layers`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/terrain/summary`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/observations`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/localization/status`, { cache: "no-store" }),
+        ]);
+
+        if (!active) return;
+
+        if (hRes.ok) setHealth(await hRes.json());
+        if (dRes.ok) setDatasets(await dRes.json());
+        if (lRes.ok) setLayers(await lRes.json());
+        if (tRes.ok) setTerrain(await tRes.json());
+        if (oRes.ok) setObservations(await oRes.json());
+        if (locRes.ok) setLocalization(await locRes.json());
+      } catch (err) {
+        if (active) {
+          setError(err instanceof Error ? err.message : "Failed to connect to MARSCOPE backend");
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+    loadOverview();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const downloadedCount = datasets.filter(
+    (d) => d.verification?.download_verification === "verified"
+  ).length;
+  const processedCount = datasets.filter(
+    (d) => d.verification?.processing_verification === "verified"
+  ).length;
+
   return (
-    <div className="space-y-8 max-w-7xl mx-auto">
+    <div className="space-y-6">
       <PageHeader
-        title="Mission Command Overview"
-        badge="Gale Crater Basin"
-        description="Martian Surface Intelligence & Exploration System — Surface operations context, atmospheric conditions & quick-start traversal controls."
+        title="Mission Overview"
+        badge={health ? `Backend ${health.version}` : "Connecting..."}
+        description="Martian Surface Intelligence & Exploration System. Operational indicators below reflect only verified catalog state, local raster products, and live service telemetry."
         actions={
-          <div className="flex items-center gap-3">
-            <Link
-              href="/explorer"
-              className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-[#161c2b] hover:bg-[#1f273b] border border-[#252f44] text-xs font-semibold text-slate-200 transition-colors"
-            >
-              <Globe2 className="w-3.5 h-3.5 text-cyan-400" />
-              <span>3D Surface Globe</span>
-            </Link>
-            <Link
-              href="/planner"
-              className="flex items-center gap-2 px-3.5 py-2 rounded-lg bg-[#e25b38] hover:bg-[#f16f4d] text-white text-xs font-semibold tracking-wide transition-all shadow-[0_0_15px_rgba(226,91,56,0.3)]"
-            >
-              <Compass className="w-3.5 h-3.5" />
-              <span>Plan Marswalk Route</span>
-            </Link>
-          </div>
+          <Link
+            href="/explorer"
+            className="flex items-center gap-2 text-xs font-semibold px-3.5 py-2 rounded-lg bg-[#e25b38] hover:bg-[#cf4f2e] text-white transition-colors"
+          >
+            <Globe2 className="w-4 h-4" />
+            <span>Open Mars Surface Explorer</span>
+          </Link>
         }
       />
 
-      {/* Atmospheric & Environmental Indicators */}
+      {error && (
+        <div className="p-4 rounded-xl bg-red-950/40 border border-red-800/50 text-xs text-red-200">
+          Backend API Error: {error}
+        </div>
+      )}
+
+      {/* Live Telemetry / Readiness Cards (Zero hardcoded facts) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatusCard
-          label="Atmospheric Pressure"
-          value={MARS_FACTS.ATM_PRESSURE_PA}
-          unit="Pa"
-          subValue="REMS In-Situ Sensor Baseline"
-          icon={Gauge}
-          badge="Nominal"
-        />
-        <StatusCard
-          label="Surface Temperature"
-          value={MARS_FACTS.SURFACE_TEMP_K}
-          unit="K (-58°C)"
-          subValue="Diurnal Mean at Gale Crater"
-          icon={Thermometer}
-        />
-        <StatusCard
-          label="Surface Gravity"
-          value={MARS_FACTS.GRAVITY_M_S2}
-          unit="m/s²"
-          subValue="0.379g Earth Equivalent"
-          icon={Mountain}
-        />
-        <StatusCard
-          label="Cosmic Radiation Dose"
-          value="0.21"
-          unit="mSv/day"
-          subValue="MSL RAD In-Situ Baseline"
-          icon={Radiation}
-        />
-      </div>
-
-      {/* Exploration Region Dossier */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 bg-[#121622] border border-[#1e2638] rounded-xl p-6 relative overflow-hidden">
-          <div className="relative z-10 flex items-center justify-between pb-4 border-b border-[#1e2638]">
-            <div>
-              <div className="text-[11px] font-mono text-[#e25b38] uppercase tracking-wider">Target Exploration Zone</div>
-              <h2 className="text-lg font-bold text-slate-100 mt-0.5">{STUDY_AREA_NAME}</h2>
-            </div>
-            <span className="px-2.5 py-1 rounded text-xs font-mono bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-              {MARS_FACTS.CRS}
-            </span>
+        <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-4 space-y-2">
+          <div className="flex items-center justify-between text-xs text-slate-400">
+            <span className="font-semibold uppercase tracking-wider">API Status</span>
+            <Activity className="w-4 h-4 text-[#38bdf8]" />
           </div>
-
-          <p className="relative z-10 text-xs text-slate-300 mt-4 leading-relaxed">
-            The boxwork structures on Mount Sharp (Aeolis Mons) represent mineralized fracture networks formed by ancient subsurface groundwater circulation. As wind erosion removed the surrounding softer bedrock over billions of years, these cemented veins were left standing in positive relief. MARSCOPE calculates traversability across these ridges while maximizing scientific target acquisition.
-          </p>
-
-          <div className="relative z-10 grid grid-cols-2 sm:grid-cols-4 gap-4 mt-6 pt-4 border-t border-[#1a2130]">
-            <div>
-              <div className="text-[10px] font-mono uppercase text-slate-500">Min Latitude</div>
-              <div className="text-sm font-mono font-bold text-slate-200 mt-0.5">-5.5° S</div>
-            </div>
-            <div>
-              <div className="text-[10px] font-mono uppercase text-slate-500">Max Latitude</div>
-              <div className="text-sm font-mono font-bold text-slate-200 mt-0.5">-4.3° S</div>
-            </div>
-            <div>
-              <div className="text-[10px] font-mono uppercase text-slate-500">Min Longitude</div>
-              <div className="text-sm font-mono font-bold text-slate-200 mt-0.5">137.2° E</div>
-            </div>
-            <div>
-              <div className="text-[10px] font-mono uppercase text-slate-500">Max Longitude</div>
-              <div className="text-sm font-mono font-bold text-slate-200 mt-0.5">138.0° E</div>
-            </div>
+          <div className="text-xl font-bold font-mono text-slate-100">
+            {loading ? "..." : health ? health.status.toUpperCase() : "UNREACHABLE"}
           </div>
-
-          <Image
-            src="/marscope-logo.png"
-            alt=""
-            aria-hidden="true"
-            width={887}
-            height={329}
-            className="absolute bottom-0 right-4 w-64 h-auto opacity-15 pointer-events-none select-none"
-          />
-        </div>
-
-        {/* Quick System Navigation */}
-        <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-6 flex flex-col justify-between">
-          <div>
-            <h3 className="text-sm font-bold text-slate-200 mb-1">Core Workspaces</h3>
-            <p className="text-xs text-slate-400 mb-4">Direct shortcuts to active planetary intelligence systems:</p>
-            <div className="space-y-2">
-              <Link
-                href="/explorer"
-                className="flex items-center justify-between p-2.5 rounded-lg bg-[#161c2b] hover:bg-[#1c2437] text-xs text-slate-300 transition-colors border border-transparent hover:border-[#252f44]"
-              >
-                <div className="flex items-center gap-2.5">
-                  <Globe2 className="w-4 h-4 text-cyan-400" />
-                  <span>3D Mars Surface Explorer</span>
-                </div>
-                <ArrowRight className="w-3.5 h-3.5 text-slate-500" />
-              </Link>
-              <Link
-                href="/terrain"
-                className="flex items-center justify-between p-2.5 rounded-lg bg-[#161c2b] hover:bg-[#1c2437] text-xs text-slate-300 transition-colors border border-transparent hover:border-[#252f44]"
-              >
-                <div className="flex items-center gap-2.5">
-                  <Mountain className="w-4 h-4 text-amber-400" />
-                  <span>Terrain & Slope Intelligence</span>
-                </div>
-                <ArrowRight className="w-3.5 h-3.5 text-slate-500" />
-              </Link>
-              <Link
-                href="/targets"
-                className="flex items-center justify-between p-2.5 rounded-lg bg-[#161c2b] hover:bg-[#1c2437] text-xs text-slate-300 transition-colors border border-transparent hover:border-[#252f44]"
-              >
-                <div className="flex items-center gap-2.5">
-                  <Telescope className="w-4 h-4 text-emerald-400" />
-                  <span>Scientific Target Catalog</span>
-                </div>
-                <ArrowRight className="w-3.5 h-3.5 text-slate-500" />
-              </Link>
-              <Link
-                href="/planner"
-                className="flex items-center justify-between p-2.5 rounded-lg bg-[#161c2b] hover:bg-[#1c2437] text-xs text-slate-300 transition-colors border border-transparent hover:border-[#252f44]"
-              >
-                <div className="flex items-center gap-2.5">
-                  <Compass className="w-4 h-4 text-[#e25b38]" />
-                  <span>Route Optimization Engine</span>
-                </div>
-                <ArrowRight className="w-3.5 h-3.5 text-slate-500" />
-              </Link>
-            </div>
-          </div>
-
-          <div className="mt-4 pt-4 border-t border-[#1a2130] flex items-center justify-between text-[11px] text-slate-500">
-            <span>NASA Space Apps Challenge</span>
-            <span className="text-emerald-400 font-mono">100% OPEN DATA</span>
+          <div className="text-[11px] text-slate-400">
+            {health
+              ? `Physics: ${health.engines.physics} · Geo: ${health.engines.geospatial}`
+              : "Awaiting backend health check"}
           </div>
         </div>
-      </div>
 
-      {/* Surface Map Preview Skeleton */}
-      <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
+        <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-4 space-y-2">
+          <div className="flex items-center justify-between text-xs text-slate-400">
+            <span className="font-semibold uppercase tracking-wider">Map Layers</span>
             <Layers className="w-4 h-4 text-[#e25b38]" />
-            <h3 className="text-sm font-bold text-slate-200">Active Planetary Data Feeds</h3>
           </div>
-          <span className="text-[11px] font-mono text-slate-500">Pipeline Level: Initialized</span>
+          <div className="text-xl font-bold font-mono text-slate-100">
+            {layers ? `${layers.total_available} / ${layers.total_available + layers.total_unavailable}` : "--"}
+          </div>
+          <div className="text-[11px] text-slate-400">
+            {layers
+              ? `${layers.total_available} renderable · ${layers.total_unavailable} pending`
+              : "Querying /api/layers"}
+          </div>
         </div>
 
-        <EmptyState
-          title="Surface Map Viewport Initialized"
-          message="The 3D CesiumJS globe and MapLibre geospatial canvas are configured with the IAU2000 Mars datum. Connect to the backend ingestion service in Prompt 2 to stream high-resolution HiRISE, CTX, and MOLA tiles."
-          actionLabel="Launch Surface Explorer"
-        />
+        <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-4 space-y-2">
+          <div className="flex items-center justify-between text-xs text-slate-400">
+            <span className="font-semibold uppercase tracking-wider">Validated DEM</span>
+            <Mountain className="w-4 h-4 text-emerald-400" />
+          </div>
+          <div className="text-xl font-bold font-mono text-slate-100">
+            {terrain === null ? "--" : terrain.available && terrain.summary ? `${terrain.summary.resolution_meters_per_pixel.toFixed(0)} m/px` : "UNAVAILABLE"}
+          </div>
+          <div className="text-[11px] text-slate-400 truncate">
+            {terrain?.available && terrain.summary
+              ? `${terrain.summary.source_product_id || terrain.summary.source_dem_id}`
+              : "No processed local DEM yet"}
+          </div>
+        </div>
+
+        <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-4 space-y-2">
+          <div className="flex items-center justify-between text-xs text-slate-400">
+            <span className="font-semibold uppercase tracking-wider">Observations & Pos</span>
+            <Telescope className="w-4 h-4 text-amber-400" />
+          </div>
+          <div className="text-xl font-bold font-mono text-slate-100">
+            {observations.length} parsed
+          </div>
+          <div className="text-[11px] text-slate-400 truncate">
+            {localization?.current_position
+              ? `Manual Pos: ${localization.current_position.latitude?.toFixed(2)}°, ${localization.current_position.longitude?.toFixed(2)}°`
+              : "Live Localization: Unavailable"}
+          </div>
+        </div>
+      </div>
+
+      {/* Dataset Pipeline Readiness */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        <div className="lg:col-span-2 bg-[#121622] border border-[#1e2638] rounded-xl p-5 space-y-4">
+          <div className="flex items-center justify-between border-b border-[#1e2638] pb-3">
+            <div>
+              <h2 className="text-sm font-bold text-slate-100">Dataset Verification & Processing Readiness</h2>
+              <p className="text-xs text-slate-400">
+                {datasets.length} discovered · {downloadedCount} downloaded locally · {processedCount} processed into terrain products
+              </p>
+            </div>
+            <Link
+              href="/evidence"
+              className="text-xs font-medium text-[#38bdf8] hover:underline flex items-center gap-1"
+            >
+              <span>Manage Pipeline</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </Link>
+          </div>
+
+          <div className="space-y-2.5">
+            {datasets.map((ds) => (
+              <div
+                key={ds.id}
+                className="p-3 rounded-lg bg-[#0e121b] border border-[#1c2436] flex flex-wrap items-center justify-between gap-3"
+              >
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-slate-100 truncate">{ds.product_title}</div>
+                  <div className="text-[11px] font-mono text-slate-400">
+                    {ds.product_id} · {ds.source_archive} · {ds.license}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <StatusBadge
+                    status={ds.verification?.download_verification === "verified" ? "verified" : "unverified"}
+                    label={`DL: ${ds.verification?.download_verification || "unverified"}`}
+                  />
+                  <StatusBadge
+                    status={ds.verification?.processing_verification === "verified" ? "verified" : "unverified"}
+                    label={`Proc: ${ds.verification?.processing_verification || "unverified"}`}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Honest Subsystems Navigation */}
+        <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-5 space-y-3">
+          <h2 className="text-sm font-bold text-slate-100 border-b border-[#1e2638] pb-3">
+            Exploration Workflows
+          </h2>
+          <Link
+            href="/explorer"
+            className="block p-3 rounded-lg bg-[#161c2b] hover:bg-[#1c2438] border border-[#242e44] transition-colors"
+          >
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-100">
+              <Globe2 className="w-4 h-4 text-[#e25b38]" />
+              <span>Interactive 3D Mars Explorer</span>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1">
+              Inspect global orbital imagery, DEM overlays, coordinates, and localization providers.
+            </p>
+          </Link>
+          <Link
+            href="/evidence"
+            className="block p-3 rounded-lg bg-[#161c2b] hover:bg-[#1c2438] border border-[#242e44] transition-colors"
+          >
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-100">
+              <Database className="w-4 h-4 text-[#38bdf8]" />
+              <span>Evidence & NASA Acquisition</span>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1">
+              Verify remote capabilities, download PDS3/WMTS products, and compute DEM derivatives.
+            </p>
+          </Link>
+          <Link
+            href="/terrain"
+            className="block p-3 rounded-lg bg-[#161c2b] hover:bg-[#1c2438] border border-[#242e44] transition-colors"
+          >
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-100">
+              <Mountain className="w-4 h-4 text-emerald-400" />
+              <span>Terrain & Slope Intelligence</span>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1">
+              Review real DEM statistics, aspect distributions, and resolution-aware TRI roughness.
+            </p>
+          </Link>
+          <Link
+            href="/settings"
+            className="block p-3 rounded-lg bg-[#161c2b] hover:bg-[#1c2438] border border-[#242e44] transition-colors"
+          >
+            <div className="flex items-center gap-2 text-xs font-semibold text-slate-100">
+              <Compass className="w-4 h-4 text-amber-400" />
+              <span>Traceable Physics Constants</span>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1">
+              Inspect NASA GSFC / MSL parameter registry entries and run surface physics models.
+            </p>
+          </Link>
+        </div>
       </div>
     </div>
   );

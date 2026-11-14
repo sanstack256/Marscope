@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
@@ -15,7 +16,8 @@ import {
   Settings,
   ChevronRight,
 } from "lucide-react";
-import { APP_NAME } from "../lib/constants";
+import { APP_NAME, API_BASE_URL } from "../lib/constants";
+import { useLayerStore } from "../stores/useLayerStore";
 
 const ICON_MAP: Record<string, React.ElementType> = {
   "/": LayoutDashboard,
@@ -34,7 +36,7 @@ const NAV_LINKS = [
   { name: "Surface Explorer", href: "/explorer", badge: "3D" },
   { name: "Terrain Intelligence", href: "/terrain" },
   { name: "Target Explorer", href: "/targets" },
-  { name: "Route Planner", href: "/planner", badge: "Core" },
+  { name: "Route Planner", href: "/planner", badge: "Config" },
   { name: "Route Comparison", href: "/routes" },
   { name: "Mission Simulation", href: "/simulation" },
   { name: "Evidence & Provenance", href: "/evidence" },
@@ -43,6 +45,15 @@ const NAV_LINKS = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const { availableLayers, fetchLayers } = useLayerStore();
+  const [backendUp, setBackendUp] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    fetchLayers();
+    fetch(`${API_BASE_URL}/health`, { cache: "no-store" })
+      .then((res) => setBackendUp(res.ok))
+      .catch(() => setBackendUp(false));
+  }, [fetchLayers]);
 
   return (
     <aside className="w-64 bg-[#0d111a] border-r border-[#1e2638] flex flex-col shrink-0 select-none">
@@ -108,13 +119,17 @@ export function Sidebar() {
         })}
       </nav>
 
-      {/* Target Bounding Frame Footer */}
+      {/* Live System Status Footer */}
       <div className="p-4 border-t border-[#1e2638] bg-[#0a0d14]/70">
-        <div className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Active Study Area</div>
-        <div className="text-xs font-semibold text-slate-300 mt-0.5 truncate">Gale Crater / Mt Sharp</div>
+        <div className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Data Readiness</div>
+        <div className="text-xs font-semibold text-slate-300 mt-0.5 truncate">
+          {availableLayers.length} Renderable Layer{availableLayers.length === 1 ? "" : "s"}
+        </div>
         <div className="text-[10px] font-mono text-slate-500 mt-1 flex justify-between">
-          <span>CRS: IAU2000</span>
-          <span className="text-emerald-400">ONLINE</span>
+          <span>IAU2000:49900</span>
+          <span className={backendUp ? "text-emerald-400" : backendUp === false ? "text-red-400" : "text-amber-400"}>
+            {backendUp ? "API READY" : backendUp === false ? "API OFFLINE" : "CHECKING"}
+          </span>
         </div>
       </div>
     </aside>

@@ -21,16 +21,13 @@ export default function RoutePlannerPage() {
     <div className="space-y-6 max-w-7xl mx-auto">
       <PageHeader
         title="Mission & Route Planner"
-        badge="Constrained Graph Optimization"
-        description="Generates science-aware, human-aware Marswalk traverses. Optimizes scientific return subject to non-negotiable slope safety limits and a 1.5x return-to-base consumable reserve."
+        badge="Configurable Constraints"
+        description="Configure planning constraints (max duration, return reserve factor, critical slope limit). Route graph optimization activates once validated terrain cost grids and waypoints are selected."
         actions={
-          <button
-            onClick={() => alert("Route optimization engine will be wired in Prompt 3.")}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#e25b38] hover:bg-[#f16f4d] text-white text-xs font-semibold tracking-wide transition-all shadow-[0_0_15px_rgba(226,91,56,0.3)]"
-          >
-            <Play className="w-3.5 h-3.5" />
-            <span>Compute Marswalk Route</span>
-          </button>
+          <span className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#161c2b] border border-[#252f44] text-slate-300 text-xs font-mono">
+            <Play className="w-3.5 h-3.5 text-slate-400" />
+            <span>Requires Computed Terrain Graph</span>
+          </span>
         }
       />
 
@@ -105,11 +102,11 @@ export default function RoutePlannerPage() {
               </span>
             </div>
 
-            {/* Hard Invariant Notice */}
+            {/* Configurable Constraint Notice */}
             <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-300/90 flex items-start gap-2.5">
               <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
               <span>
-                <strong>Hard Safety Constraint:</strong> Slopes exceeding {maxSlopeLimitDeg}° cannot be overridden by high scientific target scores.
+                <strong>Configured Slope Threshold (Assumption):</strong> Traverse evaluation flags slopes exceeding {maxSlopeLimitDeg}°; no unvalidated model is labeled astronaut-safe.
               </span>
             </div>
           </div>

@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "sync-cesium": "node scripts/copy-cesium.mjs",
+    "predev": "node scripts/copy-cesium.mjs",
+    "prebuild": "node scripts/copy-cesium.mjs",
     "dev": "next dev --webpack",
     "build": "next build --webpack",
     "start": "next start",

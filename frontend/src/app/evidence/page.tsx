@@ -1,194 +1,277 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { CheckCircle2, Cpu, Database, Download, ExternalLink, RefreshCw, ShieldCheck } from "lucide-react";
 import { PageHeader } from "../../components/PageHeader";
-import { Database, ExternalLink, ShieldCheck, Clock } from "lucide-react";
+import { StatusBadge } from "../../components/StatusBadge";
+import { API_BASE_URL } from "../../lib/constants";
+import { Dataset, Observation, SourceRegistryEntry } from "../../types";
 
-interface DatasetRow {
-  name: string;
-  mission: string;
-  instrument: string;
-  purpose: string;
-  license: string;
-  coverage: string;
-  priority: string;
-  sourceUrl: string;
-}
+export default function EvidenceProvenancePage() {
+  const [sources, setSources] = useState<SourceRegistryEntry[]>([]);
+  const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [observations, setObservations] = useState<Observation[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [busyDatasetId, setBusyDatasetId] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-const DATASETS: DatasetRow[] = [
-  {
-    name: "HiRISE RDR Orthorectified Imagery",
-    mission: "MRO",
-    instrument: "HiRISE",
-    purpose: "Sub-meter optical terrain & visible boulder hazards",
-    license: "Verified Open (CC0)",
-    coverage: "Pending Verification",
-    priority: "P0",
-    sourceUrl: "https://www.uahirise.org/",
-  },
-  {
-    name: "HiRISE Digital Terrain Model (DTM)",
-    mission: "MRO",
-    instrument: "HiRISE Stereo",
-    purpose: "1-meter micro-topography for local slope & roughness",
-    license: "Verified Open (CC0)",
-    coverage: "Pending Verification",
-    priority: "P0",
-    sourceUrl: "https://pds-geosciences.wustl.edu/missions/mro/hirise.htm",
-  },
-  {
-    name: "CTX Controlled Mosaics",
-    mission: "MRO",
-    instrument: "CTX",
-    purpose: "6-meter regional optical context linking HiRISE swaths",
-    license: "Verified Open (CC0)",
-    coverage: "Verified Gale Basin",
-    priority: "P0",
-    sourceUrl: "https://ode.rsl.wustl.edu/mars/",
-  },
-  {
-    name: "MOLA MEGDR Topography (128 ppd)",
-    mission: "MGS",
-    instrument: "MOLA",
-    purpose: "Regional elevation datum & MOLA Areoid 0-datum",
-    license: "Verified Open (CC0)",
-    coverage: "Verified Global Gale",
-    priority: "P0",
-    sourceUrl: "https://pds-geosciences.wustl.edu/missions/mgs/megdr.html",
-  },
-  {
-    name: "CRISM Targeted Observations",
-    mission: "MRO",
-    instrument: "CRISM",
-    purpose: "Hyperspectral mineralogy: sulfates & phyllosilicates",
-    license: "Verified Open (CC0)",
-    coverage: "Pending Verification",
-    priority: "P1",
-    sourceUrl: "https://pds-geosciences.wustl.edu/missions/mro/crism.htm",
-  },
-  {
-    name: "MSL ChemCam LIBS / RMI",
-    mission: "MSL",
-    instrument: "ChemCam",
-    purpose: "In-situ elemental rock & vein chemistry assays",
-    license: "Verified Open (CC0)",
-    coverage: "Verified MSL Traverse",
-    priority: "P1",
-    sourceUrl: "https://pds-geosciences.wustl.edu/missions/msl/",
-  },
-  {
-    name: "MSL CheMin XRD Mineralogy",
-    mission: "MSL",
-    instrument: "CheMin",
-    purpose: "Quantitative mineral phase determinations",
-    license: "Verified Open (CC0)",
-    coverage: "Verified MSL Drill Holes",
-    priority: "P1",
-    sourceUrl: "https://pds-geosciences.wustl.edu/missions/msl/",
-  },
-  {
-    name: "MSL RAD Radiation Dosimetry",
-    mission: "MSL",
-    instrument: "RAD",
-    purpose: "Surface ionizing radiation dose rate logs",
-    license: "Verified Open (CC0)",
-    coverage: "Verified Mission Log",
-    priority: "P1",
-    sourceUrl: "https://pds-ppi.igpp.ucla.edu/",
-  },
-  {
-    name: "MSL REMS Environmental Sensor",
-    mission: "MSL",
-    instrument: "REMS",
-    purpose: "Diurnal atmospheric pressure, temperature & wind",
-    license: "Verified Open (CC0)",
-    coverage: "Verified Mission Log",
-    priority: "P1",
-    sourceUrl: "https://pds-atmospheres.nmsu.edu/",
-  },
-  {
-    name: "NASA Mars Trek WMTS Reference Tiles",
-    mission: "NASA Solar System Treks",
-    instrument: "Cartographic Pipeline",
-    purpose: "OGC WMTS rapid discovery and map visualization",
-    license: "Verified Open (US Govt Open)",
-    coverage: "Verified Global Mars",
-    priority: "P1",
-    sourceUrl: "https://trek.nasa.gov/tiles/apidoc/trekAPI.html?body=mars",
-  },
-];
+  async function refreshAll() {
+    setLoading(true);
+    setError(null);
+    try {
+      const [sRes, dRes, oRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/sources`, { cache: "no-store" }),
+        fetch(`${API_BASE_URL}/datasets`, { cache: "no-store" }),
+        fetch(`${API_BASE_URL}/observations`, { cache: "no-store" }),
+      ]);
+      if (sRes.ok) setSources(await sRes.json());
+      if (dRes.ok) setDatasets(await dRes.json());
+      if (oRes.ok) setObservations(await oRes.json());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch provenance records");
+    } finally {
+      setLoading(false);
+    }
+  }
 
-export default function EvidencePage() {
+  useEffect(() => {
+    let active = true;
+    async function init() {
+      try {
+        const [sRes, dRes, oRes] = await Promise.all([
+          fetch(`${API_BASE_URL}/sources`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/datasets`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/observations`, { cache: "no-store" }),
+        ]);
+        if (!active) return;
+        if (sRes.ok) setSources(await sRes.json());
+        if (dRes.ok) setDatasets(await dRes.json());
+        if (oRes.ok) setObservations(await oRes.json());
+      } catch (err) {
+        if (active) setError(err instanceof Error ? err.message : "Failed to fetch provenance records");
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+    void init();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function runDatasetAction(datasetId: string, action: "verify-remote" | "download" | "validate" | "process") {
+    setBusyDatasetId(datasetId);
+    setActionMessage(null);
+    setError(null);
+    try {
+      const url =
+        action === "process"
+          ? `${API_BASE_URL}/datasets/${encodeURIComponent(datasetId)}/process`
+          : `${API_BASE_URL}/datasets/${encodeURIComponent(datasetId)}/${action}`;
+      const res = await fetch(url, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.detail || `HTTP ${res.status} running ${action} on ${datasetId}`);
+      }
+      setActionMessage(`${action.toUpperCase()} completed for ${datasetId}: ${data.message || data.status || "OK"}`);
+      await refreshAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Action ${action} failed`);
+    } finally {
+      setBusyDatasetId(null);
+    }
+  }
+
+  async function runDiscoverSources() {
+    setLoading(true);
+    setActionMessage(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/datasets/discover`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status} discovering sources`);
+      const discovered = await res.json();
+      setActionMessage(`Refreshed catalog from NASA source adapters (${discovered.length} records).`);
+      await refreshAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Source discovery failed");
+      setLoading(false);
+    }
+  }
+
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
+    <div className="space-y-6">
       <PageHeader
-        title="Data Sources, Evidence & Provenance Ledger"
-        badge="Open Science Compliance"
-        description="Authoritative planetary dataset register. Every layer, observation, and calculation in MARSCOPE is tracked back to its original NASA/ESA archive, processing level, and open license."
+        title="Evidence, Sources & Ingestion Pipeline"
+        badge={`${sources.length} NASA Sources · ${datasets.length} Products`}
+        description="Live verification matrix separating Archive Availability, Discovery, Metadata, License, Coverage, Download, and Processing state. Execute remote probes, product downloads, and DEM processing directly."
+        actions={
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={runDiscoverSources}
+              disabled={loading}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#161c2b] hover:bg-[#1e263b] border border-[#252f44] text-xs font-medium text-slate-200 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+              <span>Re-Discover Catalog</span>
+            </button>
+          </div>
+        }
       />
 
-      <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-6">
-        <div className="flex items-center justify-between pb-4 border-b border-[#1e2638] mb-4">
-          <div className="flex items-center gap-2">
-            <Database className="w-4 h-4 text-[#e25b38]" />
-            <h2 className="text-sm font-bold text-slate-200">NASA & International Planetary Product Register</h2>
-          </div>
-          <span className="text-[11px] font-mono text-emerald-400">100% Free & Open Access</span>
+      {error && (
+        <div className="p-3.5 rounded-xl bg-red-950/40 border border-red-800/50 text-xs text-red-200">
+          {error}
+        </div>
+      )}
+
+      {actionMessage && (
+        <div className="p-3.5 rounded-xl bg-emerald-950/40 border border-emerald-700/50 text-xs text-emerald-200 flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 shrink-0" />
+          <span>{actionMessage}</span>
+        </div>
+      )}
+
+      {/* Source Registry Verification Breakdown */}
+      <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-5 space-y-4">
+        <div className="flex items-center gap-2 text-sm font-bold text-slate-100 border-b border-[#1e2638] pb-3">
+          <ShieldCheck className="w-4 h-4 text-[#38bdf8]" />
+          <span>Authoritative NASA Source Verification Matrix</span>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead>
-              <tr className="border-b border-[#1e2638] text-[10px] font-mono uppercase text-slate-500">
-                <th className="pb-3 font-semibold">Dataset / Instrument</th>
-                <th className="pb-3 font-semibold">Mission</th>
-                <th className="pb-3 font-semibold">Primary Purpose</th>
-                <th className="pb-3 font-semibold">License Status</th>
-                <th className="pb-3 font-semibold">Gale Coverage</th>
-                <th className="pb-3 font-semibold">Priority</th>
-                <th className="pb-3 font-semibold text-right">Archive Source</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[#182030] text-slate-300">
-              {DATASETS.map((d, i) => (
-                <tr key={i} className="hover:bg-[#161c2b]/50 transition-colors">
-                  <td className="py-3 font-medium text-slate-200">
-                    <div>{d.name}</div>
-                    <div className="text-[10px] font-mono text-slate-500">{d.instrument}</div>
-                  </td>
-                  <td className="py-3 font-mono text-slate-400">{d.mission}</td>
-                  <td className="py-3 text-slate-400 max-w-xs">{d.purpose}</td>
-                  <td className="py-3">
-                    <span className="inline-flex items-center gap-1 text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                      <ShieldCheck className="w-3 h-3" />
-                      {d.license}
-                    </span>
-                  </td>
-                  <td className="py-3 font-mono text-[11px]">
-                    <span
-                      className={
-                        d.coverage.includes("Verified")
-                          ? "text-emerald-400"
-                          : "text-amber-400/90 flex items-center gap-1"
-                      }
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {sources.map((src) => (
+            <div key={src.source_name} className="p-4 rounded-xl bg-[#0d111a] border border-[#1d2536] space-y-2.5">
+              <div>
+                <div className="text-xs font-bold text-slate-100">{src.source_name}</div>
+                <div className="text-[10px] font-mono text-slate-500 truncate">{src.base_url}</div>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5 text-[10px]">
+                {Object.entries(src.verification_breakdown).map(([k, v]) => (
+                  <div key={k} className="flex items-center justify-between gap-1 bg-[#121622] px-2 py-1 rounded border border-[#1e2638]">
+                    <span className="text-slate-400 truncate">{k.replace("_verification", "").replace("_", " ")}</span>
+                    <StatusBadge status={v} />
+                  </div>
+                ))}
+              </div>
+              {src.evidence_notes.length > 0 && (
+                <div className="text-[10px] text-slate-400 pt-1 border-t border-[#1c2436] space-y-0.5">
+                  {src.evidence_notes.slice(0, 2).map((note, idx) => (
+                    <div key={idx} className="truncate" title={note}>
+                      • {note}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Discovered & Acquired Datasets Table */}
+      <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-5 space-y-4">
+        <div className="flex items-center justify-between border-b border-[#1e2638] pb-3">
+          <div className="flex items-center gap-2 text-sm font-bold text-slate-100">
+            <Database className="w-4 h-4 text-[#e25b38]" />
+            <span>Planetary Products ({datasets.length}) · Parsed Observations ({observations.length})</span>
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          {datasets.map((ds) => {
+            const busy = busyDatasetId === ds.id;
+            const isWmts = ds.data_format === "WMTS";
+            const isElevation =
+              ds.product_type.toUpperCase().includes("DEM") ||
+              ds.product_type.toUpperCase().includes("ELEVATION");
+            const downloaded = ds.verification?.download_verification === "verified";
+
+            return (
+              <div key={ds.id} className="p-4 rounded-xl bg-[#0d111a] border border-[#1d2536] space-y-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="space-y-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-bold text-slate-100">{ds.product_title}</span>
+                      <StatusBadge status={ds.status === "processed" || ds.status === "validated" ? "verified" : ds.status} label={ds.status} />
+                    </div>
+                    <div className="text-[11px] font-mono text-slate-400">
+                      ID: {ds.id} · Product: {ds.product_id} · {ds.data_format} · {ds.license} · Units: {ds.units}
+                    </div>
+                    <div className="text-[11px] text-slate-400">
+                      Coverage: Lat [{ds.coverage.min_latitude}°, {ds.coverage.max_latitude}°], Lon [{ds.coverage.min_longitude}°, {ds.coverage.max_longitude}°] ({ds.coverage.longitude_range}) · CRS: {ds.coordinate_reference_system || "Unknown"}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => runDatasetAction(ds.id, "verify-remote")}
+                      className="px-2.5 py-1.5 rounded-lg bg-[#161c2b] hover:bg-[#1e263b] border border-[#2a3650] text-[11px] font-medium text-slate-200 disabled:opacity-50"
                     >
-                      {d.coverage.includes("Pending") && <Clock className="w-3 h-3 inline" />}
-                      {d.coverage}
-                    </span>
-                  </td>
-                  <td className="py-3 font-mono text-xs">{d.priority}</td>
-                  <td className="py-3 text-right">
+                      Verify Remote
+                    </button>
+                    {!isWmts && (
+                      <>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => runDatasetAction(ds.id, "download")}
+                          className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#161c2b] hover:bg-[#1e263b] border border-[#2a3650] text-[11px] font-medium text-sky-200 disabled:opacity-50"
+                        >
+                          <Download className="w-3 h-3" />
+                          <span>{downloaded ? "Downloaded" : "Download"}</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busy || !downloaded}
+                          onClick={() => runDatasetAction(ds.id, "validate")}
+                          className="px-2.5 py-1.5 rounded-lg bg-[#161c2b] hover:bg-[#1e263b] border border-[#2a3650] text-[11px] font-medium text-emerald-200 disabled:opacity-40"
+                        >
+                          Validate
+                        </button>
+                      </>
+                    )}
+                    {isElevation && (
+                      <button
+                        type="button"
+                        disabled={busy || !downloaded}
+                        onClick={() => runDatasetAction(ds.id, "process")}
+                        className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#e25b38] hover:bg-[#cf4f2e] text-[11px] font-semibold text-white disabled:opacity-40"
+                      >
+                        <Cpu className="w-3 h-3" />
+                        <span>Process DEM</span>
+                      </button>
+                    )}
                     <a
-                      href={d.sourceUrl}
+                      href={ds.original_product_url}
                       target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-[11px] font-mono text-cyan-400 hover:text-cyan-300"
+                      rel="noreferrer"
+                      className="p-1.5 rounded-lg bg-[#161c2b] border border-[#252f44] text-slate-400 hover:text-slate-100"
+                      title="Open NASA archive product URL"
                     >
-                      <span>PDS Archive</span>
-                      <ExternalLink className="w-3 h-3" />
+                      <ExternalLink className="w-3.5 h-3.5" />
                     </a>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  </div>
+                </div>
+
+                {/* Separated 7-field Verification Strip */}
+                <div className="flex flex-wrap gap-1.5">
+                  <StatusBadge status={ds.verification.archive_availability} label={`Archive: ${ds.verification.archive_availability}`} />
+                  <StatusBadge status={ds.verification.product_discovery} label={`Discovery: ${ds.verification.product_discovery}`} />
+                  <StatusBadge status={ds.verification.metadata_verification} label={`Metadata: ${ds.verification.metadata_verification}`} />
+                  <StatusBadge status={ds.verification.license_verification} label={`License: ${ds.verification.license_verification}`} />
+                  <StatusBadge status={ds.verification.coverage_verification} label={`Coverage: ${ds.verification.coverage_verification}`} />
+                  <StatusBadge status={ds.verification.download_verification} label={`Download: ${ds.verification.download_verification}`} />
+                  <StatusBadge status={ds.verification.processing_verification} label={`Processed: ${ds.verification.processing_verification}`} />
+                </div>
+
+                {ds.failure_reason && (
+                  <div className="text-[11px] text-red-300 font-mono">Error: {ds.failure_reason}</div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

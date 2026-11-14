@@ -1,26 +1,33 @@
 """
 Central API Router Registry
 Martian Surface Intelligence & Exploration System
+
+Aggregates all domain sub-routers under the versioned /api namespace.
 """
 
 from fastapi import APIRouter
-from app.api.health import router as health_router
-from app.api.datasets import router as datasets_router
-from app.api.layers import router as layers_router
-from app.api.terrain import router as terrain_router
-from app.api.observations import router as observations_router
-from app.api.targets import router as targets_router
-from app.api.sources import router as sources_router
-from app.api.physics import router as physics_router
+from app.api import (
+    datasets,
+    destinations,
+    health,
+    layers,
+    localization,
+    observations,
+    physics,
+    sources,
+    targets,
+    terrain,
+)
 
 api_router = APIRouter(prefix="/api")
 
-# Register subsystem routers
-api_router.include_router(health_router)
-api_router.include_router(datasets_router)
-api_router.include_router(layers_router)
-api_router.include_router(terrain_router)
-api_router.include_router(observations_router)
-api_router.include_router(targets_router)
-api_router.include_router(sources_router)
-api_router.include_router(physics_router)
+api_router.include_router(health.router)
+api_router.include_router(datasets.router)
+api_router.include_router(terrain.router)
+api_router.include_router(layers.router)
+api_router.include_router(observations.router)
+api_router.include_router(targets.router)
+api_router.include_router(sources.router)
+api_router.include_router(physics.router)
+api_router.include_router(localization.router)
+api_router.include_router(destinations.router)

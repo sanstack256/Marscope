@@ -3,10 +3,11 @@ MARSCOPE Dataset Ingestion & Discovery Endpoints
 Martian Surface Intelligence & Exploration System
 """
 
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, status
-from app.schemas.dataset import Dataset, DatasetManifest, DatasetLifecycleStatus
-from app.services.container import catalog_service, acquisition_service
+from app.schemas.dataset import Dataset, DatasetLifecycleStatus, DatasetManifest
+from app.services.container import PROCESSED_DIR, RAW_DIR, acquisition_service, catalog_service
+from app.terrain.processor import DEMProcessingService
 
 router = APIRouter(prefix="/datasets", tags=["Dataset Catalog & Acquisition"])
 
@@ -15,12 +16,10 @@ router = APIRouter(prefix="/datasets", tags=["Dataset Catalog & Acquisition"])
 async def list_datasets(
     mission: Optional[str] = Query(None, description="Filter by mission name"),
     instrument: Optional[str] = Query(None, description="Filter by instrument name"),
-    product_type: Optional[str] = Query(None, description="Filter by product type (DEM, SPECTRUM, etc.)"),
+    product_type: Optional[str] = Query(None, description="Filter by product type"),
     status: Optional[DatasetLifecycleStatus] = Query(None, description="Filter by lifecycle status"),
 ) -> List[Dataset]:
-    """
-    List registered planetary datasets with optional faceted filtering.
-    """
+    """List registered planetary datasets with optional faceted filtering."""
     return catalog_service.list_datasets(
         mission=mission,
         instrument=instrument,
@@ -31,30 +30,38 @@ async def list_datasets(
 
 @router.post("/discover", response_model=List[Dataset])
 async def discover_datasets() -> List[Dataset]:
-    """
-    Poll official NASA/ESA archives (PDS MOLA, MSL Curiosity, Mars Trek) to discover verified planetary products.
-    """
+    """Poll official NASA/ESA source adapters to discover planetary products."""
     return catalog_service.discover_all_sources()
 
 
 @router.get("/{dataset_id}", response_model=Dataset)
 async def get_dataset(dataset_id: str) -> Dataset:
-    """
-    Retrieve full metadata, provenance, and processing history for a specific registered dataset.
-    """
+    """Retrieve full metadata, verification evidence, and processing history for a dataset."""
     dataset = catalog_service.get_dataset(dataset_id)
     if not dataset:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Dataset with ID '{dataset_id}' not found in MARSCOPE catalog.",
+            detail=f"Dataset '{dataset_id}' not found in MARSCOPE catalog.",
         )
     return dataset
+
+
+@router.post("/{dataset_id}/verify-remote", response_model=Dataset)
+async def verify_dataset_remote(dataset_id: str) -> Dataset:
+    """Verify remote archive availability and label/WMTS capabilities live."""
+    try:
+        return await catalog_service.verify_remote_capabilities(dataset_id)
+    except KeyError as ke:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(ke))
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
 
 @router.post("/{dataset_id}/download", response_model=DatasetManifest)
 async def download_dataset(dataset_id: str) -> DatasetManifest:
     """
-    Download a verified scientific product from its official archive URL, verifying integrity and SHA-256 hash.
+    Download a verified scientific product from its official archive URL, verifying SHA-256 hash
+    and fetching companion PDS3 label when present.
     """
     dataset = catalog_service.get_dataset(dataset_id)
     if not dataset:
@@ -64,6 +71,8 @@ async def download_dataset(dataset_id: str) -> DatasetManifest:
         manifest = await acquisition_service.download_product(dataset)
         catalog_service.register_dataset(dataset)
         return manifest
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
     except Exception as e:
         catalog_service.update_dataset_status(
             dataset_id,
@@ -78,9 +87,7 @@ async def download_dataset(dataset_id: str) -> DatasetManifest:
 
 @router.post("/{dataset_id}/validate")
 async def validate_dataset(dataset_id: str) -> Dict[str, Any]:
-    """
-    Validate product coordinate reference system, integrity, and spatial coverage against the Gale Crater study area.
-    """
+    """Validate dataset CRS, study-area overlap, and local integrity honestly."""
     dataset = catalog_service.get_dataset(dataset_id)
     if not dataset:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Dataset '{dataset_id}' not found.")
@@ -91,25 +98,49 @@ async def validate_dataset(dataset_id: str) -> Dict[str, Any]:
         "min_lon": 137.2,
         "max_lon": 138.0,
     }
+    return catalog_service.validate_dataset_integrity(dataset_id, gale_bounds)
 
-    coverage_result = catalog_service.check_study_area_coverage(dataset_id, gale_bounds)
 
-    # Check CRS
-    from app.geospatial.crs import validate_mars_crs
-    crs_valid = validate_mars_crs(dataset.coordinate_reference_system)
+@router.post("/{dataset_id}/process")
+async def process_dataset(
+    dataset_id: str,
+    roughness_radius_meters: Optional[float] = Query(None, gt=0.0, description="Physical TRI neighborhood radius in meters"),
+) -> Dict[str, Any]:
+    """
+    Process a locally downloaded DEM dataset into clipped GeoTIFF and terrain derivatives
+    (slope, aspect, metric TRI) with a verifiable processing manifest.
+    """
+    dataset = catalog_service.get_dataset(dataset_id)
+    if not dataset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Dataset '{dataset_id}' not found.")
+    if "DEM" not in dataset.product_type.upper() and "ELEVATION" not in dataset.product_type.upper():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Dataset '{dataset_id}' (type '{dataset.product_type}') is not a DEM raster product.",
+        )
 
-    catalog_service.update_dataset_status(
-        dataset_id,
-        DatasetLifecycleStatus.VALIDATED if crs_valid and coverage_result["is_covered"] else DatasetLifecycleStatus.FAILED_VALIDATION,
-        processing_step="Validated spatial coverage and IAU Mars CRS definition",
-    )
-
-    return {
-        "dataset_id": dataset.id,
-        "product_id": dataset.product_id,
-        "crs_valid": crs_valid,
-        "crs": dataset.coordinate_reference_system,
-        "coverage_check": coverage_result,
-        "license_status": dataset.license,
-        "validation_passed": crs_valid and coverage_result["is_covered"],
+    gale_bounds = {
+        "min_lat": -5.5,
+        "max_lat": -4.3,
+        "min_lon": 137.2,
+        "max_lon": 138.0,
     }
+    try:
+        manifest = DEMProcessingService.process_dem_dataset(
+            dataset=dataset,
+            raw_dir=RAW_DIR,
+            processed_dir=PROCESSED_DIR,
+            study_bounds=gale_bounds,
+            roughness_radius_meters=roughness_radius_meters,
+        )
+        catalog_service.register_dataset(dataset)
+        return manifest
+    except FileNotFoundError as fe:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(fe))
+    except Exception as exc:
+        catalog_service.update_dataset_status(
+            dataset_id,
+            DatasetLifecycleStatus.FAILED_PROCESSING,
+            failure_reason=str(exc),
+        )
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))

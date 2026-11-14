@@ -1,110 +1,385 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { Activity, Calculator, Compass, ExternalLink, RefreshCw, ShieldCheck } from "lucide-react";
 import { PageHeader } from "../../components/PageHeader";
-import { Server, Scale, RefreshCw } from "lucide-react";
 import { API_BASE_URL } from "../../lib/constants";
+import {
+  LocalizationStatusResponse,
+  PhysicsCalculationResult,
+  PhysicsModelDescriptor,
+  PhysicsParameter,
+  SystemHealth,
+} from "../../types";
 
-export default function SettingsPage() {
-  const [backendStatus, setBackendStatus] = useState<string>("Standby (Click to test)");
-  const [backendVersion, setBackendVersion] = useState<string>("--");
+type ModelKey = "weight" | "potential_energy" | "atmospheric_density" | "drag" | "uphill_force";
 
-  const checkBackend = async () => {
+export default function SettingsAssumptionsPage() {
+  const [health, setHealth] = useState<SystemHealth | null>(null);
+  const [parameters, setParameters] = useState<PhysicsParameter[]>([]);
+  const [models, setModels] = useState<PhysicsModelDescriptor[]>([]);
+  const [localization, setLocalization] = useState<LocalizationStatusResponse | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // Interactive Physics Workbench state (explicit user assumptions -> labeled inputs)
+  const [selectedModel, setSelectedModel] = useState<ModelKey>("weight");
+  const [massKg, setMassKg] = useState<string>("180");
+  const [deltaHm, setDeltaHm] = useState<string>("25");
+  const [pressurePa, setPressurePa] = useState<string>("700");
+  const [tempK, setTempK] = useState<string>("215");
+  const [velocityMs, setVelocityMs] = useState<string>("1.5");
+  const [slopeDeg, setSlopeDeg] = useState<string>("12");
+  const [calcResult, setCalcResult] = useState<PhysicsCalculationResult | null>(null);
+  const [calcError, setCalcError] = useState<string | null>(null);
+  const [calcLoading, setCalcLoading] = useState<boolean>(false);
+
+  async function loadSystemData() {
+    setLoading(true);
+    setError(null);
     try {
-      setBackendStatus("Connecting...");
-      const res = await fetch(`${API_BASE_URL}/health`);
-      if (res.ok) {
-        const data = await res.json();
-        setBackendStatus("Connected & Healthy");
-        setBackendVersion(data.version || "1.0.0");
-      } else {
-        setBackendStatus("HTTP Error " + res.status);
-      }
-    } catch {
-      setBackendStatus("Backend Not Running (Start FastAPI on port 8000)");
+      const [hRes, pRes, mRes, lRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/health`, { cache: "no-store" }),
+        fetch(`${API_BASE_URL}/parameters`, { cache: "no-store" }),
+        fetch(`${API_BASE_URL}/physics/models`, { cache: "no-store" }),
+        fetch(`${API_BASE_URL}/localization/status`, { cache: "no-store" }),
+      ]);
+      if (hRes.ok) setHealth(await hRes.json());
+      if (pRes.ok) setParameters(await pRes.json());
+      if (mRes.ok) setModels(await mRes.json());
+      if (lRes.ok) setLocalization(await lRes.json());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load system diagnostics");
+    } finally {
+      setLoading(false);
     }
-  };
+  }
+
+  useEffect(() => {
+    let active = true;
+    async function init() {
+      try {
+        const [hRes, pRes, mRes, lRes] = await Promise.all([
+          fetch(`${API_BASE_URL}/health`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/parameters`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/physics/models`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/localization/status`, { cache: "no-store" }),
+        ]);
+        if (!active) return;
+        if (hRes.ok) setHealth(await hRes.json());
+        if (pRes.ok) setParameters(await pRes.json());
+        if (mRes.ok) setModels(await mRes.json());
+        if (lRes.ok) setLocalization(await lRes.json());
+      } catch (err) {
+        if (active) setError(err instanceof Error ? err.message : "Failed to load system diagnostics");
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+    void init();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function runPhysicsCalculation(e: React.FormEvent) {
+    e.preventDefault();
+    setCalcLoading(true);
+    setCalcError(null);
+    try {
+      const body: Record<string, unknown> = { model_name: selectedModel };
+      if (["weight", "potential_energy", "uphill_force"].includes(selectedModel)) {
+        body.mass_kg = Number.parseFloat(massKg);
+      }
+      if (selectedModel === "potential_energy") {
+        body.delta_h_m = Number.parseFloat(deltaHm);
+      }
+      if (["atmospheric_density", "drag"].includes(selectedModel)) {
+        body.pressure_pa = Number.parseFloat(pressurePa);
+        body.temperature_k = Number.parseFloat(tempK);
+      }
+      if (selectedModel === "drag") {
+        body.velocity_m_s = Number.parseFloat(velocityMs);
+      }
+      if (selectedModel === "uphill_force") {
+        body.slope_degrees = Number.parseFloat(slopeDeg);
+      }
+
+      const res = await fetch(`${API_BASE_URL}/physics/calculate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = await res.json();
+      if (!res.ok) {
+        throw new Error(payload.detail || `HTTP ${res.status}`);
+      }
+      setCalcResult(payload);
+    } catch (err) {
+      setCalcError(err instanceof Error ? err.message : "Calculation failed");
+    } finally {
+      setCalcLoading(false);
+    }
+  }
 
   return (
-    <div className="space-y-6 max-w-7xl mx-auto">
+    <div className="space-y-6">
       <PageHeader
-        title="Settings & Mission Assumptions"
-        badge="Physical Parameter Registry"
-        description="Inspect and calibrate mission engineering assumptions, biophysical explorer limits, and backend microservice connection parameters."
+        title="Mission Assumptions & Physics Registry"
+        badge={health ? `Backend ${health.status.toUpperCase()}` : "Diagnostics"}
+        description="Traceable scientific reference constants loaded from the backend parameter registry, live localization provider status, and interactive physics workbench with explicit assumption labeling."
         actions={
           <button
-            onClick={checkBackend}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#161c2b] border border-[#252f44] text-xs font-semibold text-slate-300 hover:bg-[#1f273b] transition-colors"
+            type="button"
+            onClick={loadSystemData}
+            disabled={loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#161c2b] hover:bg-[#1e263b] border border-[#252f44] text-xs font-medium text-slate-200 disabled:opacity-50"
           >
-            <RefreshCw className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Test API Connection</span>
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+            <span>Refresh Diagnostics</span>
           </button>
         }
       />
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Backend Connectivity Status */}
-        <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-6 space-y-4">
-          <div className="flex items-center justify-between pb-3 border-b border-[#1e2638]">
-            <div className="flex items-center gap-2">
-              <Server className="w-4 h-4 text-[#e25b38]" />
-              <h2 className="text-sm font-bold text-slate-200">Backend API Connectivity</h2>
-            </div>
-            <span
-              className={`px-2 py-0.5 rounded text-[10px] font-mono ${
-                backendStatus.includes("Healthy")
-                  ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                  : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
-              }`}
-            >
-              {backendStatus.includes("Healthy") ? "ONLINE" : "STANDBY"}
-            </span>
-          </div>
+      {error && (
+        <div className="p-4 rounded-xl bg-red-950/40 border border-red-800/50 text-xs text-red-200">
+          {error}
+        </div>
+      )}
 
-          <div className="space-y-2 text-xs">
-            <div className="flex justify-between py-1.5 border-b border-[#1a2130]">
-              <span className="text-slate-400">Endpoint Base:</span>
-              <span className="font-mono text-slate-200">{API_BASE_URL}</span>
-            </div>
-            <div className="flex justify-between py-1.5 border-b border-[#1a2130]">
-              <span className="text-slate-400">Status:</span>
-              <span className="font-mono text-slate-200">{backendStatus}</span>
-            </div>
-            <div className="flex justify-between py-1.5">
-              <span className="text-slate-400">API Version:</span>
-              <span className="font-mono text-slate-200">{backendVersion}</span>
-            </div>
+      {/* Backend Engine & Localization Status */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-5 space-y-3">
+          <div className="flex items-center gap-2 text-sm font-bold text-slate-100 border-b border-[#1e2638] pb-3">
+            <Activity className="w-4 h-4 text-[#38bdf8]" />
+            <span>Backend Engine Telemetry</span>
           </div>
+          {health ? (
+            <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+              <div className="p-2.5 rounded bg-[#0d111a] border border-[#1d2536]">
+                <div className="text-[10px] text-slate-500">SYSTEM / VERSION</div>
+                <div className="text-slate-100">{health.system} v{health.version}</div>
+              </div>
+              <div className="p-2.5 rounded bg-[#0d111a] border border-[#1d2536]">
+                <div className="text-[10px] text-slate-500">STATUS</div>
+                <div className="text-emerald-300">{health.status}</div>
+              </div>
+              {Object.entries(health.engines).map(([eng, st]) => (
+                <div key={eng} className="p-2.5 rounded bg-[#0d111a] border border-[#1d2536]">
+                  <div className="text-[10px] text-slate-500 uppercase">{eng}</div>
+                  <div className="text-slate-200">{st}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-slate-400">Querying backend health...</p>
+          )}
         </div>
 
-        {/* Biophysical & EVA Engineering Assumptions */}
-        <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-6 space-y-4">
-          <div className="flex items-center justify-between pb-3 border-b border-[#1e2638]">
-            <div className="flex items-center gap-2">
-              <Scale className="w-4 h-4 text-cyan-400" />
-              <h2 className="text-sm font-bold text-slate-200">Biophysical Explorer Baseline</h2>
+        <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-5 space-y-3">
+          <div className="flex items-center gap-2 text-sm font-bold text-slate-100 border-b border-[#1e2638] pb-3">
+            <Compass className="w-4 h-4 text-[#e25b38]" />
+            <span>Localization Acquisition Providers</span>
+          </div>
+          {localization ? (
+            <div className="space-y-2">
+              <div className="text-xs text-slate-300">
+                Live Localization: <span className="font-mono text-amber-300">{localization.live_localization_available ? "Available" : "Unavailable"}</span>
+              </div>
+              <div className="space-y-1.5">
+                {localization.supported_providers.map((prov) => (
+                  <div key={prov.provider_id} className="p-2.5 rounded bg-[#0d111a] border border-[#1d2536] flex items-center justify-between gap-2 text-xs">
+                    <div>
+                      <div className="font-semibold text-slate-200">{prov.name}</div>
+                      <div className="text-[10px] text-slate-400">{prov.status_detail}</div>
+                    </div>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-300">
+                      {prov.connected ? "connected" : "disconnected"}
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
-            <span className="text-[10px] font-mono text-slate-500">SI Units</span>
+          ) : (
+            <p className="text-xs text-slate-400">Loading provider capabilities...</p>
+          )}
+        </div>
+      </div>
+
+      {/* Interactive Physics Calculation Workbench */}
+      <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-5 space-y-4">
+        <div className="flex items-center justify-between border-b border-[#1e2638] pb-3">
+          <div className="flex items-center gap-2 text-sm font-bold text-slate-100">
+            <Calculator className="w-4 h-4 text-[#e25b38]" />
+            <span>Validated Physics Workbench (User-Supplied Inputs)</span>
+          </div>
+          <span className="text-[10px] font-mono text-amber-300 uppercase">
+            Inputs below are explicitly labeled assumptions
+          </span>
+        </div>
+
+        <form onSubmit={runPhysicsCalculation} className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+          <div>
+            <label className="text-[11px] text-slate-400 block mb-1">Physical Model</label>
+            <select
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value as ModelKey)}
+              className="w-full px-2.5 py-1.5 text-xs rounded bg-[#0d111a] border border-[#252f44] text-slate-100"
+            >
+              <option value="weight">Surface Weight (W = m * g_mars)</option>
+              <option value="potential_energy">Potential Energy Delta</option>
+              <option value="atmospheric_density">CO2 Atmospheric Density</option>
+              <option value="drag">Aerodynamic Drag Force</option>
+              <option value="uphill_force">Uphill Parallel Force</option>
+            </select>
           </div>
 
-          <div className="space-y-2 text-xs">
-            <div className="flex justify-between py-1.5 border-b border-[#1a2130]">
-              <span className="text-slate-400">Astronaut Body Mass:</span>
-              <span className="font-mono text-slate-200">80.0 kg</span>
+          {["weight", "potential_energy", "uphill_force"].includes(selectedModel) && (
+            <div>
+              <label className="text-[11px] text-slate-400 block mb-1">Mass Assumption (kg)</label>
+              <input
+                type="number"
+                step="any"
+                value={massKg}
+                onChange={(e) => setMassKg(e.target.value)}
+                className="w-full px-2.5 py-1.5 text-xs font-mono rounded bg-[#0d111a] border border-[#252f44] text-slate-100"
+              />
             </div>
-            <div className="flex justify-between py-1.5 border-b border-[#1a2130]">
-              <span className="text-slate-400">Advanced Planetary Suit Mass:</span>
-              <span className="font-mono text-slate-200">120.0 kg</span>
+          )}
+
+          {selectedModel === "potential_energy" && (
+            <div>
+              <label className="text-[11px] text-slate-400 block mb-1">Elevation Delta (m)</label>
+              <input
+                type="number"
+                step="any"
+                value={deltaHm}
+                onChange={(e) => setDeltaHm(e.target.value)}
+                className="w-full px-2.5 py-1.5 text-xs font-mono rounded bg-[#0d111a] border border-[#252f44] text-slate-100"
+              />
             </div>
-            <div className="flex justify-between py-1.5 border-b border-[#1a2130]">
-              <span className="text-slate-400">Total System Mass ($m$):</span>
-              <span className="font-mono text-emerald-400 font-bold">200.0 kg (Weight: 744.15 N)</span>
+          )}
+
+          {["atmospheric_density", "drag"].includes(selectedModel) && (
+            <>
+              <div>
+                <label className="text-[11px] text-slate-400 block mb-1">Pressure Input (Pa)</label>
+                <input
+                  type="number"
+                  step="any"
+                  value={pressurePa}
+                  onChange={(e) => setPressurePa(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs font-mono rounded bg-[#0d111a] border border-[#252f44] text-slate-100"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] text-slate-400 block mb-1">Temperature Input (K)</label>
+                <input
+                  type="number"
+                  step="any"
+                  value={tempK}
+                  onChange={(e) => setTempK(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs font-mono rounded bg-[#0d111a] border border-[#252f44] text-slate-100"
+                />
+              </div>
+            </>
+          )}
+
+          {selectedModel === "drag" && (
+            <div>
+              <label className="text-[11px] text-slate-400 block mb-1">Relative Wind/Speed (m/s)</label>
+              <input
+                type="number"
+                step="any"
+                value={velocityMs}
+                onChange={(e) => setVelocityMs(e.target.value)}
+                className="w-full px-2.5 py-1.5 text-xs font-mono rounded bg-[#0d111a] border border-[#252f44] text-slate-100"
+              />
             </div>
-            <div className="flex justify-between py-1.5">
-              <span className="text-slate-400">Nominal Walking Pace:</span>
-              <span className="font-mono text-slate-200">1.0 m/s (3.6 km/h)</span>
+          )}
+
+          {selectedModel === "uphill_force" && (
+            <div>
+              <label className="text-[11px] text-slate-400 block mb-1">Slope Input (deg)</label>
+              <input
+                type="number"
+                step="any"
+                value={slopeDeg}
+                onChange={(e) => setSlopeDeg(e.target.value)}
+                className="w-full px-2.5 py-1.5 text-xs font-mono rounded bg-[#0d111a] border border-[#252f44] text-slate-100"
+              />
             </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={calcLoading}
+            className="px-4 py-1.5 rounded-lg bg-[#e25b38] hover:bg-[#cf4f2e] text-white text-xs font-semibold"
+          >
+            {calcLoading ? "Computing..." : "Run Calculation"}
+          </button>
+        </form>
+
+        {calcError && (
+          <div className="p-3 rounded-lg bg-red-950/40 border border-red-800/50 text-xs text-red-200">
+            {calcError}
           </div>
+        )}
+
+        {calcResult && (
+          <div className="p-3.5 rounded-lg bg-[#0d111a] border border-[#252f44] space-y-2 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-slate-100">{calcResult.model_name}</span>
+              <span className="font-mono text-lg font-bold text-emerald-300">
+                {calcResult.calculated_value.toFixed(4)} {calcResult.units}
+              </span>
+            </div>
+            <div className="text-[11px] text-slate-400">
+              References: {calcResult.scientific_references.join(" | ")}
+            </div>
+            {calcResult.engineering_assumptions.length > 0 && (
+              <div className="text-[11px] text-amber-200/90">
+                Assumptions: {calcResult.engineering_assumptions.join(" | ")}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Scientific Reference Parameter Registry Table */}
+      <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-5 space-y-3">
+        <div className="flex items-center justify-between border-b border-[#1e2638] pb-3">
+          <div className="flex items-center gap-2 text-sm font-bold text-slate-100">
+            <ShieldCheck className="w-4 h-4 text-emerald-400" />
+            <span>Traceable Reference Parameter Registry ({parameters.length} Constants)</span>
+          </div>
+          <span className="text-[10px] font-mono text-slate-400">{models.length} Physics Models Loaded</span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {parameters.map((param) => (
+            <div key={param.id} className="p-3 rounded-lg bg-[#0d111a] border border-[#1d2536] space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-bold text-slate-100">{param.name}</span>
+                <span className="text-xs font-mono text-[#38bdf8]">
+                  {param.value} {param.units}
+                </span>
+              </div>
+              <div className="text-[10px] text-slate-400">{param.applicable_conditions}</div>
+              <div className="flex items-center justify-between text-[10px] font-mono text-slate-500 pt-1">
+                <span>Source: {param.source}</span>
+                <a
+                  href={param.source_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-sky-400 hover:underline"
+                >
+                  <span>Ref</span>
+                  <ExternalLink className="w-2.5 h-2.5" />
+                </a>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </div>

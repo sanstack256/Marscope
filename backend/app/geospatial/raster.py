@@ -2,47 +2,120 @@
 MARSCOPE Raster Inspection Service
 Martian Surface Intelligence & Exploration System
 
-Uses Rasterio and NumPy to inspect planetary rasters.
-Statistics are calculated strictly on valid pixels; no-data values are never treated as zero.
+Uses Rasterio, NumPy, and PDS3 label metadata to inspect planetary rasters.
+Never infers measurement units from filenames and never converts missing data to zero.
 """
 
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, Optional
 import numpy as np
 import rasterio
-from rasterio.crs import CRS
+from app.geospatial.crs import validate_mars_crs
+from app.ingestion.pds_label import extract_pds3_metadata
 from app.schemas.terrain import RasterBandStats
+
+
+class RasterMetadataError(ValueError):
+    """Raised when raster CRS, units, or structure cannot be validated."""
 
 
 class RasterInspectionService:
     @staticmethod
-    def inspect_raster_file(file_path: Path, band_index: int = 1) -> Dict[str, Any]:
+    def _extract_units_from_metadata(
+        src: rasterio.DatasetReader,
+        file_path: Path,
+        band_index: int,
+        explicit_units: Optional[str] = None,
+    ) -> tuple[str, bool, Optional[str]]:
         """
-        Inspect a GeoTIFF or supported planetary raster, computing valid-pixel statistics.
+        Determine physical measurement units strictly from authoritative metadata:
+        1) Explicit caller/manifest metadata
+        2) GeoTIFF native band units or metadata tags
+        3) Sibling PDS3 .lbl/.LBL label file
+        Never infers units from the raster filename.
+        """
+        if explicit_units and explicit_units.strip().lower() not in {"unknown", "none", ""}:
+            return explicit_units.strip(), True, "manifest_or_caller"
+
+        # GeoTIFF native units tuple
+        src_units = src.units[band_index - 1] if src.units and len(src.units) >= band_index else None
+        if src_units and str(src_units).strip().lower() not in {"unknown", "none", ""}:
+            return str(src_units).strip(), True, "geotiff_band_units"
+
+        # GeoTIFF tags (file level + band level)
+        tags = {}
+        tags.update(src.tags() or {})
+        tags.update(src.tags(band_index) or {})
+        for tag_key in ["VERTICAL_UNITS", "MEASUREMENT_UNITS", "UNIT", "UNITS", "UNITTYPE"]:
+            tag_val = tags.get(tag_key)
+            if tag_val and str(tag_val).strip().lower() not in {"unknown", "none", ""}:
+                return str(tag_val).strip(), True, f"geotiff_tag:{tag_key}"
+
+        # Sibling PDS3 label (.lbl / .LBL)
+        for ext in [".lbl", ".LBL"]:
+            lbl_path = file_path.with_suffix(ext)
+            if lbl_path.exists():
+                try:
+                    pds_meta = extract_pds3_metadata(lbl_path)
+                    if pds_meta.get("units") and pds_meta["units"] != "unknown":
+                        return str(pds_meta["units"]), True, f"pds3_label:{lbl_path.name}"
+                except Exception:
+                    pass
+        if file_path.suffix.lower() == ".lbl":
+            try:
+                pds_meta = extract_pds3_metadata(file_path)
+                if pds_meta.get("units") and pds_meta["units"] != "unknown":
+                    return str(pds_meta["units"]), True, f"pds3_label:{file_path.name}"
+            except Exception:
+                pass
+
+        return "unknown", False, None
+
+    @staticmethod
+    def inspect_raster_file(
+        file_path: Path,
+        band_index: int = 1,
+        explicit_units: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Inspect a GeoTIFF or supported planetary raster, computing valid-pixel statistics
+        and extracting documented CRS, pixel spacing, scale/offset, and unit metadata.
         """
         if not file_path.exists():
             raise FileNotFoundError(f"Raster file not found: {file_path}")
 
         with rasterio.open(file_path) as src:
+            if band_index < 1 or band_index > src.count:
+                raise RasterMetadataError(f"Requested band {band_index} out of range [1, {src.count}].")
+
             width = src.width
             height = src.height
             count = src.count
             dtypes = [src.dtypes[i] for i in range(count)]
             bounds = src.bounds
-            crs = str(src.crs) if src.crs else "Unprojected"
             transform = list(src.transform)
+            pixel_spacing = {"dx": abs(float(src.transform.a)), "dy": abs(float(src.transform.e))}
             nodata = src.nodatavals[band_index - 1]
+            scale = float(src.scales[band_index - 1]) if src.scales and len(src.scales) >= band_index else 1.0
+            offset = float(src.offsets[band_index - 1]) if src.offsets and len(src.offsets) >= band_index else 0.0
 
-            # Read band data
-            data = src.read(band_index)
-            
-            # Mask no-data values
-            if nodata is not None:
-                mask = (data == nodata) | np.isnan(data)
-            else:
-                mask = np.isnan(data)
-            
-            valid_pixels = data[~mask]
+            # CRS extraction — never fabricate a CRS for unreferenced files
+            raw_crs_str = src.crs.to_string() if src.crs else None
+            crs_verified = validate_mars_crs(raw_crs_str)
+
+            # Physical unit extraction — never infer from filename
+            units, units_verified, unit_source = RasterInspectionService._extract_units_from_metadata(
+                src, file_path, band_index, explicit_units=explicit_units
+            )
+
+            # Read raw band and build no-data mask
+            raw_data = src.read(band_index).astype(np.float64)
+            invalid_mask = ~np.isfinite(raw_data)
+            if nodata is not None and np.isfinite(nodata):
+                invalid_mask = invalid_mask | (raw_data == float(nodata))
+
+            scaled_data = np.where(invalid_mask, np.nan, raw_data * scale + offset)
+            valid_pixels = scaled_data[~np.isnan(scaled_data)]
             total_pixels = width * height
             valid_count = int(valid_pixels.size)
             nodata_count = int(total_pixels - valid_count)
@@ -50,6 +123,7 @@ class RasterInspectionService:
 
             if valid_count > 0:
                 stats = RasterBandStats(
+                    available=True,
                     min_value=float(np.min(valid_pixels)),
                     max_value=float(np.max(valid_pixels)),
                     mean_value=float(np.mean(valid_pixels)),
@@ -57,18 +131,19 @@ class RasterInspectionService:
                     valid_pixel_count=valid_count,
                     nodata_pixel_count=nodata_count,
                     valid_data_percentage=round(valid_pct, 2),
-                    units="meters" if "dem" in file_path.name.lower() or "topography" in file_path.name.lower() else "uncalibrated_DN",
+                    units=units,
                 )
             else:
                 stats = RasterBandStats(
-                    min_value=0.0,
-                    max_value=0.0,
-                    mean_value=0.0,
-                    std_dev=0.0,
+                    available=False,
+                    min_value=None,
+                    max_value=None,
+                    mean_value=None,
+                    std_dev=None,
                     valid_pixel_count=0,
                     nodata_pixel_count=nodata_count,
                     valid_data_percentage=0.0,
-                    units="nodata",
+                    units=units,
                 )
 
             return {
@@ -76,10 +151,20 @@ class RasterInspectionService:
                 "file_size_bytes": file_path.stat().st_size,
                 "dimensions": {"width": width, "height": height},
                 "band_count": count,
+                "band_index": band_index,
                 "data_types": dtypes,
                 "bounds": [bounds.left, bounds.bottom, bounds.right, bounds.top],
-                "crs": crs,
-                "transform": transform,
+                "crs": raw_crs_str,
+                "crs_verified": crs_verified,
+                "transform": transform[:6],
+                "pixel_spacing": pixel_spacing,
+                "scale": scale,
+                "offset": offset,
                 "nodata_value": nodata,
+                "units": units,
+                "units_verified": units_verified,
+                "unit_source": unit_source,
+                "band_tags": src.tags(band_index) or {},
+                "dataset_tags": src.tags() or {},
                 "stats": stats.model_dump(),
             }

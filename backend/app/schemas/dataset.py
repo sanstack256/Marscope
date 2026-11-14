@@ -5,8 +5,8 @@ Martian Surface Intelligence & Exploration System
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
-from pydantic import BaseModel, Field, HttpUrl
+from typing import Dict, List, Optional
+from pydantic import BaseModel, Field
 
 
 class DatasetLifecycleStatus(str, Enum):
@@ -22,12 +22,40 @@ class DatasetLifecycleStatus(str, Enum):
     FAILED_PROCESSING = "failed_processing"
 
 
+class VerificationState(str, Enum):
+    VERIFIED = "verified"
+    UNVERIFIED = "unverified"
+    PENDING = "pending"
+    UNKNOWN = "unknown"
+    FAILED = "failed"
+    NOT_APPLICABLE = "not_applicable"
+
+
 class LicenseStatus(str, Enum):
     VERIFIED_OPEN_PUBLIC_DOMAIN = "NASA Public Domain / US Govt Open"
     VERIFIED_OPEN_CC0 = "Creative Commons CC0 1.0"
     VERIFIED_OPEN_RESEARCH = "Open Scientific Research Reuse"
     PENDING_VERIFICATION = "Pending Verification"
     RESTRICTED = "Restricted / Proprietary"
+
+
+class MetadataVerification(BaseModel):
+    archive_availability: VerificationState = Field(VerificationState.UNVERIFIED)
+    product_discovery: VerificationState = Field(VerificationState.UNVERIFIED)
+    metadata_verification: VerificationState = Field(VerificationState.UNVERIFIED)
+    license_verification: VerificationState = Field(VerificationState.UNVERIFIED)
+    coverage_verification: VerificationState = Field(VerificationState.UNVERIFIED)
+    download_verification: VerificationState = Field(VerificationState.UNVERIFIED)
+    processing_verification: VerificationState = Field(VerificationState.UNVERIFIED)
+    field_verification: Dict[str, VerificationState] = Field(
+        default_factory=dict,
+        description="Per-field verification state (e.g., crs, units, resolution, coverage, license)",
+    )
+    evidence_notes: List[str] = Field(
+        default_factory=list,
+        description="Recorded verification evidence (label parsed, WMTS checked, checksum verified)",
+    )
+    last_checked_utc: Optional[datetime] = None
 
 
 class GeographicCoverage(BaseModel):
@@ -37,6 +65,7 @@ class GeographicCoverage(BaseModel):
     max_longitude: float = Field(..., description="Maximum longitude in decimal degrees [-180, +180] or [0, 360]")
     center_latitude: Optional[float] = Field(None, description="Center latitude")
     center_longitude: Optional[float] = Field(None, description="Center longitude")
+    longitude_range: str = Field("unknown", description="[-180, 180] | [0, 360] | unknown")
 
 
 class Dataset(BaseModel):
@@ -48,38 +77,41 @@ class Dataset(BaseModel):
     instrument: str = Field(..., description="Originating sensor/instrument (e.g., MOLA, ChemCam, REMS)")
     source_archive: str = Field(..., description="Archive source name (e.g., NASA PDS Geosciences, Atmospheres)")
     original_product_url: str = Field(..., description="Direct archive URL for product download")
-    original_label_url: Optional[str] = Field(None, description="Direct URL to PDS label (.lbl / .xml)")
+    original_label_url: Optional[str] = Field(None, description="Direct URL to PDS label (.lbl / .xml) or capabilities")
     doi_or_pds_id: Optional[str] = Field(None, description="Permanent DOI or PDS dataset identifier")
     license: LicenseStatus = Field(LicenseStatus.PENDING_VERIFICATION, description="Legal reuse terms")
     attribution: str = Field(..., description="Mandatory attribution / citation statement")
-    
+
     # Temporal & Acquisition metadata
     acquisition_timestamp: Optional[datetime] = Field(None, description="UTC observation timestamp")
     observation_sol: Optional[int] = Field(None, description="Mission Mars Sol number if applicable")
-    processing_level: str = Field("Calibrated (RDR)", description="Processing pipeline level (EDR, RDR, DDR, DTM)")
-    calibration_status: str = Field("Calibrated", description="Physical calibration description")
-    
+    processing_level: str = Field("unknown", description="Processing pipeline level (EDR, RDR, DDR, DTM)")
+    calibration_status: str = Field("unknown", description="Physical calibration description")
+
     # Spatial & Projection metadata
     coverage: GeographicCoverage = Field(..., description="Bounding box coverage in planetary coordinates")
-    coordinate_reference_system: str = Field("IAU2000:49900", description="Documented Mars CRS")
-    latitude_convention: str = Field("Planetocentric", description="Latitude convention (Planetocentric / Planetographic)")
-    longitude_direction: str = Field("East", description="Positive longitude direction (East / West)")
-    map_projection: str = Field("Equirectangular", description="Planetary cartographic projection")
+    coordinate_reference_system: Optional[str] = Field(None, description="Documented Mars CRS")
+    latitude_convention: str = Field("unknown", description="Planetocentric | Planetographic | unknown")
+    longitude_direction: str = Field("unknown", description="East | West | unknown")
+    map_projection: str = Field("unknown", description="Planetary cartographic projection")
+    planetary_radii_m: Optional[Dict[str, float]] = Field(None, description="Planetary ellipsoid radii a, b, c in meters")
     horizontal_resolution_meters: Optional[float] = Field(None, description="Pixel resolution in meters")
     vertical_resolution_meters: Optional[float] = Field(None, description="Vertical resolution in meters where applicable")
-    units: str = Field(..., description="Physical measurement units (e.g., meters, Pa, K, counts)")
+    units: str = Field("unknown", description="Physical measurement units (e.g., meters, Pa, K, unknown)")
     nodata_value: Optional[float] = Field(None, description="Explicit no-data representation")
-    data_format: str = Field("PDS3 / GeoTIFF", description="Native binary or container format")
-    
+    data_format: str = Field("unknown", description="Native binary or container format")
+
     # Lifecycle & Verification tracking
     file_size_bytes: Optional[int] = Field(None, description="File size on disk or archive")
     sha256_checksum: Optional[str] = Field(None, description="SHA-256 verification hash")
     status: DatasetLifecycleStatus = Field(DatasetLifecycleStatus.DISCOVERED, description="Current lifecycle state")
+    verification: MetadataVerification = Field(default_factory=MetadataVerification)
     failure_reason: Optional[str] = Field(None, description="Reason for failure if status is in FAILED_* state")
     quality_flags: List[str] = Field(default_factory=list, description="Quality indicators or flags")
     known_limitations: List[str] = Field(default_factory=list, description="Documented instrument or interpolation limitations")
     processing_history: List[str] = Field(default_factory=list, description="Audit log of pipeline processing steps")
     local_file_path: Optional[str] = Field(None, description="Relative local path when downloaded")
+    local_label_path: Optional[str] = Field(None, description="Relative local path to downloaded label/metadata")
     processed_file_path: Optional[str] = Field(None, description="Relative local path when processed to COG/GeoTIFF")
 
 
@@ -91,5 +123,6 @@ class DatasetManifest(BaseModel):
     file_size_bytes: int
     sha256_checksum: str
     storage_path: str
+    label_storage_path: Optional[str] = None
     verified_integrity: bool
-    manifest_version: str = "1.0.0"
+    manifest_version: str = "1.1.0"

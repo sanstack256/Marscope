@@ -11,7 +11,7 @@
   "doi_or_pds_id": "MSL-M-CHEMCAM-LIBS-4/5-RDR-V1.0:CL1_398380611PSV_F0030000CCAM04010P3",
   "license": "NASA Public Domain / US Govt Open",
   "attribution": "NASA/JPL-Caltech/LANL/CNES/IRAP",
-  "acquisition_timestamp": "2012-08-16T20:26:41Z",
+  "acquisition_timestamp": null,
   "observation_sol": 10,
   "processing_level": "Calibrated Spectra (RDR Level 4/5)",
   "calibration_status": "Dark-subtracted, wavelength-calibrated, instrument-response corrected",
@@ -21,32 +21,56 @@
     "min_longitude": 137.44,
     "max_longitude": 137.445,
     "center_latitude": -4.592,
-    "center_longitude": 137.442
+    "center_longitude": 137.442,
+    "longitude_range": "[-180, 180]"
   },
   "coordinate_reference_system": "IAU2000:49900",
   "latitude_convention": "Planetocentric",
   "longitude_direction": "East",
   "map_projection": "Rover Local Frame / Topocentric",
+  "planetary_radii_m": null,
   "horizontal_resolution_meters": null,
   "vertical_resolution_meters": null,
   "units": "photons / (s * cm^2 * sr * nm)",
   "nodata_value": null,
   "data_format": "PDS3 ASCII Table (.TAB)",
   "file_size_bytes": 284812,
-  "sha256_checksum": null,
-  "status": "license_verified",
-  "failure_reason": null,
+  "sha256_checksum": "518821b4cb80f85506cde0864bc8642716215601d6f195f06c1b9baf5086a04f",
+  "status": "downloaded",
+  "verification": {
+    "archive_availability": "verified",
+    "product_discovery": "verified",
+    "metadata_verification": "verified",
+    "license_verification": "verified",
+    "coverage_verification": "verified",
+    "download_verification": "verified",
+    "processing_verification": "unverified",
+    "field_verification": {
+      "acquisition_timestamp": "unknown",
+      "coverage": "unverified",
+      "units": "unverified"
+    },
+    "evidence_notes": [
+      "Catalog reference registered; download product & .LBL to parse spectra.",
+      "Companion label fetch warning: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1082)",
+      "Verified metadata from PDS3 label cl1_398380611psv_f0030000ccam04010p3.lbl",
+      "Downloaded 284812 bytes; SHA-256=518821b4cb80f855..."
+    ],
+    "last_checked_utc": "2026-11-14T05:07:23.888584Z"
+  },
+  "failure_reason": "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1082)",
   "quality_flags": [
-    "Calibrated Emission Lines",
-    "Nominal Laser Power"
+    "Calibrated Emission Lines"
   ],
   "known_limitations": [
     "Point observation sampled at ~1.5 m standoff distance.",
     "Surface dust coating can attenuate bedrock signal on initial laser shots."
   ],
   "processing_history": [
-    "Raw CCD spectra -> Dark subtraction -> Continuum removal -> Wavelength calibration"
+    "Catalog record discovered via MslCuriositySourceAdapter",
+    "Downloaded 284812 bytes at 2026-11-14T05:07:23.887900+00:00 (SHA-256: 518821b4cb80...)"
   ],
-  "local_file_path": null,
+  "local_file_path": "raw/cl1_398380611psv_f0030000ccam04010p3.tab",
+  "local_label_path": "raw/cl1_398380611psv_f0030000ccam04010p3.lbl",
   "processed_file_path": null
 }

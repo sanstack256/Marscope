@@ -14,27 +14,53 @@
   "acquisition_timestamp": "2003-03-21T01:00:00Z",
   "observation_sol": null,
   "processing_level": "Calibrated Derived (RDR/DDR Level 3)",
-  "calibration_status": "Radiometrically & Crossover Solution Calibrated to Goddard GMM-2B Areoid",
+  "calibration_status": "Radiometrically & Crossover Solution Calibrated to Goddard Areoid",
   "coverage": {
     "min_latitude": -44.0,
     "max_latitude": 0.0,
     "min_longitude": 90.0,
     "max_longitude": 180.0,
     "center_latitude": -22.0,
-    "center_longitude": 135.0
+    "center_longitude": 135.0,
+    "longitude_range": "[0, 360]"
   },
   "coordinate_reference_system": "IAU2000:MARS_SPHERE",
   "latitude_convention": "Planetocentric",
   "longitude_direction": "East",
   "map_projection": "Simple Cylindrical (Equirectangular)",
+  "planetary_radii_m": {
+    "a": 3396000.0,
+    "b": 3396000.0,
+    "c": 3396000.0
+  },
   "horizontal_resolution_meters": 463.0,
   "vertical_resolution_meters": 1.0,
-  "units": "meters relative to MOLA Areoid",
+  "units": "meters",
   "nodata_value": -32768.0,
   "data_format": "PDS3 Binary Image (MSB_INTEGER 16-bit)",
   "file_size_bytes": 129761280,
   "sha256_checksum": null,
-  "status": "validated",
+  "status": "discovered",
+  "verification": {
+    "archive_availability": "unverified",
+    "product_discovery": "verified",
+    "metadata_verification": "unverified",
+    "license_verification": "verified",
+    "coverage_verification": "unverified",
+    "download_verification": "unverified",
+    "processing_verification": "unverified",
+    "field_verification": {
+      "crs": "unverified",
+      "units": "unverified",
+      "resolution": "unverified",
+      "coverage": "unverified",
+      "license": "verified"
+    },
+    "evidence_notes": [
+      "Catalog reference registered; requires PDS3 .LBL + .IMG acquisition to verify."
+    ],
+    "last_checked_utc": null
+  },
   "failure_reason": null,
   "quality_flags": [
     "Crossover Solved",
@@ -45,12 +71,9 @@
     "Equatorial track spacing results in ~12 km gap interpolation between orbital ground tracks."
   ],
   "processing_history": [
-    "Raw PEDR altimetry -> Crossover adjustment -> Binned 128 ppd grid",
-    "Validated spatial coverage and IAU Mars CRS definition",
-    "Validated spatial coverage and IAU Mars CRS definition",
-    "Validated spatial coverage and IAU Mars CRS definition",
-    "Validated spatial coverage and IAU Mars CRS definition"
+    "Catalog record discovered via PdsMolaSourceAdapter"
   ],
   "local_file_path": null,
+  "local_label_path": null,
   "processed_file_path": null
 }

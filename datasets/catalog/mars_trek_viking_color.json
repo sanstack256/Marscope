@@ -1,17 +1,17 @@
 {
   "id": "mars_trek_viking_color",
-  "product_id": "MARS_TREK_VIKING_MOSAIC_COLOR",
-  "product_title": "NASA Mars Trek Viking Global Color Base Map (232 m/px)",
+  "product_id": "Mars_Viking_MDIM21_ClrMosaic_global_232m",
+  "product_title": "NASA Mars Trek Viking MDIM 2.1 Global Color Mosaic (232 m/px)",
   "product_type": "IMAGERY / Global Optical Basemap",
   "mission": "Viking 1 & 2 / NASA Planetary Cartography",
   "instrument": "Viking Orbiter Visual Imaging Subsystem (VIS)",
   "source_archive": "NASA Solar System Treks API",
   "original_product_url": "https://trek.nasa.gov/tiles/Mars/EQ/Mars_Viking_MDIM21_ClrMosaic_global_232m/1.0.0/default/default028mm/{z}/{y}/{x}.jpg",
-  "original_label_url": null,
+  "original_label_url": "https://trek.nasa.gov/tiles/Mars/EQ/Mars_Viking_MDIM21_ClrMosaic_global_232m/1.0.0/WMTSCapabilities.xml",
   "doi_or_pds_id": null,
   "license": "NASA Public Domain / US Govt Open",
   "attribution": "NASA/JPL/USGS",
-  "acquisition_timestamp": "1980-01-01T00:00:00Z",
+  "acquisition_timestamp": null,
   "observation_sol": null,
   "processing_level": "Controlled Orthomosaic (Level 3)",
   "calibration_status": "Radiometrically normalized & photometrically corrected",
@@ -21,30 +21,58 @@
     "min_longitude": -180.0,
     "max_longitude": 180.0,
     "center_latitude": 0.0,
-    "center_longitude": 0.0
+    "center_longitude": 0.0,
+    "longitude_range": "[-180, 180]"
   },
-  "coordinate_reference_system": "IAU2000:MARS_SPHERE",
+  "coordinate_reference_system": "IAU2000:49900",
   "latitude_convention": "Planetocentric",
   "longitude_direction": "East",
-  "map_projection": "Equirectangular WMTS",
+  "map_projection": "Simple Cylindrical Equirectangular (OGC WMTS default028mm)",
+  "planetary_radii_m": {
+    "a": 3396190.0,
+    "b": 3376200.0,
+    "c": 3376200.0
+  },
   "horizontal_resolution_meters": 232.0,
   "vertical_resolution_meters": null,
-  "units": "RGB 8-bit reflectance",
+  "units": "RGB 8-bit reflectance (visual mosaic)",
   "nodata_value": null,
-  "data_format": "OGC WMTS / JPEG tiles",
+  "data_format": "OGC WMTS / JPEG tiles (Zoom 0-7)",
   "file_size_bytes": null,
   "sha256_checksum": null,
   "status": "available",
+  "verification": {
+    "archive_availability": "verified",
+    "product_discovery": "verified",
+    "metadata_verification": "verified",
+    "license_verification": "verified",
+    "coverage_verification": "verified",
+    "download_verification": "not_applicable",
+    "processing_verification": "not_applicable",
+    "field_verification": {
+      "crs": "verified",
+      "resolution": "verified",
+      "coverage": "verified"
+    },
+    "evidence_notes": [
+      "WMTS endpoint discovered; run live capability check to verify availability.",
+      "Verified WMTSCapabilities HTTP 200 (7016 bytes) at 2026-11-14T05:05:32.681960+00:00",
+      "Verified WMTSCapabilities HTTP 200 (7016 bytes) at 2026-11-14T05:07:11.952840+00:00",
+      "Verified WMTSCapabilities HTTP 200 (7016 bytes) at 2026-11-14T05:10:09.599750+00:00"
+    ],
+    "last_checked_utc": "2026-11-14T05:10:09.599750Z"
+  },
   "failure_reason": null,
   "quality_flags": [
-    "Global Orthorectified Baseline"
+    "Global Orthorectified Optical Baseline"
   ],
   "known_limitations": [
-    "Low resolution (~232 m/px) relative to modern HiRISE/CTX orbital imagery."
+    "Regional optical resolution (~232 m/px); cannot resolve rover-scale rocks or fine fractures."
   ],
   "processing_history": [
-    "Viking MDIM 2.1 controlled cartographic mosaic"
+    "Catalog record discovered via MarsTrekSourceAdapter"
   ],
   "local_file_path": null,
+  "local_label_path": null,
   "processed_file_path": null
 }

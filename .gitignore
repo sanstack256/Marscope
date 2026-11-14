@@ -72,11 +72,13 @@ pnpm-debug.log*
 .turbo
 
 # Large Scientific Datasets & Raw Planetary Imagery
-# Preserving manifests and catalogs while excluding bulk GIS rasters and PDS binaries
+# Preserving catalogs while excluding bulk GIS rasters, processed derivatives, and local download manifests
 datasets/raw/*
 !datasets/raw/.gitkeep
 datasets/processed/*
 !datasets/processed/.gitkeep
+datasets/manifests/*
+!datasets/manifests/.gitkeep
 *.tif
 *.tiff
 *.TIF

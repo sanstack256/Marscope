@@ -11,7 +11,7 @@
   "doi_or_pds_id": "MSL-M-REMS-6-ADR-V1.0:RME_398334213ADR00100000000_______P9",
   "license": "NASA Public Domain / US Govt Open",
   "attribution": "NASA/JPL-Caltech/CAB (INTA-CSIC)",
-  "acquisition_timestamp": "2012-08-15T20:26:41Z",
+  "acquisition_timestamp": null,
   "observation_sol": 10,
   "processing_level": "Calibrated RDR (Level 6 ADR)",
   "calibration_status": "Calibrated by Centro de Astrobiologia (CAB)",
@@ -21,24 +21,42 @@
     "min_longitude": 137.44,
     "max_longitude": 137.445,
     "center_latitude": -4.592,
-    "center_longitude": 137.442
+    "center_longitude": 137.442,
+    "longitude_range": "[-180, 180]"
   },
   "coordinate_reference_system": "IAU2000:49900",
   "latitude_convention": "Planetocentric",
   "longitude_direction": "East",
   "map_projection": "Rover Site Frame",
+  "planetary_radii_m": null,
   "horizontal_resolution_meters": null,
   "vertical_resolution_meters": null,
   "units": "Pa (Pressure), K (Temperature), m/s (Wind)",
   "nodata_value": null,
   "data_format": "PDS3 Fixed Length Table (.TAB)",
-  "file_size_bytes": 1550552,
+  "file_size_bytes": null,
   "sha256_checksum": null,
-  "status": "license_verified",
+  "status": "discovered",
+  "verification": {
+    "archive_availability": "unverified",
+    "product_discovery": "verified",
+    "metadata_verification": "unverified",
+    "license_verification": "verified",
+    "coverage_verification": "unverified",
+    "download_verification": "unverified",
+    "processing_verification": "unverified",
+    "field_verification": {
+      "acquisition_timestamp": "unknown",
+      "coverage": "unverified",
+      "units": "unverified"
+    },
+    "evidence_notes": [
+      "Catalog reference registered; download product & .LBL to parse measurements."
+    ],
+    "last_checked_utc": null
+  },
   "failure_reason": null,
   "quality_flags": [
-    "Boom 1 Nominal",
-    "Boom 2 Nominal",
     "Continuous Diurnal Log"
   ],
   "known_limitations": [
@@ -46,8 +64,9 @@
     "Wind sensor boom 1 partial sensor damage on landing sol."
   ],
   "processing_history": [
-    "Raw telemetry -> Instrument transfer functions -> Atmospheric calibration QRS v2.2.0"
+    "Catalog record discovered via MslCuriositySourceAdapter"
   ],
   "local_file_path": null,
+  "local_label_path": null,
   "processed_file_path": null
 }

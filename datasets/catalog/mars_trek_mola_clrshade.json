@@ -1,0 +1,79 @@
+{
+  "id": "mars_trek_mola_clrshade",
+  "product_id": "Mars_MGS_MOLA_ClrShade_merge_global_463m",
+  "product_title": "NASA Mars Trek MOLA Color Shaded Relief Mosaic (463 m/px)",
+  "product_type": "IMAGERY / Shaded Topographic Visualization",
+  "mission": "Mars Global Surveyor (MGS)",
+  "instrument": "Mars Orbiter Laser Altimeter (MOLA)",
+  "source_archive": "NASA Solar System Treks API",
+  "original_product_url": "https://trek.nasa.gov/tiles/Mars/EQ/Mars_MGS_MOLA_ClrShade_merge_global_463m/1.0.0/default/default028mm/{z}/{y}/{x}.jpg",
+  "original_label_url": "https://trek.nasa.gov/tiles/Mars/EQ/Mars_MGS_MOLA_ClrShade_merge_global_463m/1.0.0/WMTSCapabilities.xml",
+  "doi_or_pds_id": null,
+  "license": "NASA Public Domain / US Govt Open",
+  "attribution": "NASA/JPL/GSFC",
+  "acquisition_timestamp": null,
+  "observation_sol": null,
+  "processing_level": "Derived Shaded Relief Visualization (RGB)",
+  "calibration_status": "Colorized hillshade (visual only — not raw metric elevation values)",
+  "coverage": {
+    "min_latitude": -90.0,
+    "max_latitude": 90.0,
+    "min_longitude": -180.0,
+    "max_longitude": 180.0,
+    "center_latitude": 0.0,
+    "center_longitude": 0.0,
+    "longitude_range": "[-180, 180]"
+  },
+  "coordinate_reference_system": "IAU2000:49900",
+  "latitude_convention": "Planetocentric",
+  "longitude_direction": "East",
+  "map_projection": "Simple Cylindrical Equirectangular (OGC WMTS default028mm)",
+  "planetary_radii_m": {
+    "a": 3396190.0,
+    "b": 3376200.0,
+    "c": 3376200.0
+  },
+  "horizontal_resolution_meters": 463.0,
+  "vertical_resolution_meters": null,
+  "units": "RGB hillshade (visual representation only)",
+  "nodata_value": null,
+  "data_format": "OGC WMTS / JPEG tiles (Zoom 0-7)",
+  "file_size_bytes": null,
+  "sha256_checksum": null,
+  "status": "available",
+  "verification": {
+    "archive_availability": "verified",
+    "product_discovery": "verified",
+    "metadata_verification": "verified",
+    "license_verification": "verified",
+    "coverage_verification": "verified",
+    "download_verification": "not_applicable",
+    "processing_verification": "not_applicable",
+    "field_verification": {
+      "crs": "verified",
+      "resolution": "verified",
+      "coverage": "verified"
+    },
+    "evidence_notes": [
+      "WMTS endpoint discovered; visual hillshade only (no elevation elevation queries).",
+      "Verified WMTSCapabilities HTTP 200 (7040 bytes) at 2026-11-14T05:05:33.492874+00:00",
+      "Verified WMTSCapabilities HTTP 200 (7040 bytes) at 2026-11-14T05:07:12.680177+00:00",
+      "Verified WMTSCapabilities HTTP 200 (7040 bytes) at 2026-11-14T05:10:10.389455+00:00"
+    ],
+    "last_checked_utc": "2026-11-14T05:10:10.389455Z"
+  },
+  "failure_reason": null,
+  "quality_flags": [
+    "Visual Shaded Relief"
+  ],
+  "known_limitations": [
+    "Visualization-only RGB tiles; cannot provide quantitative elevation in meters.",
+    "Zoom capped at level 7 (~463 m/px)."
+  ],
+  "processing_history": [
+    "Catalog record discovered via MarsTrekSourceAdapter"
+  ],
+  "local_file_path": null,
+  "local_label_path": null,
+  "processed_file_path": null
+}
