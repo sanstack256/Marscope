@@ -167,12 +167,12 @@ MARSCOPE strictly enforces an anti-fabrication standard:
 
 ## 7. Current Project Status & Reproducible Build
 
-- **Phase:** Prompt 5 — Scientific Integrity Gate, PDS Schema Correctness & Reproducible Discovery Complete.
+- **Phase:** Prompt 6 — Evidence Semantics, Source-Complete Manifests & Atomic Index Reproducibility Complete.
 - **Geospatial & Terrain Engine:** Verified GeoTIFF/MOLA/PDS3 ingestion pipeline, IAU2000 Mars ellipsoid calculations, slope/aspect/TRI derivation, and deterministic EVA physics engine.
-- **Scientific Discovery & Integrity Engine:** Dynamic PDS3 (`.LBL` / `.FMT`) & PDS4 (`.XML`) schema-driven parsers, spatial semantic separation (`instrument_target_location` vs `rover_station_location` vs `unlocated`), 12-stage validation pipeline with deterministic SHA-256 `evidence_id`s, SQLite R*Tree spatial index, and automated integrity drift detection (`IntegrityStatus`).
+- **Scientific Discovery & Integrity Engine:** Strict PDS3 (`.LBL` / `.FMT`) & PDS4 (`.XML`) schema-driven parsers with zero silent fallback, uncertainty compatibility enforcement (`uncertainty.py`) withholding cross-type quality scoring, spatial semantic separation (`instrument_target_location` vs `rover_station_location` vs `unlocated`), 12-stage validation pipeline with `evidence_id_v2` provenance-bound SHA-256 identities, staging-then-cutover SQLite R*Tree spatial index, and source-complete dependency/rights drift detection (`IntegrityStatus` + `GenerationBuildStatus`).
 - **Reproducible Offline Index Rebuild:**
   ```bash
-  PYTHONPATH=backend python3 backend/scripts/rebuild_composition_index.py
+  PYTHONPATH=backend python3 backend/scripts/rebuild_composition_index.py [--strict] [--acquire]
   ```
-  Writes atomic `datasets/index/composition_index.sqlite` and `datasets/index/reproducibility_manifest.json` from local NASA PDS files (pass `--acquire` to fetch missing source files from official NASA PDS / JPL URLs).
-- **Automated Verification:** Verified backend unit/integration test suite (`pytest`) and clean Next.js TypeScript/ESLint production build. Route optimization remains scoped out until the next milestone.
+  Builds into an isolated staging SQLite database, validates counts and checksums, and atomically swaps `datasets/index/composition_index.sqlite` and `datasets/index/reproducibility_manifest.json` (preserving any previous active generation untouched on failure). Pass `--acquire` to download missing seed files via atomic verified staging (`safe_write_downloaded_bytes`), and `--strict` to fail if any non-declared expected product is missing or fails validation.
+- **Automated Verification:** Verified backend unit/integration test suite (`pytest`) and clean Next.js TypeScript/ESLint production build. Route optimization and the Human Mobility Intelligence Engine remain intentionally outside this milestone's scope.

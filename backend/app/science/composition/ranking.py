@@ -7,7 +7,7 @@ ranks verified composition evidence using transparent, non-probabilistic dimensi
 """
 
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 from pyproj import Geod
 from app.geospatial.crs import MARS_EQUATORIAL_RADIUS_M, MARS_POLAR_RADIUS_M, normalize_longitude_180
 from app.science.composition.models import (
@@ -17,6 +17,7 @@ from app.science.composition.models import (
     RankingDimensions,
     SearchMatchType,
 )
+from app.science.composition.uncertainty import evaluate_uncertainty_compatibility
 
 # Authoritative Mars IAU2000 ellipsoidal geodesic calculator
 MARS_GEOD = Geod(a=MARS_EQUATORIAL_RADIUS_M, b=MARS_POLAR_RADIUS_M)
@@ -49,10 +50,14 @@ def compute_ranking_dimensions(
     nearby_count: int,
     distance_m: Optional[float] = None,
     config: Optional[RankingConfiguration] = None,
+    cohort_uncertainty_types: Optional[Sequence[Optional[str]]] = None,
 ) -> RankingDimensions:
     """
     Compute deterministic, explicitly heuristic exploration-priority ranking components.
-    Never fabricates default quality (None when unreported) or default corroboration (None when single observation).
+
+    Never fabricates quality scores from unquantified text flags, never assigns a cross-instrument
+    quality score across incompatible statistical uncertainty definitions, and never invents default
+    corroboration (None when single observation).
     """
     cfg = config or DEFAULT_HEURISTIC_RANKING_CONFIG
     unavailable: List[str] = []
@@ -84,23 +89,38 @@ def compute_ranking_dimensions(
         val = 0.0
         unavailable.append("abundance_component")
 
-    # 3. Uncertainty & calibration quality score (None when source reports no uncertainty or quality flag)
+    # 3. Statistical uncertainty precision contribution (strict compatibility check)
+    # Never conflate RMSEP, APXS analytical precision, ChemCam shot stdev, CheMin 2-sigma, or text flags.
     quality_comp: Optional[float] = None
-    if ev.uncertainty_value is not None and ev.normalized_value is not None and ev.normalized_value > 0:
-        rel_err = float(ev.uncertainty_value) / float(ev.normalized_value)
-        q_base = max(0.05, 1.0 - min(0.95, rel_err))
-        if ev.quality_flag and "low" in ev.quality_flag.lower():
-            q_base *= 0.65
-        quality_comp = round(max(0.0, min(1.0, q_base)), 4)
-    elif ev.quality_flag and any(tok in ev.quality_flag.lower() for tok in ("low", "poor", "fair", "high")):
-        q_low = ev.quality_flag.lower()
-        if "low" in q_low or "poor" in q_low:
-            quality_comp = 0.45
-        elif "fair" in q_low:
-            quality_comp = 0.70
+    compatible_unc, compat_status, compat_reason = evaluate_uncertainty_compatibility(
+        ev.uncertainty_type,
+        ev.uncertainty_value,
+        cohort_uncertainty_types=cohort_uncertainty_types,
+    )
+    if (
+        compatible_unc
+        and ev.uncertainty_value is not None
+        and ev.normalized_value is not None
+        and ev.normalized_value > 0
+    ):
+        unc_unit = (ev.uncertainty_unit or ev.normalized_unit or "").strip().lower()
+        val_unit = (ev.normalized_unit or "").strip().lower()
+        if unc_unit == val_unit:
+            rel_err = float(ev.uncertainty_value) / float(ev.normalized_value)
+            quality_comp = round(max(0.05, min(1.0, 1.0 - min(0.95, rel_err))), 4)
         else:
-            quality_comp = 0.90
+            compat_status = "unit_mismatch_with_normalized_value"
+            compat_reason = (
+                f"Uncertainty unit '{ev.uncertainty_unit}' differs from normalized abundance unit "
+                f"'{ev.normalized_unit}'; quality_component withheld."
+            )
+            unavailable.append("quality_component")
     else:
+        if ev.quality_flag and compat_status == "unreported":
+            compat_reason = (
+                f"Qualitative flag '{ev.quality_flag}' without compatible quantitative uncertainty "
+                "cannot be converted into a numeric quality score; quality_component withheld."
+            )
         unavailable.append("quality_component")
 
     # 4. Multi-instrument / repeated observation corroboration (None when only 1 observation exists)
@@ -149,20 +169,29 @@ def compute_ranking_dimensions(
         formula += f" (unreported/excluded: {', '.join(unavailable)})"
 
     val_str = f"{ev.normalized_value:.3g} {ev.normalized_unit}" if ev.normalized_value is not None else "N/A"
-    err_str = f" +/- {ev.uncertainty_value:.3g}" if ev.uncertainty_value is not None else " (uncertainty unreported)"
+    err_str = (
+        f" +/- {ev.uncertainty_value:.3g} {ev.uncertainty_unit or ''} ({ev.uncertainty_type or 'unknown'})"
+        if ev.uncertainty_value is not None
+        else " (uncertainty unreported)"
+    )
     dist_str = f"; {distance_m:.0f} m geodesic from astronaut" if distance_m is not None else ""
     rationale = (
-        f"[Heuristic priority only] {ev.instrument_id} {ev.canonical_species_id}={val_str}{err_str} "
+        f"[Heuristic priority only — NOT probability/certainty] {ev.instrument_id} {ev.canonical_species_id}={val_str}{err_str} "
         f"({match_type.value}); {n_inst} instrument(s), {nearby_count} obs at cluster{dist_str}."
     )
+    if compat_reason and quality_comp is None:
+        rationale += f" {compat_reason}"
 
     return RankingDimensions(
         ranking_config_id=cfg.ranking_config_id,
         ranking_config_version=cfg.ranking_config_version,
         is_heuristic_only=cfg.is_heuristic_only,
+        ranking_methodology_label="HEURISTIC_EXPLORATION_PRIORITY_ONLY",
         evidence_tier_score=round(tier, 4),
         abundance_component=abundance_comp,
         quality_component=quality_comp,
+        uncertainty_compatibility_status=compat_status,
+        quality_exclusion_reason=compat_reason if quality_comp is None else None,
         corroboration_component=corrob_comp,
         spatial_proximity_component=prox_comp,
         composite_rank_score=composite_score,

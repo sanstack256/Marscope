@@ -121,4 +121,13 @@ async def get_reproducibility_manifest() -> Dict[str, Any]:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Reproducibility manifest unavailable; rebuild composition index first.",
         )
-    return json.loads(manifest_path.read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("Manifest root JSON is not an object.")
+        return payload
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Reproducibility manifest is invalid or corrupted: {exc}",
+        ) from exc

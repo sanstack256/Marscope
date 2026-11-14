@@ -70,17 +70,76 @@ class IntegrityStatus(str, Enum):
     VERIFIED = "verified"
     SOURCE_FILES_MISSING = "source_files_missing"
     CHECKSUM_MISMATCH = "checksum_mismatch"
+    MANIFEST_INVALID = "manifest_invalid"
     INCOMPLETE = "incomplete"
+    STALE = "stale"
     UNAVAILABLE = "unavailable"
 
 
+class RightsStatus(str, Enum):
+    VERIFIED = "verified"
+    NOT_VERIFIED = "not_verified"
+    NOT_FOUND = "not_found"
+    RESTRICTED_CONDITIONS_APPLY = "restricted_conditions_apply"
+
+
+class GenerationBuildStatus(str, Enum):
+    COMPLETE = "complete"
+    COMPLETE_WITH_DECLARED_UNAVAILABLE_SOURCES = "complete_with_declared_unavailable_sources"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
+class UncertaintyMetadata(BaseModel):
+    reported_value: Optional[float] = None
+    reported_unit: Optional[str] = None
+    uncertainty_type: str = "unknown"
+    statistical_interpretation: str
+    coverage_confidence_level: str = "unspecified"
+    source_definition: str
+    source_product: str
+    conversion_history: List[str] = Field(default_factory=list)
+
+
+class SourceArtifactRecord(BaseModel):
+    artifact_id: str
+    artifact_role: str
+    dataset_id: Optional[str] = None
+    product_id: Optional[str] = None
+    file_path: str
+    required: bool = True
+    present: bool = True
+    verified: bool = False
+    sha256_checksum: Optional[str] = None
+    byte_size: Optional[int] = None
+    retrieval_timestamp_utc: str = "unknown"
+    source_mtime_utc: Optional[str] = None
+    source_url: Optional[str] = None
+    license_status: RightsStatus = RightsStatus.NOT_VERIFIED
+    rights_statement: str = "Rights/license metadata not verified in source product artifacts."
+    failure_reason: Optional[str] = None
+
+
+class ProductAuditEntry(BaseModel):
+    dataset_id: str
+    product_id: str
+    expected_artifact_name: str
+    discovery_scope: str = "static_seed_manifest"
+    present_locally: bool = False
+    build_status: str = "pending"
+    accepted_record_count: int = 0
+    rejected_record_count: int = 0
+    companion_dependencies: List[str] = Field(default_factory=list)
+    failure_reason: Optional[str] = None
+
+
 class RankingConfiguration(BaseModel):
-    ranking_config_id: str = "heuristic_exploration_priority_v2"
-    ranking_config_version: str = "2.0.0"
+    ranking_config_id: str = "heuristic_exploration_priority_v3"
+    ranking_config_version: str = "3.0.0"
     is_heuristic_only: bool = True
     methodology_note: str = (
-        "Heuristic exploration priority weighting only — NOT a validated scientific probability, "
-        "detection confidence, or physical hazard rating."
+        "Heuristic exploration priority weighting ONLY — NOT a validated scientific probability, "
+        "detection confidence, statistical certainty, or physical hazard rating."
     )
     weights: Dict[str, float] = Field(
         default_factory=lambda: {
@@ -93,9 +152,10 @@ class RankingConfiguration(BaseModel):
     )
     distance_reference_scale_m: float = 2000.0
     quality_scaling_rule: str = (
-        "When positive abundance > 0 and source uncertainty >= 0 are both reported in matching units, "
-        "quality_component = max(0.05, 1 - min(1.0, uncertainty / abundance)) * nominal_factor (1.0 nominal, 0.6 low). "
-        "When quality & uncertainty are unreported in source, quality_component = None (not fabricated)."
+        "When cohort uncertainties share one compatible statistical family with documented scale "
+        "and matching units (and positive abundance > 0), quality_component = max(0.05, 1 - min(0.95, uncertainty / abundance)). "
+        "Across incompatible uncertainty types (e.g. ChemCam RMSEP vs APXS precision vs CheMin 2-sigma), "
+        "unspecified sigma scales, or text-only quality flags, quality_component is None (withheld, never fabricated)."
     )
     corroboration_rule: str = (
         "Explicit peer corroboration: None when only 1 matching observation exists at the site; "
@@ -109,7 +169,9 @@ class ParserFieldMapping(BaseModel):
     column_index: Optional[int] = None
     data_type: Optional[str] = None
     unit: Optional[str] = None
+    unit_source: Optional[str] = None
     description: Optional[str] = None
+    special_constants: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ParserResult(BaseModel):
@@ -119,6 +181,11 @@ class ParserResult(BaseModel):
     schema_version: str
     source_file_path: str
     source_file_checksum: str
+    label_file_path: Optional[str] = None
+    label_file_checksum: Optional[str] = None
+    format_file_paths: List[str] = Field(default_factory=list)
+    format_file_checksums: Dict[str, str] = Field(default_factory=dict)
+    dependency_digest: Optional[str] = None
     field_mappings: List[ParserFieldMapping] = Field(default_factory=list)
     total_rows_read: int = 0
     accepted_row_count: int = 0
@@ -182,12 +249,14 @@ class RejectionRecord(BaseModel):
 
 class CompositionEvidence(BaseModel):
     evidence_id: str
-    determinism_version: str = "evidence_id_v1"
+    determinism_version: str = "evidence_id_v2"
     source_dataset_id: str
     product_id: str
     source_record_ref: str
     source_file_path: Optional[str] = None
     source_file_checksum: Optional[str] = None
+    source_artifact_dependency_digest: Optional[str] = None
+    companion_schema_checksums: Dict[str, str] = Field(default_factory=dict)
     schema_version: Optional[str] = None
     parser_id: Optional[str] = None
     parser_version: Optional[str] = None
@@ -221,9 +290,11 @@ class CompositionEvidence(BaseModel):
     uncertainty_unit: Optional[str] = None
     uncertainty_type: Optional[str] = None
     uncertainty_semantics: Optional[str] = None
+    uncertainty_metadata: Optional[UncertaintyMetadata] = None
     secondary_uncertainty_value: Optional[float] = None
     secondary_uncertainty_unit: Optional[str] = None
     secondary_uncertainty_type: Optional[str] = None
+    secondary_uncertainty_metadata: Optional[UncertaintyMetadata] = None
     detection_limit_value: Optional[float] = None
     detection_limit_unit: Optional[str] = None
     detection_limit_status: Optional[str] = None
@@ -267,14 +338,21 @@ class CompositionEvidence(BaseModel):
 
 
 class RankingDimensions(BaseModel):
-    ranking_config_id: str = "heuristic_exploration_priority_v2"
-    ranking_config_version: str = "2.0.0"
+    ranking_config_id: str = "heuristic_exploration_priority_v3"
+    ranking_config_version: str = "3.0.0"
     is_heuristic_only: bool = True
+    ranking_methodology_label: str = "HEURISTIC_EXPLORATION_PRIORITY_ONLY"
     evidence_tier_score: float = Field(..., description="Instrument/methodology tier (1.0=direct mineral/oxide, 0.55=element-bearing host)")
     abundance_component: Optional[float] = Field(None, description="Normalized abundance contribution [0, 1] within query scale")
     quality_component: Optional[float] = Field(
-        None, description="Uncertainty & calibration quality score [0, 1]; None when unreported in source"
+        None,
+        description=(
+            "Within-family precision ranking contribution [0, 1]; strictly None when uncertainty is "
+            "unreported, statistically unspecified, or incompatible across cohort uncertainty types."
+        ),
     )
+    uncertainty_compatibility_status: str = "unreported"
+    quality_exclusion_reason: Optional[str] = None
     corroboration_component: Optional[float] = Field(
         None, description="Independent instrument/observation corroboration [0, 1]; None for single uncorroborated observation"
     )
@@ -282,7 +360,7 @@ class RankingDimensions(BaseModel):
         None, description="Inverse Mars geodesic distance factor [0, 1] when astronaut position provided"
     )
     composite_rank_score: Optional[float] = Field(
-        None, description="Transparent heuristic weighted priority score (NOT probability or confidence)"
+        None, description="Transparent heuristic weighted priority score (NOT probability or statistical confidence)"
     )
     unavailable_dimensions: List[str] = Field(default_factory=list)
     score_formula: str = Field(..., description="Exact formula documenting weights & active terms used")
@@ -328,6 +406,7 @@ class CandidateDiscoveryLocation(BaseModel):
 class CompositionIndexStatus(BaseModel):
     index_available: bool
     integrity_status: IntegrityStatus = IntegrityStatus.UNAVAILABLE
+    generation_build_status: GenerationBuildStatus = GenerationBuildStatus.FAILED
     active_generation_id: Optional[str] = None
     built_at_utc: Optional[str] = None
     total_validated_evidence: int = 0
@@ -336,13 +415,25 @@ class CompositionIndexStatus(BaseModel):
     rejected_record_count: int = 0
     species_count: int = 0
     ingested_products_count: int = 0
+    expected_products_count: int = 0
+    discovery_scope: str = "static_seed_manifest"
     instruments_indexed: List[str] = Field(default_factory=list)
     checksum_valid: bool = True
+    source_dependencies_valid: bool = True
+    manifest_valid: bool = True
     missing_source_files: List[str] = Field(default_factory=list)
     checksum_mismatches: List[str] = Field(default_factory=list)
+    missing_dependency_files: List[str] = Field(default_factory=list)
+    dependency_checksum_mismatches: List[str] = Field(default_factory=list)
+    missing_expected_products: List[str] = Field(default_factory=list)
+    manifest_validation_errors: List[str] = Field(default_factory=list)
     rtree_enabled: bool = False
     crism_status: str = "unavailable_no_validated_mineral_cube"
     sqlite_path: Optional[str] = None
     reproducibility_manifest_path: Optional[str] = None
     product_manifests: List[Dict[str, Any]] = Field(default_factory=list)
+    dependency_artifacts: List[Dict[str, Any]] = Field(default_factory=list)
+    product_audit: List[Dict[str, Any]] = Field(default_factory=list)
+    rights_summary: Dict[str, Any] = Field(default_factory=dict)
+    retrieval_metadata: Dict[str, Any] = Field(default_factory=dict)
     notes: List[str] = Field(default_factory=list)

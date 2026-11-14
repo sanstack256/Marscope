@@ -309,6 +309,7 @@ def load_pds3_columns_and_structure(
                         f"Referenced PDS3 ^STRUCTURE file '{struct_name}' missing for label '{label_path.name}'."
                     )
             else:
+                parsed.setdefault("_RESOLVED_STRUCTURES", []).append(str(fmt_path))
                 fmt_parsed = parse_pds3_odl(fmt_path.read_text(encoding="utf-8", errors="replace"))
                 columns.extend(fmt_parsed.get("_COLUMNS", []))
 
@@ -513,15 +514,42 @@ def _strip_ns(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+def _extract_pds4_unit(fdict: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """Extract normalized unit and its explicit source ('xml_unit_element' vs 'xml_description')."""
+    explicit_unit = str(fdict.get("unit") or fdict.get("unit_of_measure") or "").strip()
+    if explicit_unit:
+        low = explicit_unit.lower()
+        if low in {"wt%", "wt_pct", "weight_percent", "percent", "%"}:
+            return "wt%", "xml_unit_element"
+        if low == "ppm":
+            return "ppm", "xml_unit_element"
+        return explicit_unit, "xml_unit_element"
+
+    desc = str(fdict.get("description") or "").strip().lower()
+    if "(ppm)" in desc or " ppm" in desc:
+        return "ppm", "xml_description"
+    if "(wt%)" in desc or "wt%" in desc or "weight percent" in desc:
+        return "wt%", "xml_description"
+    return None, None
+
+
 def parse_pds4_table_delimited(xml_path: Path) -> Dict[str, Any]:
     """
     Parse a PDS4 Product_Observational XML label containing <Table_Delimited> and
-    extract ordered <Field_Delimited> schema definitions without hardcoded column names.
+    extract ordered <Field_Delimited> schema definitions, types, units, special constants,
+    declared field counts, and rights metadata without hardcoded column names.
     """
     if not xml_path.exists():
         raise FileNotFoundError(f"PDS4 XML label not found: {xml_path}")
 
-    tree = ET.parse(str(xml_path))
+    import hashlib
+
+    xml_bytes = xml_path.read_bytes()
+    xml_sha256 = hashlib.sha256(xml_bytes).hexdigest()
+    try:
+        tree = ET.ElementTree(ET.fromstring(xml_bytes.decode("utf-8", errors="strict")))
+    except (ET.ParseError, UnicodeDecodeError) as exc:
+        raise ValueError(f"Malformed PDS4 XML label '{xml_path.name}': {exc}") from exc
     root = tree.getroot()
 
     logical_id: Optional[str] = None
@@ -531,6 +559,8 @@ def parse_pds4_table_delimited(xml_path: Path) -> Dict[str, Any]:
     table_offset_bytes: Optional[int] = None
     field_delimiter: str = ","
     records_count: Optional[int] = None
+    declared_fields_count: Optional[int] = None
+    rights_statements: List[str] = []
     fields: List[Dict[str, Any]] = []
 
     for elem in root.iter():
@@ -543,6 +573,10 @@ def parse_pds4_table_delimited(xml_path: Path) -> Dict[str, Any]:
             title = (elem.text or "").strip()
         elif tag == "file_name" and file_name is None:
             file_name = (elem.text or "").strip()
+        elif tag in {"Rights", "rights", "license", "License"}:
+            txt = " ".join((t or "").strip() for t in elem.itertext() if (t or "").strip())
+            if txt:
+                rights_statements.append(txt)
         elif tag == "Table_Delimited":
             for child in elem:
                 ctag = _strip_ns(child.tag)
@@ -558,22 +592,45 @@ def parse_pds4_table_delimited(xml_path: Path) -> Dict[str, Any]:
                         records_count = None
                 elif ctag == "field_delimiter":
                     txt = (child.text or "").strip().lower()
-                    field_delimiter = "," if "comma" in txt or txt == "," else txt
+                    field_delimiter = "," if "comma" in txt or txt == "," else ("\t" if "tab" in txt else txt)
                 elif ctag == "Record_Delimited":
                     for sub in child:
-                        if _strip_ns(sub.tag) == "Field_Delimited":
+                        stag = _strip_ns(sub.tag)
+                        if stag == "fields":
+                            try:
+                                declared_fields_count = int((sub.text or "0").strip())
+                            except ValueError:
+                                declared_fields_count = None
+                        elif stag == "Field_Delimited":
                             fdict: Dict[str, Any] = {}
+                            special_constants: Dict[str, str] = {}
                             for fchild in sub:
-                                fdict[_strip_ns(fchild.tag)] = (fchild.text or "").strip()
+                                ftag = _strip_ns(fchild.tag)
+                                if ftag == "Special_Constants":
+                                    for sc in fchild:
+                                        special_constants[_strip_ns(sc.tag)] = (sc.text or "").strip()
+                                else:
+                                    fdict[ftag] = (fchild.text or "").strip()
+                            if special_constants:
+                                fdict["special_constants"] = special_constants
                             if "field_number" in fdict:
                                 try:
                                     fdict["field_number_int"] = int(fdict["field_number"])
                                 except ValueError:
                                     pass
+                            unit_val, unit_src = _extract_pds4_unit(fdict)
+                            if unit_val:
+                                fdict["resolved_unit"] = unit_val
+                                fdict["unit_source"] = unit_src
                             fields.append(fdict)
 
     if not fields:
         raise ValueError(f"PDS4 XML label '{xml_path.name}' contains zero <Field_Delimited> definitions.")
+    if declared_fields_count is not None and declared_fields_count != len(fields):
+        raise ValueError(
+            f"PDS4 XML label '{xml_path.name}' declares {declared_fields_count} fields "
+            f"but defines {len(fields)} <Field_Delimited> entries."
+        )
 
     fields.sort(key=lambda f: f.get("field_number_int", 999999))
     return {
@@ -584,6 +641,10 @@ def parse_pds4_table_delimited(xml_path: Path) -> Dict[str, Any]:
         "offset_bytes": table_offset_bytes,
         "field_delimiter": field_delimiter,
         "records_count": records_count,
+        "declared_fields_count": declared_fields_count,
         "fields": fields,
+        "xml_sha256": xml_sha256,
+        "rights_verified": len(rights_statements) > 0,
+        "rights_statements": rights_statements,
         "schema_version": f"pds4:{logical_id or xml_path.stem}@{version_id or 'unknown'}",
     }

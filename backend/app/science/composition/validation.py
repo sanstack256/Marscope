@@ -23,27 +23,40 @@ from app.science.composition.models import (
 from app.science.composition.species import get_species_by_id
 
 
-EVIDENCE_ID_DETERMINISM_VERSION = "evidence_id_v1"
+EVIDENCE_ID_DETERMINISM_VERSION = "evidence_id_v2"
 _NON_COMPOSITION_INSTRUMENTS = {"REMS", "RAD", "NAVCAM", "HAZCAM", "MASTCAM", "MARDI", "DAN"}
 
 
 def compute_deterministic_evidence_id(ev: CompositionEvidence) -> str:
     """
-    Compute the canonical content-derived SHA-256 evidence ID exclusively from
-    immutable source identity fields (never timestamps, UUIDs, or host filesystem paths).
+    Compute the canonical content-derived SHA-256 evidence ID.
+
+    - evidence_id_v2 (default): binds immutable source identity fields AND
+      source_file_checksum + source_artifact_dependency_digest + schema_version +
+      parser_version so identical inputs produce identical IDs while material
+      schema/dependency changes never masquerade under stale IDs.
+    - evidence_id_v1: legacy key shape retained strictly for v1 record verification.
     """
     ver = (ev.determinism_version or EVIDENCE_ID_DETERMINISM_VERSION).strip()
-    key = "|".join(
-        [
-            ver,
-            ev.source_dataset_id.strip(),
-            ev.product_id.strip(),
-            ev.source_record_ref.strip(),
-            ev.canonical_species_id.strip(),
-            ev.raw_species_name.strip(),
-            ev.evidence_type.value,
-        ]
-    )
+    parts = [
+        ver,
+        ev.source_dataset_id.strip(),
+        ev.product_id.strip(),
+        ev.source_record_ref.strip(),
+        ev.canonical_species_id.strip(),
+        ev.raw_species_name.strip(),
+        ev.evidence_type.value,
+    ]
+    if ver != "evidence_id_v1":
+        parts.extend(
+            [
+                (ev.source_file_checksum or "").strip(),
+                (ev.source_artifact_dependency_digest or "").strip(),
+                (ev.schema_version or "").strip(),
+                (ev.parser_version or "").strip(),
+            ]
+        )
+    key = "|".join(parts)
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
 
 
@@ -241,6 +254,15 @@ def validate_composition_evidence(
                 "uncertainty_and_quality_metadata",
                 "MISSING_UNCERTAINTY_TYPE",
                 "Uncertainty value reported without documented uncertainty_type.",
+            )
+    if ev.uncertainty_metadata is not None:
+        um = ev.uncertainty_metadata
+        if um.reported_value is not None and (not math.isfinite(um.reported_value) or um.reported_value < 0.0):
+            return fail(
+                9,
+                "uncertainty_and_quality_metadata",
+                "INVALID_UNCERTAINTY_METADATA",
+                f"UncertaintyMetadata reported_value ({um.reported_value}) must be finite and non-negative.",
             )
     if ev.secondary_uncertainty_value is not None:
         if not math.isfinite(ev.secondary_uncertainty_value) or ev.secondary_uncertainty_value < 0.0:

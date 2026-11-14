@@ -280,9 +280,9 @@ def test_chemin_missing_fmt_raises_and_unknown_mineral_never_guessed(tmp_path: P
     # With valid CHEMIN_MIN.FMT, unknown mineral species must be rejected as UNKNOWN_SPECIES (never guessed)
     fmt_path = tmp_path / "CHEMIN_MIN.FMT"
     fmt_path.write_text(
-        "OBJECT = COLUMN\n  NAME = MINERAL\nEND_OBJECT = COLUMN\n"
-        "OBJECT = COLUMN\n  NAME = PERCENT\nEND_OBJECT = COLUMN\n"
-        "OBJECT = COLUMN\n  NAME = ERROR\n  DESCRIPTION = \"2-sigma TOPAS Rietveld\"\nEND_OBJECT = COLUMN\n",
+        'OBJECT = COLUMN\n  NAME = MINERAL\nEND_OBJECT = COLUMN\n'
+        'OBJECT = COLUMN\n  NAME = PERCENT\n  UNIT = "WEIGHT_PERCENT"\nEND_OBJECT = COLUMN\n'
+        'OBJECT = COLUMN\n  NAME = ERROR\n  UNIT = "ESTIMATED_ERROR"\n  DESCRIPTION = "2-sigma TOPAS Rietveld"\nEND_OBJECT = COLUMN\n',
         encoding="utf-8",
     )
     lbl_ok = tmp_path / "cma_001min00790030004ch11503p2.lbl"
@@ -304,7 +304,7 @@ def test_chemin_missing_fmt_raises_and_unknown_mineral_never_guessed(tmp_path: P
     )
     assert len(acc) == 1
     assert acc[0].canonical_species_id == "gypsum"
-    assert acc[0].uncertainty_type == "TOPAS_Rietveld_2_sigma_error"
+    assert acc[0].uncertainty_type == "chemin_rietveld_2sigma"
     assert any(r.rejection_code == "UNKNOWN_SPECIES" and r.raw_species == "Unobtainium_Phase" for r in rej)
 
 
@@ -390,6 +390,23 @@ def test_deterministic_rebuild_and_integrity_drift(tmp_path: Path):
     apxs_csv = raw_dir / "ds01_2021je007171r.csv"
     apxs_csv.write_text(
         "Sol,Target,Northing_m,Easting_m,Elevation_m,FeO_pct,FeO_err\n54,Bathurst,-272038.5,8145966.2,-4520.0,19.8,0.4\n",
+        encoding="utf-8",
+    )
+    apxs_xml = raw_dir / "ds01_2021je007171r.xml"
+    apxs_xml.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<Product_Observational xmlns="http://pds.nasa.gov/pds4/pds/v1">
+  <File_Area_Observational><Table_Delimited><Record_Delimited><fields>7</fields>
+    <Field_Delimited><name>Sol</name><field_number>1</field_number><data_type>ASCII_Integer</data_type></Field_Delimited>
+    <Field_Delimited><name>Target</name><field_number>2</field_number><data_type>ASCII_String</data_type></Field_Delimited>
+    <Field_Delimited><name>Northing_m</name><field_number>3</field_number><data_type>ASCII_Real</data_type></Field_Delimited>
+    <Field_Delimited><name>Easting_m</name><field_number>4</field_number><data_type>ASCII_Real</data_type></Field_Delimited>
+    <Field_Delimited><name>Elevation_m</name><field_number>5</field_number><data_type>ASCII_Real</data_type></Field_Delimited>
+    <Field_Delimited><name>FeO</name><field_number>6</field_number><data_type>ASCII_Real</data_type><unit>wt%</unit></Field_Delimited>
+    <Field_Delimited><name>FeO_err</name><field_number>7</field_number><data_type>ASCII_Real</data_type><unit>wt%</unit></Field_Delimited>
+  </Record_Delimited></Table_Delimited></File_Area_Observational>
+</Product_Observational>
+""",
         encoding="utf-8",
     )
 

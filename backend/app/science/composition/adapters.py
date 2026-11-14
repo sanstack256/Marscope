@@ -21,9 +21,11 @@ from app.science.composition.models import (
     ParserResult,
     RejectionRecord,
     SpeciesCategory,
+    UncertaintyMetadata,
 )
 from app.science.composition.normalization import canonicalize_unit, normalize_concentration_value
 from app.science.composition.species import get_species_by_id, resolve_species_query
+from app.science.composition.uncertainty import get_uncertainty_spec
 from app.science.composition.validation import (
     EVIDENCE_ID_DETERMINISM_VERSION,
     compute_deterministic_evidence_id,
@@ -31,6 +33,49 @@ from app.science.composition.validation import (
 )
 from app.science.coordinate_association import CoordinateAssociationService
 from app.science.curiosity_parser import CuriosityDataParser, _sha256_file
+
+
+def _build_uncertainty_metadata(
+    uncertainty_type: Optional[str],
+    reported_value: Optional[float],
+    reported_unit: Optional[str],
+    source_product: str,
+    source_definition: Optional[str] = None,
+    conversion_history: Optional[List[str]] = None,
+) -> Optional[UncertaintyMetadata]:
+    """Construct complete traceable uncertainty semantics without fabricating coverage levels."""
+    if reported_value is None or not uncertainty_type:
+        return None
+    spec = get_uncertainty_spec(uncertainty_type)
+    return UncertaintyMetadata(
+        reported_value=reported_value,
+        reported_unit=reported_unit,
+        uncertainty_type=spec.uncertainty_type,
+        statistical_interpretation=spec.statistical_interpretation,
+        coverage_confidence_level=spec.coverage_confidence_level,
+        source_definition=source_definition or spec.default_source_definition,
+        source_product=source_product,
+        conversion_history=conversion_history or [],
+    )
+
+
+def _collect_dependency_provenance(
+    parsed_res: ParserResult,
+    extra_paths: Optional[List[Path]] = None,
+) -> Tuple[Dict[str, str], str]:
+    """Collect companion schema/reference SHA-256 checksums and unified dependency digest."""
+    checksums: Dict[str, str] = {}
+    if parsed_res.label_file_path and parsed_res.label_file_checksum:
+        checksums[Path(parsed_res.label_file_path).name] = parsed_res.label_file_checksum
+    for k, v in (parsed_res.format_file_checksums or {}).items():
+        checksums[k] = v
+    for p in extra_paths or []:
+        if p and p.exists():
+            checksums[p.name] = _sha256_file(p)
+    digest_src = "|".join(
+        [parsed_res.source_file_checksum] + [f"{k}:{v}" for k, v in sorted(checksums.items())]
+    )
+    return checksums, hashlib.sha256(digest_src.encode("utf-8")).hexdigest()
 
 
 def _evaluate_batch(
@@ -88,7 +133,9 @@ class ApxsEvidenceAdapter:
             source_dataset_id=source_dataset_id,
             product_id=product_id,
             label_path=label_path,
+            require_xml=True,
         )
+        dep_checksums, dep_digest = _collect_dependency_provenance(parsed_res)
         candidates: List[Tuple[CompositionEvidence, Dict[str, Any]]] = []
 
         for row in parsed_res.records:
@@ -141,6 +188,13 @@ class ApxsEvidenceAdapter:
 
                 rec_ref = f"row:{row['row_index']}:{row['target_name']}:sol{row['sol']}"
                 raw_sp = m.get("source_column") or f"{raw_name}_pct"
+                apxs_unc_meta = _build_uncertainty_metadata(
+                    "apxs_analytical_precision",
+                    err,
+                    norm_unit,
+                    source_product=product_id,
+                    source_definition=m.get("error_definition"),
+                )
                 ev = CompositionEvidence(
                     evidence_id="pending",
                     determinism_version=EVIDENCE_ID_DETERMINISM_VERSION,
@@ -149,6 +203,8 @@ class ApxsEvidenceAdapter:
                     source_record_ref=rec_ref,
                     source_file_path=parsed_res.source_file_path,
                     source_file_checksum=parsed_res.source_file_checksum,
+                    source_artifact_dependency_digest=dep_digest,
+                    companion_schema_checksums=dep_checksums,
                     schema_version=parsed_res.schema_version,
                     parser_id=parsed_res.parser_id,
                     parser_version=parsed_res.parser_version,
@@ -172,8 +228,9 @@ class ApxsEvidenceAdapter:
                     normalization_formula=norm_formula,
                     uncertainty_value=err,
                     uncertainty_unit=norm_unit if err is not None else None,
-                    uncertainty_type="reported_apxs_analytical_error" if err is not None else None,
-                    uncertainty_semantics="1_sigma_analytical_precision_per_PDS4_XML" if err is not None else None,
+                    uncertainty_type="apxs_analytical_precision" if err is not None else None,
+                    uncertainty_semantics=(apxs_unc_meta.statistical_interpretation if apxs_unc_meta else None),
+                    uncertainty_metadata=apxs_unc_meta,
                     detection_limit_status=dl_status,
                     quality_flag=row.get("quality_flag"),
                     methodology="APXS X-ray spectroscopy calibrated RGFit elemental/oxide reduction",
@@ -231,6 +288,13 @@ class ApxsEvidenceAdapter:
                     )
                 rec_ref = f"row:{row['row_index']}:{row['target_name']}:sol{row['sol']}"
                 raw_sp = m.get("source_column") or f"{raw_el}_ppm"
+                apxs_trace_unc = _build_uncertainty_metadata(
+                    "apxs_analytical_precision",
+                    err,
+                    norm_unit,
+                    source_product=product_id,
+                    source_definition=m.get("error_definition"),
+                )
                 ev = CompositionEvidence(
                     evidence_id="pending",
                     determinism_version=EVIDENCE_ID_DETERMINISM_VERSION,
@@ -239,6 +303,8 @@ class ApxsEvidenceAdapter:
                     source_record_ref=rec_ref,
                     source_file_path=parsed_res.source_file_path,
                     source_file_checksum=parsed_res.source_file_checksum,
+                    source_artifact_dependency_digest=dep_digest,
+                    companion_schema_checksums=dep_checksums,
                     schema_version=parsed_res.schema_version,
                     parser_id=parsed_res.parser_id,
                     parser_version=parsed_res.parser_version,
@@ -262,8 +328,9 @@ class ApxsEvidenceAdapter:
                     normalization_formula=norm_formula,
                     uncertainty_value=err,
                     uncertainty_unit=norm_unit if err is not None else None,
-                    uncertainty_type="reported_apxs_analytical_error" if err is not None else None,
-                    uncertainty_semantics="1_sigma_analytical_precision_per_PDS4_XML" if err is not None else None,
+                    uncertainty_type="apxs_analytical_precision" if err is not None else None,
+                    uncertainty_semantics=(apxs_trace_unc.statistical_interpretation if apxs_trace_unc else None),
+                    uncertainty_metadata=apxs_trace_unc,
                     detection_limit_status=dl_status,
                     quality_flag=row.get("quality_flag"),
                     methodology="APXS X-ray spectroscopy calibrated RGFit trace element quantification",
@@ -326,6 +393,10 @@ class ChemCamEvidenceAdapter:
             label_path=label_path,
             coord_service=coord_service,
         )
+        dep_checksums, dep_digest = _collect_dependency_provenance(
+            parsed_res,
+            [coord_service.waypoints_path] if coord_service and coord_service.waypoints_path else None,
+        )
         moc_pid = csv_path.stem.upper()
         candidates: List[Tuple[CompositionEvidence, Dict[str, Any]]] = []
 
@@ -367,6 +438,20 @@ class ChemCamEvidenceAdapter:
                     )
 
                 rec_ref = f"moc_row:{r['row_index']}:{r['product_name']}"
+                cc_unc = _build_uncertainty_metadata(
+                    "chemcam_pls_rmsep",
+                    rmsep,
+                    "wt%",
+                    source_product=moc_pid,
+                    source_definition=ox_m.get("rmsep_definition"),
+                )
+                cc_sec_unc = _build_uncertainty_metadata(
+                    "chemcam_shots_stdev",
+                    shots_stdev,
+                    "wt%",
+                    source_product=moc_pid,
+                    source_definition=ox_m.get("shots_stdev_definition"),
+                )
                 ev = CompositionEvidence(
                     evidence_id="pending",
                     determinism_version=EVIDENCE_ID_DETERMINISM_VERSION,
@@ -375,6 +460,8 @@ class ChemCamEvidenceAdapter:
                     source_record_ref=rec_ref,
                     source_file_path=parsed_res.source_file_path,
                     source_file_checksum=parsed_res.source_file_checksum,
+                    source_artifact_dependency_digest=dep_digest,
+                    companion_schema_checksums=dep_checksums,
                     schema_version=parsed_res.schema_version,
                     parser_id=parsed_res.parser_id,
                     parser_version=parsed_res.parser_version,
@@ -398,11 +485,13 @@ class ChemCamEvidenceAdapter:
                     normalization_formula=norm_formula,
                     uncertainty_value=rmsep,
                     uncertainty_unit="wt%" if rmsep is not None else None,
-                    uncertainty_type="RMSEP" if rmsep is not None else None,
-                    uncertainty_semantics="Root-Mean-Square Error of Prediction (calibration accuracy)" if rmsep is not None else None,
+                    uncertainty_type="chemcam_pls_rmsep" if rmsep is not None else None,
+                    uncertainty_semantics=(cc_unc.statistical_interpretation if cc_unc else None),
+                    uncertainty_metadata=cc_unc,
                     secondary_uncertainty_value=shots_stdev,
                     secondary_uncertainty_unit="wt%" if shots_stdev is not None else None,
-                    secondary_uncertainty_type="shots_stdev" if shots_stdev is not None else None,
+                    secondary_uncertainty_type="chemcam_shots_stdev" if shots_stdev is not None else None,
+                    secondary_uncertainty_metadata=cc_sec_unc,
                     detection_limit_status=dl_status,
                     quality_flag=f"total_oxide_wt={r.get('total_wt_pct')}" if r.get("total_wt_pct") is not None else None,
                     methodology="ChemCam LIBS Multivariate PLS+ICA Oxide Regression (LANL MOC table)",
@@ -507,6 +596,11 @@ class CheMinEvidenceAdapter:
             label_path=label_path,
             coord_service=coord_service,
             extra_structure_dirs=extra_structure_dirs,
+            require_label=True,
+        )
+        dep_checksums, dep_digest = _collect_dependency_provenance(
+            parsed_res,
+            [coord_service.waypoints_path] if coord_service and coord_service.waypoints_path else None,
         )
         parsed = parsed_res.records[0]
         coords = parsed.get("coordinates")
@@ -528,7 +622,20 @@ class CheMinEvidenceAdapter:
             raw_min = m["mineral"]
             wt_pct = m.get("weight_percent")
             err = m.get("estimated_error")
-            err_sem = m.get("error_semantics") or "2_sigma_topas_rietveld"
+            err_sem = m.get("error_semantics") or "chemin_estimated_error_unspecified_sigma"
+            err_def = m.get("error_definition")
+            chemin_unc_type = (
+                "chemin_rietveld_2sigma"
+                if err_sem == "chemin_rietveld_2sigma"
+                else "chemin_estimated_error_unspecified_sigma"
+            )
+            chemin_unc = _build_uncertainty_metadata(
+                chemin_unc_type,
+                err,
+                "wt%",
+                source_product=pid,
+                source_definition=err_def,
+            )
             res = resolve_species_query(raw_min)
             spec = res.species if res.resolved else None
             # Never invent/guess canonical species IDs for unknown mineral rows
@@ -562,13 +669,19 @@ class CheMinEvidenceAdapter:
                 source_record_ref=rec_ref,
                 source_file_path=parsed_res.source_file_path,
                 source_file_checksum=parsed_res.source_file_checksum,
+                source_artifact_dependency_digest=dep_digest,
+                companion_schema_checksums=dep_checksums,
                 schema_version=parsed_res.schema_version,
                 parser_id=parsed_res.parser_id,
                 parser_version=parsed_res.parser_version,
                 instrument_id="CheMin_XRD",
                 instrument_name="Chemistry & Mineralogy X-Ray Diffractometer (CheMin)",
                 processing_level="Derived Mineral Abundance RDR5 (TOPAS Rietveld)",
-                calibration_status="Quantitative crystalline mineral weight% with 2-sigma TOPAS Rietveld error",
+                calibration_status=(
+                    "Quantitative crystalline mineral weight% with 2-sigma TOPAS Rietveld error"
+                    if chemin_unc_type == "chemin_rietveld_2sigma"
+                    else "Quantitative crystalline mineral weight% with ESTIMATED_ERROR (sigma unspecified in label)"
+                ),
                 target_name=target_label,
                 sol=parsed.get("sol"),
                 observation_timestamp_utc=parsed.get("start_time"),
@@ -586,8 +699,9 @@ class CheMinEvidenceAdapter:
                 normalization_formula=norm_formula,
                 uncertainty_value=err,
                 uncertainty_unit="wt%" if err is not None else None,
-                uncertainty_type="TOPAS_Rietveld_2_sigma_error" if err is not None else None,
-                uncertainty_semantics=err_sem if err is not None else None,
+                uncertainty_type=chemin_unc_type if err is not None else None,
+                uncertainty_semantics=(chemin_unc.statistical_interpretation if chemin_unc else None),
+                uncertainty_metadata=chemin_unc,
                 detection_limit_status=dl_status,
                 quality_flag="crystalline_phase_wt_pct",
                 methodology="CheMin Co K-alpha X-Ray Diffraction TOPAS Rietveld refinement",

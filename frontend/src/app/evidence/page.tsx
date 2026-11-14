@@ -344,17 +344,40 @@ export default function EvidenceProvenancePage() {
 
         {indexStatus && (
           <div className="space-y-3">
-            <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-[11px] font-mono">
+            <div className="grid grid-cols-2 md:grid-cols-7 gap-2 text-[11px] font-mono">
               <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
                 <div className="text-[9px] text-slate-500">INTEGRITY</div>
                 <div
                   className={
-                    indexStatus.integrity_status === "verified" && indexStatus.checksum_valid
+                    indexStatus.integrity_status === "verified" &&
+                    indexStatus.checksum_valid &&
+                    indexStatus.source_dependencies_valid !== false &&
+                    indexStatus.manifest_valid !== false &&
+                    indexStatus.generation_build_status !== "partial" &&
+                    indexStatus.generation_build_status !== "failed"
                       ? "text-emerald-300 font-semibold"
+                      : indexStatus.generation_build_status === "partial"
+                      ? "text-amber-300 font-semibold"
                       : "text-red-300 font-semibold"
                   }
                 >
                   {(indexStatus.integrity_status || (indexStatus.checksum_valid ? "verified" : "mismatch")).toUpperCase()}
+                </div>
+              </div>
+              <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
+                <div className="text-[9px] text-slate-500">BUILD COMPLETENESS</div>
+                <div
+                  className={
+                    indexStatus.generation_build_status === "complete" ||
+                    indexStatus.generation_build_status === "complete_with_declared_unavailable_sources"
+                      ? "text-emerald-300 font-semibold truncate"
+                      : indexStatus.generation_build_status === "partial"
+                      ? "text-amber-300 font-semibold truncate"
+                      : "text-red-300 font-semibold truncate"
+                  }
+                  title={indexStatus.generation_build_status || "unknown"}
+                >
+                  {(indexStatus.generation_build_status || "unknown").toUpperCase()}
                 </div>
               </div>
               <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536]">
@@ -381,16 +404,50 @@ export default function EvidenceProvenancePage() {
               </div>
             </div>
 
-            {!indexStatus.checksum_valid && (
+            <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536] text-[10px] font-mono text-slate-300 flex flex-wrap gap-x-4 gap-y-1">
+              <span>Scope: {indexStatus.discovery_scope || "static_seed_manifest"}</span>
+              <span>
+                Products: {indexStatus.ingested_products_count}/{indexStatus.expected_products_count ?? "?"} ingested
+              </span>
+              {indexStatus.rights_summary?.counts && (
+                <span>
+                  Rights not_verified: {indexStatus.rights_summary.counts.not_verified ?? 0} · verified:{" "}
+                  {indexStatus.rights_summary.counts.verified ?? 0}
+                </span>
+              )}
+              {indexStatus.retrieval_metadata && (
+                <span>
+                  Retrieval timestamps: {indexStatus.retrieval_metadata.verified_retrieval_timestamps ?? 0} recorded /{" "}
+                  {indexStatus.retrieval_metadata.unknown_retrieval_timestamps ?? 0} unknown (pre-existing)
+                </span>
+              )}
+            </div>
+
+            {(!indexStatus.checksum_valid ||
+              indexStatus.source_dependencies_valid === false ||
+              indexStatus.manifest_valid === false ||
+              (indexStatus.missing_expected_products && indexStatus.missing_expected_products.length > 0)) && (
               <div className="p-3 rounded-lg bg-red-950/40 border border-red-800/50 text-[11px] font-mono text-red-200 space-y-1">
                 <div>
-                  Integrity check failed ({indexStatus.integrity_status}):
+                  Integrity / completeness alert ({indexStatus.integrity_status} · {indexStatus.generation_build_status}):
                 </div>
                 {indexStatus.missing_source_files && indexStatus.missing_source_files.length > 0 && (
-                  <div>Missing: {indexStatus.missing_source_files.join(", ")}</div>
+                  <div>Missing source files: {indexStatus.missing_source_files.join(", ")}</div>
                 )}
                 {indexStatus.checksum_mismatches && indexStatus.checksum_mismatches.length > 0 && (
-                  <div>Modified SHA-256: {indexStatus.checksum_mismatches.join(", ")}</div>
+                  <div>Modified source SHA-256: {indexStatus.checksum_mismatches.join(", ")}</div>
+                )}
+                {indexStatus.missing_dependency_files && indexStatus.missing_dependency_files.length > 0 && (
+                  <div>Missing companion dependencies: {indexStatus.missing_dependency_files.join(", ")}</div>
+                )}
+                {indexStatus.dependency_checksum_mismatches && indexStatus.dependency_checksum_mismatches.length > 0 && (
+                  <div>Modified companion dependencies: {indexStatus.dependency_checksum_mismatches.join(", ")}</div>
+                )}
+                {indexStatus.missing_expected_products && indexStatus.missing_expected_products.length > 0 && (
+                  <div>Missing expected seed products: {indexStatus.missing_expected_products.join(", ")}</div>
+                )}
+                {indexStatus.manifest_validation_errors && indexStatus.manifest_validation_errors.length > 0 && (
+                  <div>Manifest errors: {indexStatus.manifest_validation_errors.join("; ")}</div>
                 )}
               </div>
             )}
@@ -411,6 +468,7 @@ export default function EvidenceProvenancePage() {
                     <th className="px-2.5 py-1.5">Schema</th>
                     <th className="px-2.5 py-1.5">Parser</th>
                     <th className="px-2.5 py-1.5">Coords Method</th>
+                    <th className="px-2.5 py-1.5">License / Retrieval</th>
                     <th className="px-2.5 py-1.5 text-right">Accepted / Rej</th>
                   </tr>
                 </thead>
@@ -426,6 +484,10 @@ export default function EvidenceProvenancePage() {
                         {pm.parser_id || "?"} v{pm.parser_version || "?"}
                       </td>
                       <td className="px-2.5 py-1.5">{pm.coordinate_association_method || "N/A"}</td>
+                      <td className="px-2.5 py-1.5 text-[10px]">
+                        <span className="text-amber-300">{pm.license_status || "not_verified"}</span> ·{" "}
+                        <span className="text-slate-400">{pm.retrieval_timestamp_utc || "unknown"}</span>
+                      </td>
                       <td className="px-2.5 py-1.5 text-right">
                         <span className="text-emerald-300">{pm.record_count ?? 0}</span> /{" "}
                         <span className="text-red-300">{pm.rejected_count ?? 0}</span>
@@ -435,6 +497,42 @@ export default function EvidenceProvenancePage() {
                 </tbody>
               </table>
             </div>
+
+            {manifest.dependency_artifacts && manifest.dependency_artifacts.length > 0 && (
+              <div className="space-y-1.5 pt-2">
+                <div className="text-xs font-semibold text-slate-200">
+                  Tracked Dependency Graph Artifacts ({manifest.dependency_artifacts.length}: primary, PDS3 .LBL/.FMT, PDS4 .XML, waypoints JSON)
+                </div>
+                <div className="overflow-x-auto rounded-lg border border-[#1d2536] max-h-56 overflow-y-auto">
+                  <table className="w-full text-left text-[10px] font-mono">
+                    <thead className="bg-[#0d111a] text-slate-400 border-b border-[#1d2536] sticky top-0">
+                      <tr>
+                        <th className="px-2.5 py-1.5">Role</th>
+                        <th className="px-2.5 py-1.5">Artifact</th>
+                        <th className="px-2.5 py-1.5">SHA-256</th>
+                        <th className="px-2.5 py-1.5">Rights</th>
+                        <th className="px-2.5 py-1.5">Retrieved UTC</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#1a2233] text-slate-300">
+                      {manifest.dependency_artifacts.map((dep) => (
+                        <tr key={dep.artifact_id}>
+                          <td className="px-2.5 py-1 text-sky-300">{dep.artifact_role}</td>
+                          <td className="px-2.5 py-1 text-slate-100">{dep.file_path.split("/").pop() || dep.file_path}</td>
+                          <td className="px-2.5 py-1 text-slate-400" title={dep.sha256_checksum || ""}>
+                            {dep.sha256_checksum ? `${dep.sha256_checksum.slice(0, 12)}...` : "N/A"}
+                          </td>
+                          <td className="px-2.5 py-1 text-amber-300" title={dep.rights_statement || ""}>
+                            {dep.license_status}
+                          </td>
+                          <td className="px-2.5 py-1 text-slate-400">{dep.retrieval_timestamp_utc}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

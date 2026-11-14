@@ -395,8 +395,65 @@ export type IntegrityStatus =
   | "verified"
   | "source_files_missing"
   | "checksum_mismatch"
+  | "manifest_invalid"
+  | "stale"
   | "incomplete"
   | "unavailable";
+
+export type RightsStatus =
+  | "verified"
+  | "not_verified"
+  | "not_found"
+  | "restricted_conditions_apply";
+
+export type GenerationBuildStatus =
+  | "complete"
+  | "complete_with_declared_unavailable_sources"
+  | "partial"
+  | "failed";
+
+export interface UncertaintyMetadata {
+  reported_value?: number | null;
+  reported_unit?: string | null;
+  uncertainty_type: string;
+  statistical_interpretation: string;
+  coverage_confidence_level: string;
+  source_definition: string;
+  source_product: string;
+  conversion_history?: string[];
+}
+
+export interface SourceArtifactRecord {
+  artifact_id: string;
+  artifact_role: string;
+  dataset_id: string;
+  product_id: string;
+  file_path: string;
+  required: boolean;
+  present: boolean;
+  verified: boolean;
+  sha256_checksum?: string | null;
+  byte_size?: number | null;
+  retrieval_timestamp_utc: string;
+  source_mtime_utc?: string | null;
+  source_url?: string | null;
+  license_status: RightsStatus;
+  rights_statement?: string | null;
+  failure_reason?: string | null;
+}
+
+export interface ProductAuditEntry {
+  dataset_id: string;
+  product_id: string;
+  expected_artifact_name: string;
+  discovery_scope: string;
+  present_locally: boolean;
+  build_status: string;
+  accepted_record_count: number;
+  rejected_record_count: number;
+  companion_dependencies: string[];
+  failure_reason?: string | null;
+}
 
 export interface CompositionEvidence {
   evidence_id: string;
@@ -405,6 +462,8 @@ export interface CompositionEvidence {
   product_id: string;
   source_record_ref: string;
   source_file_checksum?: string | null;
+  source_artifact_dependency_digest?: string | null;
+  companion_schema_checksums?: Record<string, string>;
   schema_version?: string | null;
   parser_id?: string | null;
   parser_version?: string | null;
@@ -436,9 +495,11 @@ export interface CompositionEvidence {
   uncertainty_unit?: string | null;
   uncertainty_type?: string | null;
   uncertainty_semantics?: string | null;
+  uncertainty_metadata?: UncertaintyMetadata | null;
   secondary_uncertainty_value?: number | null;
   secondary_uncertainty_unit?: string | null;
   secondary_uncertainty_type?: string | null;
+  secondary_uncertainty_metadata?: UncertaintyMetadata | null;
   instrument_standoff_m?: number | null;
   detection_limit_value?: number | null;
   detection_limit_unit?: string | null;
@@ -475,6 +536,7 @@ export interface RankingDimensions {
   ranking_config_id?: string;
   ranking_config_version?: string;
   is_heuristic_only?: boolean;
+  ranking_methodology_label?: string;
   evidence_tier_score: number;
   abundance_component?: number | null;
   quality_component?: number | null;
@@ -482,6 +544,8 @@ export interface RankingDimensions {
   spatial_proximity_component?: number | null;
   composite_rank_score?: number | null;
   unavailable_dimensions?: string[];
+  uncertainty_compatibility_status?: string;
+  quality_exclusion_reason?: string | null;
   score_formula: string;
   rationale: string;
 }
@@ -528,10 +592,15 @@ export interface ProductManifestEntry {
   file_path: string;
   sha256_checksum: string;
   byte_size?: number;
+  retrieval_timestamp_utc?: string;
   source_mtime_utc?: string | null;
   source_url?: string | null;
   license?: string | null;
+  license_status?: RightsStatus;
+  rights_statement?: string | null;
   label_path?: string | null;
+  dependency_digest?: string | null;
+  companion_files?: Record<string, string>;
   schema_version?: string | null;
   parser_id?: string | null;
   parser_version?: string | null;
@@ -545,6 +614,7 @@ export interface ProductManifestEntry {
 export interface CompositionIndexStatus {
   index_available: boolean;
   integrity_status?: IntegrityStatus;
+  generation_build_status?: GenerationBuildStatus;
   active_generation_id?: string | null;
   built_at_utc?: string | null;
   total_validated_evidence: number;
@@ -553,12 +623,33 @@ export interface CompositionIndexStatus {
   rejected_record_count: number;
   species_count: number;
   ingested_products_count: number;
+  expected_products_count?: number;
+  discovery_scope?: string;
   instruments_indexed: string[];
   checksum_valid: boolean;
+  source_dependencies_valid?: boolean;
+  manifest_valid?: boolean;
   missing_source_files?: string[];
   checksum_mismatches?: string[];
+  missing_dependency_files?: string[];
+  dependency_checksum_mismatches?: string[];
+  missing_expected_products?: string[];
+  manifest_validation_errors?: string[];
   reproducibility_manifest_path?: string | null;
   product_manifests?: ProductManifestEntry[];
+  dependency_artifacts?: SourceArtifactRecord[];
+  product_audit?: ProductAuditEntry[];
+  rights_summary?: {
+    counts?: Record<string, number>;
+    note?: string;
+  };
+  retrieval_metadata?: {
+    total_tracked_artifacts?: number;
+    verified_retrieval_timestamps?: number;
+    unknown_retrieval_timestamps?: number;
+    discovery_scope?: string;
+    note?: string;
+  };
   rtree_enabled: boolean;
   crism_status: string;
   sqlite_path?: string | null;
@@ -568,6 +659,8 @@ export interface CompositionIndexStatus {
 export interface ReproducibilityManifest {
   manifest_format_version: string;
   generation_id: string;
+  generation_build_status?: GenerationBuildStatus;
+  discovery_scope?: string;
   built_at_utc?: string;
   source_manifest_checksum?: string;
   determinism_version: string;
@@ -579,7 +672,21 @@ export interface ReproducibilityManifest {
   unlocated_evidence_count?: number;
   rejected_record_count?: number;
   crism_status?: string;
+  rights_summary?: {
+    counts?: Record<string, number>;
+    note?: string;
+  };
+  retrieval_metadata?: {
+    total_tracked_artifacts?: number;
+    verified_retrieval_timestamps?: number;
+    unknown_retrieval_timestamps?: number;
+    discovery_scope?: string;
+    note?: string;
+  };
   products: ProductManifestEntry[];
+  dependency_artifacts?: SourceArtifactRecord[];
+  product_audit?: ProductAuditEntry[];
+  missing_expected_products?: string[];
   notes?: string[];
 }
 

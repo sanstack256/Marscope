@@ -850,21 +850,35 @@ export default function SurfaceExplorerPage() {
                         </span>
                         <span
                           className={`px-1.5 py-0.5 rounded text-[9px] border ${
-                            indexStatus.integrity_status === "verified" && indexStatus.checksum_valid
+                            indexStatus.integrity_status === "verified" &&
+                            indexStatus.checksum_valid &&
+                            indexStatus.source_dependencies_valid !== false &&
+                            indexStatus.manifest_valid !== false &&
+                            indexStatus.generation_build_status !== "partial" &&
+                            indexStatus.generation_build_status !== "failed"
                               ? "bg-emerald-950/60 border-emerald-700/60 text-emerald-300"
+                              : indexStatus.generation_build_status === "partial"
+                              ? "bg-amber-950/60 border-amber-700/60 text-amber-300"
                               : "bg-red-950/60 border-red-700/60 text-red-300"
                           }`}
                         >
                           {(indexStatus.integrity_status || (indexStatus.checksum_valid ? "verified" : "checksum_mismatch")).toUpperCase()}
+                          {indexStatus.generation_build_status ? ` · ${indexStatus.generation_build_status.toUpperCase()}` : ""}
                         </span>
                       </div>
                       <div>
                         Instruments: {indexStatus.instruments_indexed.join(", ") || "None"} · R*Tree:{" "}
                         {indexStatus.rtree_enabled ? "ON" : "OFF"} · Gen: {indexStatus.active_generation_id || "N/A"}
                       </div>
-                      {!indexStatus.checksum_valid && (
+                      {(!indexStatus.checksum_valid ||
+                        indexStatus.source_dependencies_valid === false ||
+                        indexStatus.manifest_valid === false) && (
                         <div className="text-[9px] text-red-300">
-                          Source integrity drift detected ({indexStatus.missing_source_files?.length || 0} missing, {indexStatus.checksum_mismatches?.length || 0} modified). Rebuild required.
+                          Integrity drift detected ({indexStatus.missing_source_files?.length || 0} missing,{" "}
+                          {indexStatus.checksum_mismatches?.length || 0} modified primary,{" "}
+                          {(indexStatus.missing_dependency_files?.length || 0) +
+                            (indexStatus.dependency_checksum_mismatches?.length || 0)}{" "}
+                          companion drift). Rebuild required.
                         </div>
                       )}
                       <div className="text-[9px] text-amber-300/90">
@@ -1115,6 +1129,19 @@ export default function SurfaceExplorerPage() {
                               {inspectedEvidence.secondary_uncertainty_unit || ""} ({inspectedEvidence.secondary_uncertainty_type})
                             </div>
                           )}
+                          {inspectedEvidence.uncertainty_metadata && (
+                            <div className="text-slate-400">
+                              Uncert Semantics: {inspectedEvidence.uncertainty_metadata.statistical_interpretation} ·{" "}
+                              Coverage: {inspectedEvidence.uncertainty_metadata.coverage_confidence_level}
+                              {inspectedEvidence.uncertainty_metadata.source_definition
+                                ? ` · Source def: ${inspectedEvidence.uncertainty_metadata.source_definition}`
+                                : ""}
+                              {inspectedEvidence.uncertainty_metadata.conversion_history &&
+                              inspectedEvidence.uncertainty_metadata.conversion_history.length > 0
+                                ? ` · Conversion: ${inspectedEvidence.uncertainty_metadata.conversion_history.join("; ")}`
+                                : ""}
+                            </div>
+                          )}
                           {inspectedEvidence.normalization_formula && (
                             <div className="text-slate-400">
                               Formula: {inspectedEvidence.normalization_formula}
@@ -1245,6 +1272,12 @@ export default function SurfaceExplorerPage() {
                             <div className="text-[10px] text-slate-400 leading-snug">
                               {cand.ranking.rationale}
                             </div>
+                            {cand.ranking.quality_exclusion_reason && (
+                              <div className="text-[9px] text-amber-300/90 leading-snug">
+                                Quality term omitted ({cand.ranking.uncertainty_compatibility_status || "withheld"}):{" "}
+                                {cand.ranking.quality_exclusion_reason}
+                              </div>
+                            )}
                             {cand.coordinate_limitations && cand.coordinate_limitations.length > 0 && (
                               <div className="text-[9px] text-purple-300/90 leading-snug">
                                 Note: {cand.coordinate_limitations[0]}

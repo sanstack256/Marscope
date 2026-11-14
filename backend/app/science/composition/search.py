@@ -223,12 +223,21 @@ class CompositionSearchService:
                 )
                 # Preserve exact uncertainty matching only if units align cleanly
                 el_err = stoich["element_uncertainty_wt_pct"]
+                updated_unc_meta = None
+                if ev.uncertainty_metadata is not None and el_err is not None:
+                    updated_unc_meta = ev.uncertainty_metadata.model_copy(
+                        update={
+                            "conversion_history": list(ev.uncertainty_metadata.conversion_history)
+                            + [f"stoichiometric_oxide_to_element:{ev.canonical_species_id}->{spec.canonical_id} (factor={stoich['stoichiometric_factor']})"]
+                        }
+                    )
                 ev_out = ev.model_copy(
                     update={
                         "normalized_value": stoich["element_wt_pct"],
                         "normalized_unit": "wt%",
                         "uncertainty_value": el_err,
                         "uncertainty_unit": "wt%" if el_err is not None else None,
+                        "uncertainty_metadata": updated_unc_meta,
                         "normalization_formula": stoich["formula"],
                         "is_stoichiometric_conversion": True,
                         "source_oxide_species": stoich["source_oxide_species"],
@@ -287,8 +296,15 @@ class CompositionSearchService:
                 "APXS reports total iron as FeO and ChemCam LIBS MOC reports total iron as FeOT; both express total iron on an equivalent FeO basis rather than separated ferric/ferrous speciation."
             )
 
-        # Compute max abundance per query unit scale for ranking normalization
+        # Compute max abundance per query unit scale and cohort uncertainty comparability
         max_abund = max((float(x[0].normalized_value or 0.0) for x in processed), default=1.0)
+        cohort_unc_types = [x[0].uncertainty_type for x in processed if x[0].uncertainty_value is not None]
+        distinct_unc_types = sorted({t for t in cohort_unc_types if t})
+        if len(distinct_unc_types) > 1:
+            warnings.append(
+                f"Query cohort mixes heterogeneous statistical uncertainty types ({', '.join(distinct_unc_types)}); "
+                "cross-instrument numeric quality_component was withheld rather than equating incompatible error definitions."
+            )
 
         # Cluster nearby located hits (~0.001 deg ~ 60 m grid key or target) for corroboration & candidate sites
         clusters: Dict[str, List[Tuple[CompositionEvidence, SearchMatchType, str, Optional[float], Optional[float]]]] = {}
@@ -311,6 +327,7 @@ class CompositionSearchService:
                 nearby_count=len(peer_items),
                 distance_m=dist_m,
                 config=rank_cfg,
+                cohort_uncertainty_types=cohort_unc_types,
             )
             hits.append(
                 RankedCompositionHit(

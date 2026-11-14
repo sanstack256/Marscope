@@ -183,6 +183,26 @@ def test_validation_pipeline_rejects_invalid_and_non_composition_records():
     assert ok_unloc and rej_unloc is None and len(stages_unloc) == 12
 
 
+def _write_test_apxs_xml(path: Path, columns: list[str]) -> None:
+    fields_xml = []
+    for i, col in enumerate(columns, start=1):
+        dtype = "ASCII_Integer" if (col == "Sol" or col.endswith("_ppm") or (col.endswith("_err") and any(c.startswith(col[:-4] + "_ppm") for c in columns))) else ("ASCII_String" if col == "Target" else "ASCII_Real")
+        unit_el = "<unit>ppm</unit>" if col.endswith("_ppm") else ("<unit>wt%</unit>" if col.endswith("_pct") else "")
+        desc = f"Precision Error in Concentration ({'ppm' if col.endswith('_ppm') else 'wt%'})" if col.endswith("_err") else col
+        fields_xml.append(
+            f"<Field_Delimited><name>{col}</name><field_number>{i}</field_number><data_type>{dtype}</data_type>{unit_el}<description>{desc}</description></Field_Delimited>"
+        )
+    path.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Product_Observational xmlns="http://pds.nasa.gov/pds4/pds/v1">'
+        "<File_Area_Observational><Table_Delimited><Record_Delimited>"
+        f"<fields>{len(columns)}</fields>"
+        + "".join(fields_xml)
+        + "</Record_Delimited></Table_Delimited></File_Area_Observational></Product_Observational>",
+        encoding="utf-8",
+    )
+
+
 def test_spatial_index_rebuild_search_antimeridian_and_targets(tmp_path: Path):
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir(parents=True)
@@ -192,15 +212,21 @@ def test_spatial_index_rebuild_search_antimeridian_and_targets(tmp_path: Path):
         '{"type":"FeatureCollection","features":[{"type":"Feature","properties":{"RMC":"3_4","lon":137.44172,"lat":-4.5895,"elev_geoid":-4520.0}}]}',
         encoding="utf-8",
     )
-    # APXS with 1 valid target + 1 <LOD (0/0)
+    # APXS with 1 valid target + 1 <LOD (0/0) AND required companion PDS4 XML
+    apxs_headers = "Sol,Target,Northing_m,Easting_m,Elevation_m,Na2O_pct,Na2O_err,MgO_pct,MgO_err,Al2O3_pct,Al2O3_err,SiO2_pct,SiO2_err,P2O5_pct,P2O5_err,SO3_pct,SO3_err,Cl_pct,Cl_err,K2O_pct,K2O_err,CaO_pct,CaO_err,TiO2_pct,TiO2_err,Cr2O3_pct,Cr2O3_err,MnO_pct,MnO_err,FeO_pct,FeO_err,Ni_ppm,Ni_err,Zn_ppm,Zn_err,Br_ppm,Br_err"
     (raw_dir / "ds01_2021je007171r.csv").write_text(
-        "Sol,Target,Northing_m,Easting_m,Elevation_m,Na2O_pct,Na2O_err,MgO_pct,MgO_err,Al2O3_pct,Al2O3_err,SiO2_pct,SiO2_err,P2O5_pct,P2O5_err,SO3_pct,SO3_err,Cl_pct,Cl_err,K2O_pct,K2O_err,CaO_pct,CaO_err,TiO2_pct,TiO2_err,Cr2O3_pct,Cr2O3_err,MnO_pct,MnO_err,FeO_pct,FeO_err,Ni_ppm,Ni_err,Zn_ppm,Zn_err,Br_ppm,Br_err\n"
+        apxs_headers + "\n"
         "54,Bathurst_Inlet,-272038.5,8145966.2,-4520.0,2.5,0.2,8.1,0.3,7.2,0.2,45.0,0.5,0.9,0.1,5.2,0.2,0.8,0.1,0.5,0.1,6.4,0.2,1.1,0.1,0.4,0.1,0.4,0.1,19.8,0.4,0,0,150,20,80,10\n",
         encoding="utf-8",
     )
-    # CheMin with gypsum detection & unlocated RMC (99_99) so we verify unlocated_matches_count separation!
+    _write_test_apxs_xml(raw_dir / "ds01_2021je007171r.xml", apxs_headers.split(","))
+    # CheMin with gypsum detection & unlocated RMC (99_99) + required .lbl & WEIGHT_PERCENT .fmt
     (raw_dir / "chemin_min.fmt").write_text(
-        "OBJECT = COLUMN\n  NAME = MINERAL\nEND_OBJECT = COLUMN\nOBJECT = COLUMN\n  NAME = PERCENT\nEND_OBJECT = COLUMN\nOBJECT = COLUMN\n  NAME = ERROR\nEND_OBJECT = COLUMN\n",
+        'OBJECT = COLUMN\n  NAME = MINERAL\nEND_OBJECT = COLUMN\nOBJECT = COLUMN\n  NAME = PERCENT\n  UNIT = "WEIGHT_PERCENT"\nEND_OBJECT = COLUMN\nOBJECT = COLUMN\n  NAME = ERROR\n  UNIT = "ESTIMATED_ERROR"\nEND_OBJECT = COLUMN\n',
+        encoding="utf-8",
+    )
+    (raw_dir / "cma_001min00790990099ch11503p1.lbl").write_text(
+        'PDS_VERSION_ID = PDS3\nPRODUCT_ID = "CMA_001MIN00790990099CH11503P1"\nROVER_MOTION_COUNTER = (99, 99)\nOBJECT = SPREADSHEET\n  ^STRUCTURE = "CHEMIN_MIN.FMT"\n  DESCRIPTION = "Column 3 indicates the estimated 2-sigma analytical errors."\nEND_OBJECT = SPREADSHEET\nEND\n',
         encoding="utf-8",
     )
     (raw_dir / "cma_001min00790990099ch11503p1.csv").write_text(
@@ -266,6 +292,10 @@ def test_spatial_index_rebuild_search_antimeridian_and_targets(tmp_path: Path):
     (raw_dir / "ds01_2021je007171r.csv").write_text(
         "Sol,Target,Northing_m,Easting_m,Elevation_m,FeO_pct,FeO_err\n54,Bathurst,-272038.5,8145966.2,-4520.0,19.8,0.4\n",
         encoding="utf-8",
+    )
+    _write_test_apxs_xml(
+        raw_dir / "ds01_2021je007171r.xml",
+        ["Sol", "Target", "Northing_m", "Easting_m", "Elevation_m", "FeO_pct", "FeO_err"],
     )
     index2.rebuild_from_raw_directory(raw_dir, processed_dir)
     assert index2.get_status().checksum_valid is True

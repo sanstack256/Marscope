@@ -316,6 +316,7 @@ class CuriosityDataParser:
 
         file_checksum = _sha256_file(csv_path)
         lbl_file = _resolve_companion_label(csv_path, label_path)
+        lbl_checksum = _sha256_file(lbl_file) if lbl_file and lbl_file.exists() else None
         fields: List[Dict[str, Any]] = []
         pds_meta: Dict[str, Any] = {}
         data_offset_bytes = 0
@@ -329,6 +330,7 @@ class CuriosityDataParser:
                 data_offset_bytes = max(0, int(sp_ptr["offset"]) - 1)
             elif sp_ptr and sp_ptr.get("unit") == "RECORDS":
                 data_offset_bytes = 0
+        dep_digest = hashlib.sha256(f"{file_checksum}|{lbl_checksum or ''}".encode("utf-8")).hexdigest()
 
         raw_bytes = csv_path.read_bytes()
         text = raw_bytes[data_offset_bytes:].decode("utf-8", errors="replace")
@@ -436,6 +438,17 @@ class CuriosityDataParser:
         sum_idx = col_lookup.get("SUM_OF_OXIDES")
         dist_idx = col_lookup.get("DISTANCE_TO_TARGET", col_lookup.get("DISTANCE_M"))
 
+        rmsep_definitions: Dict[str, str] = {}
+        stdev_definitions: Dict[str, str] = {}
+        if ordered_fields:
+            for f in ordered_fields:
+                fname_u = str(f.get("NAME") or "").strip().upper()
+                fdesc = str(f.get("DESCRIPTION") or "").strip()
+                if fname_u.endswith("_RMSEP") and fdesc:
+                    rmsep_definitions[fname_u] = fdesc
+                elif fname_u.endswith("_SHOTS_STDEV") and fdesc:
+                    stdev_definitions[fname_u] = fdesc
+
         oxide_col_indices: Dict[str, Tuple[int, Optional[int], Optional[int]]] = {}
         for ox_u in known_oxides:
             if ox_u in col_lookup:
@@ -494,6 +507,8 @@ class CuriosityDataParser:
                     "value": val,
                     "rmsep": rmsep,
                     "shots_stdev": stdev,
+                    "rmsep_definition": rmsep_definitions.get(f"{ox_u}_RMSEP"),
+                    "shots_stdev_definition": stdev_definitions.get(f"{ox_u}_SHOTS_STDEV"),
                 }
 
             rows.append(
@@ -509,17 +524,23 @@ class CuriosityDataParser:
                     "coordinates": coords,
                     "schema_fields_count": len(ordered_fields or field_mappings),
                     "source_file_checksum": file_checksum,
+                    "label_file_path": str(lbl_file) if lbl_file else None,
+                    "label_file_checksum": lbl_checksum,
+                    "dependency_digest": dep_digest,
                     "schema_version": f"pds3_moc_release_{((pds_meta.get('parsed_odl') or {}).get('RELEASE_ID') or 'csv_header')}",
                 }
             )
 
         return ParserResult(
             parser_id="chemcam_moc_schema_parser",
-            parser_version="2.0.0",
+            parser_version="2.1.0",
             schema_source=lbl_file.name if lbl_file else f"{csv_path.name}:header",
             schema_version=f"pds3_moc_release_{((pds_meta.get('parsed_odl') or {}).get('RELEASE_ID') or 'header')}",
             source_file_path=str(csv_path),
             source_file_checksum=file_checksum,
+            label_file_path=str(lbl_file) if lbl_file else None,
+            label_file_checksum=lbl_checksum,
+            dependency_digest=dep_digest,
             field_mappings=field_mappings,
             total_rows_read=total_data_rows,
             accepted_row_count=len(rows),
@@ -542,17 +563,68 @@ class CuriosityDataParser:
         ).records
 
     @staticmethod
+    def parse_apxs_csv_unverified_header_only(
+        csv_path: Path,
+        source_dataset_id: str = "msl_apxs_supplement_sols_0_3076",
+        product_id: str = "DS01_2021JE007171R",
+    ) -> ParserResult:
+        """
+        TEST-ONLY / DIAGNOSTIC helper parsing APXS CSV headers without a PDS4 XML schema.
+        Explicitly emits parser_id='apxs_unverified_csv_header_only' and NEVER belongs in
+        the verified production index.
+        """
+        if not csv_path.exists():
+            raise FileNotFoundError(f"APXS CSV not found: {csv_path}")
+        file_checksum = _sha256_file(csv_path)
+        with csv_path.open("r", encoding="utf-8", errors="replace", newline="") as fh:
+            reader = csv.DictReader(fh)
+            headers = list(reader.fieldnames or [])
+            if not headers:
+                raise MalformedObservationError(f"APXS CSV '{csv_path.name}' is missing header row.")
+            field_mappings = [
+                ParserFieldMapping(
+                    schema_field_name=hdr,
+                    resolved_header_name=hdr,
+                    column_index=idx,
+                    unit="ppm" if hdr.lower().endswith("_ppm") else ("wt%" if hdr.lower().endswith("_pct") else None),
+                    unit_source="unverified_csv_header_suffix",
+                )
+                for idx, hdr in enumerate(headers)
+            ]
+            rows = list(reader)
+        return ParserResult(
+            parser_id="apxs_unverified_csv_header_only",
+            parser_version="unverified_header_only_1.0.0",
+            schema_source=f"{csv_path.name}:unverified_header_only",
+            schema_version="unverified_csv_header_only",
+            source_file_path=str(csv_path),
+            source_file_checksum=file_checksum,
+            field_mappings=field_mappings,
+            total_rows_read=len(rows),
+            accepted_row_count=0,
+            rejected_row_count=len(rows),
+            row_rejections=[
+                {"row_index": i + 1, "reason": "Excluded: APXS CSV lacked required companion PDS4 XML schema."}
+                for i in range(len(rows))
+            ],
+            records=[],
+        )
+
+    @staticmethod
     def parse_apxs_csv_with_contract(
         csv_path: Path,
         source_dataset_id: str = "msl_apxs_supplement_sols_0_3076",
         product_id: str = "DS01_2021JE007171R",
         label_path: Optional[Path] = None,
+        require_xml: bool = True,
     ) -> ParserResult:
         """
         Schema-driven parser for NASA PDS4 APXS calibrated oxide/trace CSV tables.
-        Maps columns dynamically via companion PDS4 XML <Table_Delimited> when present (or verified headers),
-        assigns LocationSemanticType.INSTRUMENT_TARGET_LOCATION with uncertainty=None when unreported,
-        and preserves Quality/Fit_Type/Offset_cm/Start_Time without inventing missing quality defaults.
+
+        Strictly requires a companion PDS4 XML label (<Table_Delimited>) in verified
+        ingestion mode (no silent header-only fallback). Validates column count, column
+        order, names, PDS4 data types, units, and <Special_Constants>, and binds the XML
+        checksum into parser dependency provenance.
         """
         if not csv_path.exists():
             raise FileNotFoundError(f"APXS CSV not found: {csv_path}")
@@ -566,9 +638,27 @@ class CuriosityDataParser:
                     xml_file = cand
                     break
 
-        pds4_schema: Optional[Dict[str, Any]] = None
-        if xml_file is not None:
+        if xml_file is None:
+            if require_xml:
+                raise MalformedObservationError(
+                    f"APXS ingestion requires a companion PDS4 XML label for '{csv_path.name}'; "
+                    "silent CSV-header fallback is prohibited."
+                )
+            return CuriosityDataParser.parse_apxs_csv_unverified_header_only(
+                csv_path=csv_path,
+                source_dataset_id=source_dataset_id,
+                product_id=product_id,
+            )
+
+        try:
             pds4_schema = parse_pds4_table_delimited(xml_file)
+        except Exception as exc:
+            raise MalformedObservationError(
+                f"APXS PDS4 XML schema '{xml_file.name}' is invalid or malformed: {exc}"
+            ) from exc
+
+        xml_checksum = pds4_schema.get("xml_sha256") or _sha256_file(xml_file)
+        dep_digest = hashlib.sha256(f"{file_checksum}|{xml_checksum}".encode("utf-8")).hexdigest()
 
         known_apxs_oxides = ("Na2O", "MgO", "Al2O3", "SiO2", "P2O5", "SO3", "Cl", "K2O", "CaO", "TiO2", "Cr2O3", "MnO", "FeO")
         known_apxs_traces = ("Ni", "Zn", "Br")
@@ -577,6 +667,17 @@ class CuriosityDataParser:
         row_rejections: List[Dict[str, Any]] = []
         field_mappings: List[ParserFieldMapping] = []
         total_rows_read = 0
+
+        _supported_pds4_types = {
+            "ASCII_Real",
+            "ASCII_Integer",
+            "ASCII_String",
+            "UTF8_String",
+            "ASCII_Date_Time_YMD",
+            "ASCII_Date_Time_DOY",
+            "ASCII_Date_Time_UTC",
+            "ASCII_NonNegative_Integer",
+        }
 
         with csv_path.open("r", encoding="utf-8", errors="replace", newline="") as fh:
             reader = csv.DictReader(fh)
@@ -587,42 +688,71 @@ class CuriosityDataParser:
             def _apxs_base_key(name: str) -> str:
                 return re.sub(r"[^a-z0-9]+", "", name.strip().lower())
 
-            if pds4_schema is not None:
-                xml_fields = pds4_schema["fields"]
-                if len(headers) != len(xml_fields):
+            xml_fields = pds4_schema["fields"]
+            if len(headers) != len(xml_fields):
+                raise MalformedObservationError(
+                    f"APXS column count ({len(headers)}) mismatches PDS4 XML schema count ({len(xml_fields)})."
+                )
+
+            field_meta_by_header: Dict[str, Dict[str, Any]] = {}
+            for idx, (hdr, xf) in enumerate(zip(headers, xml_fields)):
+                xname = str(xf.get("name") or "")
+                h_base = _apxs_base_key(re.sub(r"_(pct|ppm)$", "", hdr, flags=re.IGNORECASE))
+                x_base = _apxs_base_key(re.sub(r"_(pct|ppm)$", "", xname, flags=re.IGNORECASE))
+                if not x_base or not h_base or (x_base != h_base and not (h_base.startswith("informal") and x_base.startswith("informal"))):
                     raise MalformedObservationError(
-                        f"APXS column count ({len(headers)}) mismatches PDS4 XML schema count ({len(xml_fields)})."
+                        f"APXS schema mismatch at col {idx + 1}: XML declares '{xname}', CSV has '{hdr}'."
                     )
-                for idx, (hdr, xf) in enumerate(zip(headers, xml_fields)):
-                    xname = str(xf.get("name") or "")
-                    h_base = _apxs_base_key(re.sub(r"_(pct|ppm)$", "", hdr, flags=re.IGNORECASE))
-                    x_base = _apxs_base_key(re.sub(r"_(pct|ppm)$", "", xname, flags=re.IGNORECASE))
-                    if x_base and h_base and x_base != h_base and not (h_base.startswith("informal") and x_base.startswith("informal")):
+
+                dtype = str(xf.get("data_type") or "").strip()
+                if dtype and dtype not in _supported_pds4_types:
+                    raise MalformedObservationError(
+                        f"Unsupported PDS4 data_type '{dtype}' for APXS column '{hdr}'."
+                    )
+
+                desc = str(xf.get("description") or "")
+                xml_unit = xf.get("resolved_unit")
+                unit_src = xf.get("unit_source")
+                hdr_low = hdr.lower()
+                if hdr_low.endswith("_pct") and xml_unit and xml_unit != "wt%":
+                    raise MalformedObservationError(
+                        f"APXS unit conflict at col '{hdr}': XML declares '{xml_unit}', CSV header suffix is '_pct'."
+                    )
+                if hdr_low.endswith("_ppm") and xml_unit and xml_unit != "ppm":
+                    raise MalformedObservationError(
+                        f"APXS unit conflict at col '{hdr}': XML declares '{xml_unit}', CSV header suffix is '_ppm'."
+                    )
+                if xml_unit and ("concentration" in desc.lower() or hdr_low.endswith("_pct") or hdr_low.endswith("_ppm")):
+                    if xml_unit not in {"wt%", "ppm"}:
                         raise MalformedObservationError(
-                            f"APXS schema mismatch at col {idx + 1}: XML declares '{xname}', CSV has '{hdr}'."
+                            f"Unsupported APXS concentration unit '{xml_unit}' declared in XML for '{hdr}'."
                         )
-                    desc = str(xf.get("description") or "")
-                    unit = "ppm" if "ppm" in desc.lower() or hdr.lower().endswith("_ppm") else ("wt%" if "wt" in desc.lower() or hdr.lower().endswith("_pct") else None)
-                    field_mappings.append(
-                        ParserFieldMapping(
-                            schema_field_name=xname,
-                            resolved_header_name=hdr,
-                            column_index=idx,
-                            data_type=xf.get("data_type"),
-                            unit=unit,
-                            description=desc or None,
-                        )
+                resolved_unit = xml_unit or ("ppm" if hdr_low.endswith("_ppm") else ("wt%" if hdr_low.endswith("_pct") else None))
+                if not unit_src and resolved_unit:
+                    unit_src = "csv_header_validated_against_xml_field"
+
+                sc_map = xf.get("special_constants") or {}
+                special_tokens = {str(v).strip() for v in sc_map.values() if str(v).strip()}
+                field_meta_by_header[hdr] = {
+                    "data_type": dtype,
+                    "unit": resolved_unit,
+                    "unit_source": unit_src,
+                    "description": desc,
+                    "special_constants": sc_map,
+                    "special_tokens": special_tokens,
+                }
+                field_mappings.append(
+                    ParserFieldMapping(
+                        schema_field_name=xname,
+                        resolved_header_name=hdr,
+                        column_index=idx,
+                        data_type=dtype or None,
+                        unit=resolved_unit,
+                        unit_source=unit_src,
+                        description=desc or None,
+                        special_constants=sc_map,
                     )
-            else:
-                for idx, hdr in enumerate(headers):
-                    field_mappings.append(
-                        ParserFieldMapping(
-                            schema_field_name=hdr,
-                            resolved_header_name=hdr,
-                            column_index=idx,
-                            unit="ppm" if hdr.lower().endswith("_ppm") else ("wt%" if hdr.lower().endswith("_pct") else None),
-                        )
-                    )
+                )
 
             hdr_by_norm = {_apxs_base_key(h): h for h in headers}
 
@@ -656,16 +786,40 @@ class CuriosityDataParser:
                 vcol = _find_col(f"{ox}_pct", ox)
                 ecol = _find_col(f"{ox}_err")
                 if vcol:
-                    oxide_cols[ox] = (vcol, ecol, "wt%")
+                    unit_v = (field_meta_by_header.get(vcol) or {}).get("unit") or "wt%"
+                    oxide_cols[ox] = (vcol, ecol, unit_v)
             trace_cols: Dict[str, Tuple[str, Optional[str], str]] = {}
             for el in known_apxs_traces:
                 vcol = _find_col(f"{el}_ppm", el)
                 ecol = _find_col(f"{el}_err")
                 if vcol:
-                    trace_cols[el] = (vcol, ecol, "ppm")
+                    unit_v = (field_meta_by_header.get(vcol) or {}).get("unit") or "ppm"
+                    trace_cols[el] = (vcol, ecol, unit_v)
 
             if not oxide_cols and not trace_cols:
                 raise MalformedObservationError("APXS CSV resolved zero documented oxide or trace element columns.")
+
+            def _parse_typed_number(raw_cell: Any, col_name: Optional[str]) -> Tuple[Optional[float], bool]:
+                """Return (value, is_special_or_null_valid). False means corrupt non-numeric token."""
+                s = str(raw_cell or "").strip()
+                if not s or s.upper() in _NULL_TOKENS:
+                    return None, True
+                meta = field_meta_by_header.get(col_name or "") or {}
+                if s in meta.get("special_tokens", set()):
+                    return None, True
+                dtype = str(meta.get("data_type") or "")
+                try:
+                    num = float(s)
+                    if not math.isfinite(num):
+                        return None, False
+                    if dtype in {"ASCII_Integer", "ASCII_NonNegative_Integer"}:
+                        if abs(num - round(num)) > 1e-6:
+                            return None, False
+                        if dtype == "ASCII_NonNegative_Integer" and num < 0:
+                            return None, False
+                    return num, True
+                except ValueError:
+                    return None, False
 
             for row_idx, r in enumerate(reader, start=1):
                 total_rows_read += 1
@@ -673,11 +827,14 @@ class CuriosityDataParser:
                 if not target:
                     row_rejections.append({"row_index": row_idx, "reason": "Empty Target identifier."})
                     continue
-                sol_val = _safe_float(r.get(sol_col))
-                northing = _safe_float(r.get(north_col)) if north_col else None
-                easting = _safe_float(r.get(east_col)) if east_col else None
-                elevation = _safe_float(r.get(elev_col)) if elev_col else None
-                offset_cm = _safe_float(r.get(offset_col)) if offset_col else None
+                sol_val, sol_ok = _parse_typed_number(r.get(sol_col), sol_col)
+                if not sol_ok:
+                    row_rejections.append({"row_index": row_idx, "reason": f"Invalid non-integer Sol value '{r.get(sol_col)}'."})
+                    continue
+                northing, _ = _parse_typed_number(r.get(north_col), north_col) if north_col else (None, True)
+                easting, _ = _parse_typed_number(r.get(east_col), east_col) if east_col else (None, True)
+                elevation, _ = _parse_typed_number(r.get(elev_col), elev_col) if elev_col else (None, True)
+                offset_cm, _ = _parse_typed_number(r.get(offset_col), offset_col) if offset_col else (None, True)
 
                 coords = None
                 if easting is not None and northing is not None:
@@ -716,28 +873,42 @@ class CuriosityDataParser:
                 oxides_wt_pct: Dict[str, Dict[str, Any]] = {}
                 for ox, (vcol, ecol, unit) in oxide_cols.items():
                     raw_str = (r.get(vcol) or "").strip()
-                    val = _safe_float(raw_str)
-                    err = _safe_float(r.get(ecol)) if ecol else None
+                    val, v_ok = _parse_typed_number(raw_str, vcol)
+                    if not v_ok:
+                        row_rejections.append({"row_index": row_idx, "reason": f"Non-numeric APXS {ox} value '{raw_str}' violates {field_meta_by_header.get(vcol, {}).get('data_type')}."})
+                        continue
+                    err, e_ok = _parse_typed_number(r.get(ecol), ecol) if ecol else (None, True)
+                    if not e_ok:
+                        row_rejections.append({"row_index": row_idx, "reason": f"Non-numeric APXS {ox} error '{r.get(ecol)}'."})
+                        err = None
                     if val is not None or err is not None:
                         oxides_wt_pct[ox] = {
                             "value": val,
                             "error": err,
                             "unit": unit,
                             "source_column": vcol,
+                            "error_definition": (field_meta_by_header.get(ecol or "") or {}).get("description") if ecol else None,
                             "is_exact_zero": (val == 0.0 and raw_str != ""),
                         }
 
                 trace_ppm: Dict[str, Dict[str, Any]] = {}
                 for el, (vcol, ecol, unit) in trace_cols.items():
                     raw_str = (r.get(vcol) or "").strip()
-                    val = _safe_float(raw_str)
-                    err = _safe_float(r.get(ecol)) if ecol else None
+                    val, v_ok = _parse_typed_number(raw_str, vcol)
+                    if not v_ok:
+                        row_rejections.append({"row_index": row_idx, "reason": f"Non-numeric APXS {el} value '{raw_str}' violates {field_meta_by_header.get(vcol, {}).get('data_type')}."})
+                        continue
+                    err, e_ok = _parse_typed_number(r.get(ecol), ecol) if ecol else (None, True)
+                    if not e_ok:
+                        row_rejections.append({"row_index": row_idx, "reason": f"Non-numeric APXS {el} error '{r.get(ecol)}'."})
+                        err = None
                     if val is not None or err is not None:
                         trace_ppm[el] = {
                             "value": val,
                             "error": err,
                             "unit": unit,
                             "source_column": vcol,
+                            "error_definition": (field_meta_by_header.get(ecol or "") or {}).get("description") if ecol else None,
                             "is_exact_zero": (val == 0.0 and raw_str != ""),
                         }
 
@@ -762,17 +933,23 @@ class CuriosityDataParser:
                         "oxides_wt_pct": oxides_wt_pct,
                         "trace_ppm": trace_ppm,
                         "source_file_checksum": file_checksum,
-                        "schema_version": pds4_schema["schema_version"] if pds4_schema else "apxs_csv_header_v1",
+                        "label_file_path": str(xml_file),
+                        "label_file_checksum": xml_checksum,
+                        "dependency_digest": dep_digest,
+                        "schema_version": pds4_schema["schema_version"],
                     }
                 )
 
         return ParserResult(
             parser_id="apxs_pds4_schema_parser",
-            parser_version="2.0.0",
-            schema_source=xml_file.name if xml_file else f"{csv_path.name}:header",
-            schema_version=pds4_schema["schema_version"] if pds4_schema else "apxs_csv_header_v1",
+            parser_version="3.0.0",
+            schema_source=xml_file.name,
+            schema_version=pds4_schema["schema_version"],
             source_file_path=str(csv_path),
             source_file_checksum=file_checksum,
+            label_file_path=str(xml_file),
+            label_file_checksum=xml_checksum,
+            dependency_digest=dep_digest,
             field_mappings=field_mappings,
             total_rows_read=total_rows_read,
             accepted_row_count=len(rows),
@@ -802,28 +979,45 @@ class CuriosityDataParser:
         label_path: Optional[Path] = None,
         coord_service: Optional[CoordinateAssociationService] = None,
         extra_structure_dirs: Optional[List[Path]] = None,
+        require_label: bool = True,
     ) -> ParserResult:
         """
         Schema-driven parser for NASA PDS3 CheMin RDR5 mineral abundance spreadsheets.
-        Enforces external ^STRUCTURE (CHEMIN_MIN.FMT) resolution when referenced by .LBL,
-        resolves MINERAL/PERCENT/ERROR columns dynamically from schema + CSV headers,
-        never invents positional uncertainty, and preserves 2-sigma error semantics from .FMT.
+        Enforces companion .LBL + external ^STRUCTURE (CHEMIN_MIN.FMT) resolution,
+        verifies quantitative WEIGHT_PERCENT unit metadata, rejects qualitative rows,
+        and derives error sigma semantics strictly from .FMT + .LBL SPREADSHEET.DESCRIPTION.
         """
         if not csv_path.exists():
             raise FileNotFoundError(f"CheMin mineral CSV missing: {csv_path}")
 
         file_checksum = _sha256_file(csv_path)
         lbl_file = _resolve_companion_label(csv_path, label_path)
+        if lbl_file is None and require_label:
+            raise MalformedObservationError(
+                f"CheMin ingestion requires companion PDS3 .LBL + .FMT schema for '{csv_path.name}'."
+            )
+        lbl_checksum = _sha256_file(lbl_file) if lbl_file and lbl_file.exists() else None
         pds_meta: Dict[str, Any] = {}
         columns: List[Dict[str, Any]] = []
+        fmt_checksums: Dict[str, str] = {}
+        fmt_paths: List[str] = []
         if lbl_file:
             pds_meta = extract_pds3_metadata(lbl_file)
-            _, columns = load_pds3_columns_and_structure(
+            parsed_lbl, columns = load_pds3_columns_and_structure(
                 lbl_file,
                 table_object_names=("SPREADSHEET",),
                 extra_structure_dirs=extra_structure_dirs,
                 strict_structure=True,
             )
+            pds_meta["parsed_odl"] = parsed_lbl
+            for fp in parsed_lbl.get("_RESOLVED_STRUCTURES") or []:
+                fpath = Path(fp)
+                if fpath.exists():
+                    fmt_paths.append(str(fpath))
+                    fmt_checksums[fpath.name] = _sha256_file(fpath)
+
+        dep_digest_parts = [file_checksum, lbl_checksum or ""] + [f"{k}:{v}" for k, v in sorted(fmt_checksums.items())]
+        dep_digest = hashlib.sha256("|".join(dep_digest_parts).encode("utf-8")).hexdigest()
 
         product_id = str(pds_meta.get("product_id") or csv_path.stem.upper())
         tbl_obj = (pds_meta.get("parsed_odl") or {}).get("_OBJECTS", {}).get("SPREADSHEET", {})
@@ -876,19 +1070,33 @@ class CuriosityDataParser:
                 )
 
             pct_unit = "wt%"
-            err_semantics = "estimated_error"
+            err_semantics = "chemin_estimated_error_unspecified_sigma"
+            err_definition = "Estimated uncertainty without explicit sigma multiplier in PDS3 label."
+            desc_low = desc.lower()
+            if "2-sigma" in desc_low or "2 sigma" in desc_low:
+                err_semantics = "chemin_rietveld_2sigma"
+                err_definition = desc.strip()
+
             field_mappings: List[ParserFieldMapping] = []
             for idx, h in enumerate(headers):
                 cmeta = next((c for c in columns if str(c.get("NAME") or "").strip().upper() == h.strip().upper()), {})
                 cdesc = str(cmeta.get("DESCRIPTION") or "")
-                cunit = str(cmeta.get("UNIT") or "")
-                if h == pct_col and cunit and cunit.upper() not in {"WEIGHT_PERCENT", "WT%", "PERCENT", "WT_PCT"}:
-                    raise MalformedObservationError(
-                        f"Unsupported CheMin abundance unit '{cunit}' in schema column '{h}'."
-                    )
-                if h == err_col and cdesc:
-                    if "2-sigma" in cdesc.lower() or "2 sigma" in cdesc.lower():
-                        err_semantics = "2_sigma_topas_rietveld"
+                cunit = str(cmeta.get("UNIT") or "").strip()
+                if h == pct_col:
+                    if cunit and cunit.upper() not in {"WEIGHT_PERCENT", "WT%", "PERCENT", "WT_PCT"}:
+                        raise MalformedObservationError(
+                            f"Unsupported or non-quantitative CheMin abundance unit '{cunit}' in schema column '{h}'."
+                        )
+                    if require_label and columns and not cunit:
+                        raise MalformedObservationError(
+                            f"CheMin schema column '{h}' lacks required quantitative UNIT (expected WEIGHT_PERCENT)."
+                        )
+                if h == err_col:
+                    if cdesc and ("2-sigma" in cdesc.lower() or "2 sigma" in cdesc.lower()):
+                        err_semantics = "chemin_rietveld_2sigma"
+                        err_definition = cdesc.strip()
+                    elif cunit and err_semantics != "chemin_rietveld_2sigma":
+                        err_definition = f"CHEMIN_MIN.FMT UNIT={cunit}; sigma multiplier not specified in companion label."
                 field_mappings.append(
                     ParserFieldMapping(
                         schema_field_name=str(cmeta.get("NAME") or h),
@@ -896,6 +1104,7 @@ class CuriosityDataParser:
                         column_index=idx,
                         data_type=str(cmeta.get("DATA_TYPE") or "") or None,
                         unit=pct_unit if h in {pct_col, err_col} else None,
+                        unit_source="pds3_fmt_unit" if cunit else None,
                         description=cdesc or None,
                     )
                 )
@@ -906,11 +1115,22 @@ class CuriosityDataParser:
             for idx, r in enumerate(reader, start=1):
                 total_rows += 1
                 mineral_name = (r.get(min_col) or "").strip()
-                pct = _safe_float(r.get(pct_col))
-                err = _safe_float(r.get(err_col)) if err_col else None
+                raw_pct = (r.get(pct_col) or "").strip()
+                raw_err = (r.get(err_col) or "").strip() if err_col else ""
                 if not mineral_name:
                     row_rejections.append({"row_index": idx, "reason": "Empty mineral name."})
                     continue
+                pct = _safe_float(raw_pct)
+                if pct is None:
+                    row_rejections.append(
+                        {
+                            "row_index": idx,
+                            "mineral": mineral_name,
+                            "reason": f"Non-quantitative or missing mineral abundance token '{raw_pct}' rejected.",
+                        }
+                    )
+                    continue
+                err = _safe_float(raw_err) if raw_err else None
                 minerals.append(
                     {
                         "row_index": idx,
@@ -919,11 +1139,12 @@ class CuriosityDataParser:
                         "estimated_error": err,
                         "unit": pct_unit,
                         "error_semantics": err_semantics,
+                        "error_definition": err_definition,
                     }
                 )
 
         if not minerals:
-            raise MalformedObservationError(f"CheMin product '{csv_path.name}' yielded zero mineral rows.")
+            raise MalformedObservationError(f"CheMin product '{csv_path.name}' yielded zero quantitative mineral rows.")
 
         schema_ver = (
             f"pds3:{pds_meta.get('structure_file') or lbl_file.name}"
@@ -941,15 +1162,25 @@ class CuriosityDataParser:
             "columns_schema": columns,
             "minerals": minerals,
             "source_file_checksum": file_checksum,
+            "label_file_path": str(lbl_file) if lbl_file else None,
+            "label_file_checksum": lbl_checksum,
+            "format_file_paths": fmt_paths,
+            "format_file_checksums": fmt_checksums,
+            "dependency_digest": dep_digest,
             "schema_version": schema_ver,
         }
         return ParserResult(
             parser_id="chemin_rdr5_schema_parser",
-            parser_version="2.0.0",
+            parser_version="3.0.0",
             schema_source=str(pds_meta.get("structure_file") or (lbl_file.name if lbl_file else csv_path.name)),
             schema_version=schema_ver,
             source_file_path=str(csv_path),
             source_file_checksum=file_checksum,
+            label_file_path=str(lbl_file) if lbl_file else None,
+            label_file_checksum=lbl_checksum,
+            format_file_paths=fmt_paths,
+            format_file_checksums=fmt_checksums,
+            dependency_digest=dep_digest,
             field_mappings=field_mappings,
             total_rows_read=total_rows,
             accepted_row_count=len(minerals),
