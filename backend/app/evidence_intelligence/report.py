@@ -450,7 +450,7 @@ class EvidenceIntelligenceService:
             native_resolution_m=native_res_m,
             raw_segments=raw_segments,
             corridor_width_m=request.corridor_width_m,
-            optical_coverage_fraction=0.0,
+            optical_coverage_fraction=None,
             optical_quality_note="Pending per-segment optical assessment",
             geological_map_coverage=geological_cov,
             spectral_data_available=False,
@@ -476,7 +476,7 @@ class EvidenceIntelligenceService:
         # Update per-segment unverified status from that segment's own DEM + optical coverage
         for seg in segments:
             seg_opt = seg.coverage.valid_optical_pixel_coverage_fraction
-            seg.unverified_area_present = seg.valid_data_coverage_fraction < 0.95 or seg_opt <= 0.0
+            seg.unverified_area_present = seg.valid_data_coverage_fraction < 0.95 or (seg_opt is None or seg_opt <= 0.0)
             seg.coverage.unverified_regions_present = seg.unverified_area_present
 
         associated_obs = associate_corridor_observations(
@@ -508,7 +508,7 @@ class EvidenceIntelligenceService:
         res_adequacy = assess_resolution_adequacy(
             dem_dataset_id=request.dataset_id,
             dem_native_resolution_m=native_res_m,
-            optical_dataset_id=primary_ortho_id if opt_cov_frac > 0 else None,
+            optical_dataset_id=primary_ortho_id if (opt_cov_frac is not None and opt_cov_frac > 0.0) else None,
             optical_pixel_scale_m=opt_meta.get("native_pixel_scale_m"),
             geological_map_available=geological_cov,
         )
@@ -530,7 +530,7 @@ class EvidenceIntelligenceService:
             segments=segments,
             native_resolution_m=native_res_m,
             corridor_valid_fraction=dem_stats["corridor_valid_fraction"],
-            optical_available=opt_cov_frac > 0.0,
+            optical_available=(opt_cov_frac is not None and opt_cov_frac > 0.0),
             dataset_uncertainty_profile=ds_unc_prof,
         )
 

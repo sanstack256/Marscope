@@ -23,6 +23,8 @@ from app.evidence_intelligence.report import EvidenceIntelligenceService
 from app.eva_operations.mission import EvaOperationsService
 from app.terrain.mesh import TerrainMeshService
 from app.terrain_uncertainty.service import TerrainUncertaintyService
+from app.ingestion.imagery import ImageryArchiveService
+from app.science.investigation.service import ScienceInvestigationService
 
 # Project root path resolution
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
@@ -95,4 +97,18 @@ eva_operations_service = EvaOperationsService(
     routing_service=routing_service,
     evidence_service=evidence_intelligence_service,
     processed_dir=PROCESSED_DIR,
+)
+imagery_service = ImageryArchiveService(
+    CATALOG_DIR / "imagery_products" / "catalog.json",
+    raw_dir=RAW_DIR,
+)
+science_investigation_service = ScienceInvestigationService(
+    catalog_service=catalog_service,
+    target_registry=target_registry,
+    composition_search_service=composition_search_service,
+    composition_index=composition_index,
+    routing_service=routing_service,
+    evidence_service=evidence_intelligence_service,
+    processed_dir=PROCESSED_DIR,
+    imagery_service=imagery_service,
 )

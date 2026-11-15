@@ -57,6 +57,14 @@ class ProductAvailabilityStatus(str, Enum):
     ARCHIVE_UNAVAILABLE = "ARCHIVE_UNAVAILABLE"
 
 
+class OpticalCoverageStatus(str, Enum):
+    COMPLETE_COVERAGE = "COMPLETE_COVERAGE"
+    PARTIAL_COVERAGE = "PARTIAL_COVERAGE"
+    VERIFIED_ZERO_COVERAGE = "VERIFIED_ZERO_COVERAGE"
+    COVERAGE_UNAVAILABLE = "COVERAGE_UNAVAILABLE"
+    FOOTPRINT_UNVERIFIED = "FOOTPRINT_UNVERIFIED"
+
+
 class CacheValidityState(str, Enum):
     CURRENT = "CURRENT"
     STALE = "STALE"
@@ -71,6 +79,14 @@ class DomainAssessmentRecord(BaseModel):
     evidence_basis: str
     policy_version: str = "readiness-v2.0"
     threshold_or_rule: str
+    spatial_footprint_coverage_fraction: Optional[float] = None
+    valid_measurement_coverage_fraction: Optional[float] = None
+    product_availability: Optional[str] = None
+    scientific_validation_state: Optional[str] = None
+    spatial_association_quality: Optional[str] = None
+    resolution_adequacy: Optional[str] = None
+    temporal_relevance: Optional[str] = None
+    missing_inputs: List[str] = Field(default_factory=list)
     notes: List[str] = Field(default_factory=list)
 
 
@@ -102,7 +118,7 @@ class AssessmentDependencySignature(BaseModel):
     locomotion_model_version: str = "locomotion_v1.0"
     routing_objectives_version: str = "routing_objectives_v1.0"
     return_planning_version: str = "return_planning_v2.0"
-    sensitivity_policy_version: str = "sensitivity_v1.0"
+    sensitivity_policy_version: str = "sensitivity_v2.0"
     complementarity_registry_version: str = "complementarity_v1.0"
     mission_config_hash: Optional[str] = None
     signature_digest: str
@@ -205,7 +221,8 @@ class SegmentCoverageReport(BaseModel):
     valid_elevation_fraction: float
     slope_available: bool
     tri_available: bool
-    optical_coverage_fraction: float
+    optical_coverage_fraction: Optional[float] = None
+    optical_coverage_status: OpticalCoverageStatus = OpticalCoverageStatus.COVERAGE_UNAVAILABLE
     optical_quality_note: str
     geological_map_coverage: bool
     geological_map_scale_note: str = "USGS SIM 3292 (1:20,000,000 regional context only; unverified locally)"
@@ -218,8 +235,8 @@ class SegmentCoverageReport(BaseModel):
     # Prompt 15 exact per-segment metric denominators & non-double-counted multi-product coverage
     segment_corridor_area_m2: Optional[float] = None
     dem_valid_area_m2: Optional[float] = None
-    optical_footprint_coverage_fraction: float = 0.0
-    valid_optical_pixel_coverage_fraction: float = 0.0
+    optical_footprint_coverage_fraction: Optional[float] = None
+    valid_optical_pixel_coverage_fraction: Optional[float] = None
     optical_covered_area_m2: Optional[float] = None
     optical_contributing_product_ids: List[str] = Field(default_factory=list)
     geological_coverage_fraction: float = 0.0

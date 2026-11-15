@@ -1250,8 +1250,20 @@ export default function PlannerPage() {
                     </div>
                   )}
 
-                  <div className="text-[11px] text-slate-300 bg-[#0d111a] border border-[#1e2638] rounded-lg px-3 py-2">
-                    <strong className="text-cyan-300">Selection Rationale:</strong> {robustComparison.recommendation_rationale}
+                  <div className="text-[11px] text-slate-300 bg-[#0d111a] border border-[#1e2638] rounded-lg px-3 py-2 space-y-1">
+                    <div>
+                      <strong className="text-cyan-300">Selection Rationale:</strong> {robustComparison.recommendation_rationale}
+                    </div>
+                    {robustComparison.global_optimality_disclaimer && (
+                      <div className="text-[10px] font-mono text-slate-400">
+                        Search Scope ({robustComparison.search_algorithm ?? "grid_multi_objective"}): {robustComparison.global_optimality_disclaimer}
+                      </div>
+                    )}
+                    {robustComparison.failure_reasons && robustComparison.failure_reasons.length > 0 && (
+                      <div className="text-[10px] font-mono text-amber-300">
+                        Rejected/Failed Candidates: {robustComparison.failure_reasons.join(" · ")}
+                      </div>
+                    )}
                   </div>
 
                   <div className="overflow-x-auto">
@@ -1418,6 +1430,11 @@ export default function PlannerPage() {
                             <div className="truncate pr-2">
                               <span className="text-slate-200">{sc.label}</span>{" "}
                               <span className="text-slate-500">({sc.perturbation_parameter})</span>
+                              {sc.category && (
+                                <span className="ml-1.5 text-[9px] px-1 py-0.5 rounded bg-slate-800 text-cyan-300">
+                                  {sc.category}
+                                </span>
+                              )}
                             </div>
                             <span
                               className={

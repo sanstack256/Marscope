@@ -32,6 +32,7 @@ from app.mobility.traversal_model import (
 )
 from app.schemas.dataset import Dataset
 from app.terrain.processor import PROCESSING_VERSION
+from app.terrain_uncertainty.elevation_uncertainty import inspect_dataset_elevation_uncertainty
 
 
 def build_traversal_cost_surface(
@@ -143,9 +144,12 @@ def build_traversal_cost_surface(
             "configured, or all cells were unknown/excluded)."
         )
 
-    unc_status = "QUANTIFIED_FROM_METADATA" if dataset.vertical_resolution_meters is not None else "UNCERTAINTY_UNQUANTIFIED"
-    if any("QUANT" in f.upper() or "INT" in f.upper() for f in (dataset.quality_flags or [])) or "mola" in dataset.id.lower():
-        unc_status = "QUANTIZATION_LOWER_BOUND_ONLY"
+    elev_prof = inspect_dataset_elevation_uncertainty(
+        dataset=dataset,
+        raw_dir=raw_dir,
+        processed_dir=raw_dir.parent / "processed",
+    )
+    unc_status = elev_prof.overall_elevation_uncertainty_status.value
 
     trav_notes = [
         "3-state traversability preserves UNKNOWN_TERRAIN, EXPLICIT_SCENARIO_EXCLUSION, and EVALUATED without merging unknown gaps into safe terrain.",

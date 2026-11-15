@@ -117,7 +117,7 @@ def assess_corridor_terrain(
     native_resolution_m: float,
     raw_segments: List[Dict[str, Any]],
     corridor_width_m: float,
-    optical_coverage_fraction: float,
+    optical_coverage_fraction: Optional[float],
     optical_quality_note: str,
     geological_map_coverage: bool,
     spectral_data_available: bool,
@@ -183,6 +183,12 @@ def assess_corridor_terrain(
         c_max_lon = min(rb.right, q_max_lon)
         c_min_lat = max(rb.bottom, min_lat)
         c_max_lat = min(rb.top, max_lat)
+
+        if c_max_lon <= c_min_lon or c_max_lat <= c_min_lat:
+            raise ValueError(
+                f"Route corridor falls completely outside the DEM spatial footprint "
+                f"[{rb.left:.4f}..{rb.right:.4f}, {rb.bottom:.4f}..{rb.top:.4f}]."
+            )
 
         win = from_bounds(c_min_lon, c_min_lat, c_max_lon, c_max_lat, src.transform)
         win = win.round_offsets().round_lengths()
@@ -309,7 +315,7 @@ def assess_corridor_terrain(
                 if native_resolution_m <= 2.0
                 else f"{native_resolution_m:.1f} m/px regional DEM (resolution-limited)"
             )
-            unverified = valid_frac < 0.95 or optical_coverage_fraction < 0.5
+            unverified = valid_frac < 0.95 or optical_coverage_fraction is None or optical_coverage_fraction < 0.5
 
             cov = SegmentCoverageReport(
                 segment_id=seg_id,
@@ -317,7 +323,7 @@ def assess_corridor_terrain(
                 valid_elevation_fraction=round(valid_frac, 4),
                 slope_available=len(valid_slope) > 0,
                 tri_available=len(valid_tri) > 0,
-                optical_coverage_fraction=round(optical_coverage_fraction, 4),
+                optical_coverage_fraction=round(optical_coverage_fraction, 4) if optical_coverage_fraction is not None else None,
                 optical_quality_note=optical_quality_note,
                 geological_map_coverage=geological_map_coverage,
                 geological_coverage_fraction=1.0 if geological_map_coverage else 0.0,

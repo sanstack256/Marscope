@@ -44,6 +44,14 @@ class DatasetUncertaintyProfile(BaseModel):
     horizontal_resolution_m: Optional[float] = None
     sample_bits: Optional[int] = None
     sample_type: Optional[str] = None
+    raw_pds_sample_bits: Optional[int] = None
+    raw_pds_sample_type: Optional[str] = None
+    processed_raster_dtype: Optional[str] = None
+    raw_raster_dtype: Optional[str] = None
+    scaling_factor: Optional[float] = None
+    scaling_factor_source: Optional[str] = None
+    scaling_factor_conflict: bool = False
+    quantization_uncertainty_available: bool = False
     is_integer_quantized: bool = False
     has_per_pixel_error_raster: bool = False
     pds_keywords_present: Dict[str, Any] = Field(default_factory=dict)
@@ -121,6 +129,10 @@ class SlopeUncertaintySummary(BaseModel):
     max_slope_sigma_deg: Optional[float] = None
     median_slope_sigma_deg: Optional[float] = None
     near_flat_bias_affected_fraction: Optional[float] = None
+    near_flat_approximation_used: bool = False
+    linearized_regime_valid_fraction: Optional[float] = None
+    near_flat_regime_metric_kind: Optional[MeasurementQuantityKind] = None
+    near_flat_assumption_note: Optional[str] = None
     invalid_neighborhood_fraction: float
     analytical_formula: str = (
         "Horn (1981) 3x3 Jacobian variance propagation: Var(slope_rad) = J * Sigma_grad * J^T; "

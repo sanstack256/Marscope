@@ -14,11 +14,12 @@ import math
 from pathlib import Path
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 import uuid
 
 import numpy as np
 
+from app.geospatial.crs import MARS_EQUATORIAL_RADIUS_M
 from app.ingestion.catalog import DatasetCatalogService
 from app.mobility.coverage import _resolve_raw_dem_open_path
 from app.mobility.resolution import evaluate_dem_resolution_suitability
@@ -71,34 +72,18 @@ if TYPE_CHECKING:
         TurnbackCheckpointRecord,
     )
 from app.terrain_uncertainty.sensitivity import (
+    DEFAULT_SENSITIVITY_POLICY,
     DEFAULT_SENSITIVITY_SCENARIOS,
     RouteSensitivityReport,
     ScenarioSensitivityOutcome,
+    SensitivityCategory,
+    SensitivityPolicyConfig,
     summarize_sensitivity_outcomes,
 )
 from app.science.provenance_graph import (
     ProvenanceDependencyGraph,
     ProvenanceStep,
     ScientificDataClassification,
-)
-from app.routing.schemas import (
-    BudgetDiagnostic,
-    EdgeEvaluationDetail,
-    RouteCompareEntry,
-    RouteCompareRequest,
-    RouteCompareResponse,
-    RouteComputeRequest,
-    RouteComputeResponse,
-    RouteCoordinateInput,
-    RouteDecisionExplainer,
-    RouteLegSummary,
-    RoutePlanningConstraints,
-    RouteStatusResponse,
-    RouteValidationResponse,
-    RouteVertex,
-    ScienceStopSummary,
-    SimplificationDiagnostic,
-    SnapDiagnostic,
 )
 from app.schemas.dataset import Dataset
 from app.science.composition.search import CompositionSearchService, StructuredCompositionQuery
@@ -123,6 +108,8 @@ class ScienceAwareRoutingService:
         self._max_stored = max_stored_routes
         self._routes: "OrderedDict[str, RouteComputeResponse]" = OrderedDict()
         self._route_contexts: Dict[str, Tuple[TerrainGrid, RouteComputeRequest]] = {}
+        self._science_cache: "OrderedDict[Any, Tuple[List[Any], List[Tuple[float, float, float]], List[Tuple[str, float, float]], int]]" = OrderedDict()
+        self._grid_cache: "OrderedDict[Any, TerrainGrid]" = OrderedDict()
         self._lock = threading.Lock()
 
     def _store_route(
@@ -198,10 +185,77 @@ class ScienceAwareRoutingService:
                 return ds
         return local_dems[0]
 
+    def _get_or_build_terrain_grid(
+        self,
+        *,
+        ds: Dataset,
+        all_pts: List[Tuple[float, float]],
+        constraints: RoutePlanningConstraints,
+        effective_slope_limit_factor: float,
+        science_points: Optional[List[Tuple[float, float, float]]] = None,
+    ) -> TerrainGrid:
+        """Content/parameter-keyed bounded cache avoiding duplicate raster I/O, Horn slope, and TRI computation."""
+        try:
+            open_path, _ = _resolve_raw_dem_open_path(ds, self.raw_dir)
+            mtime_ns = open_path.stat().st_mtime_ns if open_path.exists() else 0
+        except Exception:
+            mtime_ns = 0
+        sci_sig = hash(tuple((round(lat, 6), round(lon, 6), round(score, 4)) for lat, lon, score in (science_points or [])))
+        pts_sig = tuple((round(lat, 6), round(lon, 6)) for lat, lon in all_pts)
+        base_key = (
+            ds.id,
+            mtime_ns,
+            pts_sig,
+            round(float(constraints.max_slope_deg), 4),
+            round(float(constraints.max_roughness_tri_m), 4) if constraints.max_roughness_tri_m is not None else None,
+            int(constraints.max_grid_dim),
+            round(float(constraints.snap_radius_m), 2),
+            sci_sig,
+        )
+        eff_lim = max(1.0, float(constraints.max_slope_deg) * float(effective_slope_limit_factor))
+        with self._lock:
+            cached = self._grid_cache.get(base_key)
+            if cached is not None:
+                self._grid_cache.move_to_end(base_key)
+                if abs(cached.effective_slope_limit_deg - eff_lim) < 1e-6:
+                    return cached
+                return cached.clone_with_overrides(effective_slope_limit_deg=eff_lim)
+
+        built = build_terrain_grid_from_dataset(
+            ds,
+            self.raw_dir,
+            all_pts,
+            constraints,
+            effective_slope_limit_factor,
+            science_points=science_points,
+        )
+        with self._lock:
+            self._grid_cache[base_key] = built
+            self._grid_cache.move_to_end(base_key)
+            while len(self._grid_cache) > 16:
+                self._grid_cache.popitem(last=False)
+        return built
+
     def _gather_stops_and_science(
         self, req: RouteComputeRequest
     ) -> Tuple[List[Tuple[str, float, float, Optional[str], Optional[Dict[str, Any]]]], List[Tuple[float, float, float]], List[Tuple[str, float, float]], int]:
-        """Resolve Start, Target stops, Destination, and nearby science corridor points."""
+        """Resolve Start, Target stops, Destination, and nearby science corridor points (cached across sweeps)."""
+        tgt_count = len(self.target_registry.list_targets()) if self.target_registry else 0
+        cache_key = (
+            tuple(req.target_ids),
+            tuple((round(w.lat, 6), round(w.lon_east, 6), w.label, w.target_id) for w in req.waypoints),
+            round(req.start.lat, 5),
+            round(req.start.lon_east, 5),
+            round(req.destination.lat, 5),
+            round(req.destination.lon_east, 5),
+            tgt_count,
+        )
+        with self._lock:
+            cached = self._science_cache.get(cache_key)
+            if cached is not None:
+                self._science_cache.move_to_end(cache_key)
+                return list(cached[0]), list(cached[1]), list(cached[2]), int(cached[3])
+
         stops: List[Tuple[str, float, float, Optional[str], Optional[Dict[str, Any]]]] = []
         science_corridor: List[Tuple[float, float, float]] = []
         nearby_lookup: List[Tuple[str, float, float]] = []
@@ -283,7 +337,13 @@ class ScienceAwareRoutingService:
                 except Exception:
                     continue
 
-        return stops, science_corridor, nearby_lookup, ev_hits_count
+        res_tuple = (stops, science_corridor, nearby_lookup, ev_hits_count)
+        with self._lock:
+            self._science_cache[cache_key] = res_tuple
+            self._science_cache.move_to_end(cache_key)
+            while len(self._science_cache) > 32:
+                self._science_cache.popitem(last=False)
+        return list(stops), list(science_corridor), list(nearby_lookup), ev_hits_count
 
     @staticmethod
     def _estimate_segment_seconds(
@@ -325,12 +385,11 @@ class ScienceAwareRoutingService:
         all_pts = [(req.start.lat, req.start.lon_east)] + [(s[1], s[2]) for s in stops] + [(req.destination.lat, req.destination.lon_east)]
         ds = self._select_dem_for_points(req.dataset_id, all_pts)
         policy = MODE_POLICIES[req.mode]
-        grid = build_terrain_grid_from_dataset(
-            ds,
-            self.raw_dir,
-            all_pts,
-            req.constraints,
-            policy.effective_slope_limit_factor,
+        grid = self._get_or_build_terrain_grid(
+            ds=ds,
+            all_pts=all_pts,
+            constraints=req.constraints,
+            effective_slope_limit_factor=policy.effective_slope_limit_factor,
             science_points=sci_corridor,
         )
         snaps: List[SnapDiagnostic] = []
@@ -391,12 +450,11 @@ class ScienceAwareRoutingService:
             ds = self._select_dem_for_points(req.dataset_id, all_pts)
             ds_id = ds.id
             prod_id = ds.product_id
-            grid = build_terrain_grid_from_dataset(
-                ds,
-                self.raw_dir,
-                all_pts,
-                req.constraints,
-                policy.effective_slope_limit_factor,
+            grid = self._get_or_build_terrain_grid(
+                ds=ds,
+                all_pts=all_pts,
+                constraints=req.constraints,
+                effective_slope_limit_factor=policy.effective_slope_limit_factor,
                 science_points=sci_corridor,
             )
 
@@ -1215,19 +1273,21 @@ class ScienceAwareRoutingService:
         verts_b: List[RouteVertex],
         tolerance_m: float = 12.0,
     ) -> float:
-        """Symmetric vertex-buffer overlap fraction [0.0, 1.0] measuring corridor distinctness."""
+        """Vectorized symmetric vertex-buffer overlap fraction [0.0, 1.0] measuring corridor distinctness."""
         if not verts_a or not verts_b:
             return 0.0
-        hits_a = sum(
-            1
-            for va in verts_a
-            if any(mars_great_circle_distance_meters(va.lat, va.lon_east, vb.lat, vb.lon_east) <= tolerance_m for vb in verts_b)
-        )
-        hits_b = sum(
-            1
-            for vb in verts_b
-            if any(mars_great_circle_distance_meters(vb.lat, vb.lon_east, va.lat, va.lon_east) <= tolerance_m for va in verts_a)
-        )
+        lats_a = np.fromiter((v.lat for v in verts_a), dtype=np.float64, count=len(verts_a))
+        lons_a = np.fromiter((v.lon_east for v in verts_a), dtype=np.float64, count=len(verts_a))
+        lats_b = np.fromiter((v.lat for v in verts_b), dtype=np.float64, count=len(verts_b))
+        lons_b = np.fromiter((v.lon_east for v in verts_b), dtype=np.float64, count=len(verts_b))
+        mean_lat_rad = math.radians(0.5 * (float(lats_a.mean()) + float(lats_b.mean())))
+        m_lat = MARS_EQUATORIAL_RADIUS_M * math.pi / 180.0
+        m_lon = m_lat * math.cos(mean_lat_rad)
+        dlat = (lats_a[:, None] - lats_b[None, :]) * m_lat
+        dlon = ((lons_a[:, None] - lons_b[None, :] + 180.0) % 360.0 - 180.0) * m_lon
+        within = (dlat * dlat + dlon * dlon) <= (tolerance_m * tolerance_m)
+        hits_a = int(np.count_nonzero(np.any(within, axis=1)))
+        hits_b = int(np.count_nonzero(np.any(within, axis=0)))
         return round(min(hits_a / len(verts_a), hits_b / len(verts_b)), 4)
 
     @staticmethod
@@ -1272,11 +1332,14 @@ class ScienceAwareRoutingService:
         *,
         override_grid: Optional[TerrainGrid] = None,
         override_req: Optional[RouteComputeRequest] = None,
+        policy_config: Optional[SensitivityPolicyConfig] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> RouteSensitivityReport:
         """
-        Execute Prompt 16 deterministic scenario perturbation suite over a stored route's
-        TerrainGrid without regenerating rasters or fabricating Monte Carlo draws.
+        Execute Prompt 17 categorized deterministic scenario perturbation suite over a stored route's
+        TerrainGrid without regenerating rasters, fabricating Monte Carlo draws, or using hardcoded TRI fallbacks.
         """
+        pol_cfg = policy_config or DEFAULT_SENSITIVITY_POLICY
         base_route = self.get_route(route_id)
         with self._lock:
             ctx = self._route_contexts.get(route_id)
@@ -1288,35 +1351,90 @@ class ScienceAwareRoutingService:
             raise KeyError(f"Routing context grid for '{route_id}' is not cached in active session.")
 
         base_policy = resolve_routing_policy(base_req.mode, base_req.objective)
-        sig_fallback_deg = 1.5
-        if base_grid.slope_sigma_grid is not None and np.any(np.isfinite(base_grid.slope_sigma_grid)):
+        sig_fallback_deg = float(pol_cfg.unquantified_slope_probe_deg)
+        has_slope_sigma = bool(
+            base_grid.slope_sigma_grid is not None and np.any(np.isfinite(base_grid.slope_sigma_grid))
+        )
+        has_tri_sigma = bool(
+            base_grid.tri_sigma_grid is not None and np.any(np.isfinite(base_grid.tri_sigma_grid))
+        )
+        if has_slope_sigma:
             sig_grid = np.where(np.isfinite(base_grid.slope_sigma_grid), base_grid.slope_sigma_grid, sig_fallback_deg)
             basis_note = (
-                f"Analytical Horn 3x3 slope sigma sensitivity from {base_route.source_product_id} "
-                f"({base_grid.uncertainty_status}); not a per-pixel empirical stereo error map."
+                f"Analytical Horn 3x3 slope sigma propagation from {base_route.source_product_id} "
+                f"({base_grid.uncertainty_status}; policy {pol_cfg.policy_version}); not a per-pixel empirical stereo error map."
             )
         else:
             sig_grid = np.full_like(base_grid.slope_deg, sig_fallback_deg)
             basis_note = (
-                f"Fixed scenario probe +/-{sig_fallback_deg:.1f} deg used because DEM lacks metadata/empirical vertical precision."
+                f"DEM vertical uncertainty is UNQUANTIFIED on {base_route.source_product_id}: slope perturbation uses labeled "
+                f"MEASUREMENT_SENSITIVITY_ANALYSIS parametric probe +/-{sig_fallback_deg:.1f} deg; unpropagated TRI delta omitted."
             )
 
         outcomes: List[ScenarioSensitivityOutcome] = []
         base_budget = base_route.within_budget
+        overlap_thresh = float(pol_cfg.path_change_overlap_threshold)
         for sc in DEFAULT_SENSITIVITY_SCENARIOS:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RoutePlanningError("Sensitivity evaluation cancelled.", detail={"reason": "cancelled"})
+            sc_cat = sc.category
+            eff_unc_quantified: Optional[bool] = None
+
+            # Prompt 17 Defect 1.4: strictly separate quantified uncertainty propagation vs parametric probe vs omitted TRI
+            if sc.slope_sigma_multiplier != 0.0:
+                if has_slope_sigma:
+                    sc_cat = SensitivityCategory.MEASUREMENT_UNCERTAINTY_PROPAGATION
+                    eff_unc_quantified = True
+                else:
+                    sc_cat = SensitivityCategory.MEASUREMENT_SENSITIVITY_ANALYSIS
+                    eff_unc_quantified = False
+
+            if sc.tri_sigma_multiplier != 0.0 and not has_tri_sigma:
+                outcomes.append(
+                    ScenarioSensitivityOutcome(
+                        scenario_id=sc.scenario_id,
+                        label=sc.label,
+                        category=SensitivityCategory.MEASUREMENT_UNCERTAINTY_PROPAGATION,
+                        perturbation_parameter=sc.perturbation_parameter,
+                        perturbation_description=sc.perturbation_description,
+                        evaluated=False,
+                        uncertainty_quantified=False,
+                        route_found=True,
+                        path_changed_from_baseline=False,
+                        path_signature_diff_fraction=0.0,
+                        total_distance_m=base_route.total_surface_distance_m,
+                        estimated_time_s=base_route.estimated_duration_seconds,
+                        max_slope_deg=base_route.max_slope_deg,
+                        total_objective_cost=base_route.total_cost,
+                        constraint_status_changed=False,
+                        notes=[
+                            "TRI uncertainty propagation skipped: dataset lacks quantified vertical/TRI sigma "
+                            "(sensitivity_v2.0 removes arbitrary +0.25 m fallback)."
+                        ],
+                    )
+                )
+                continue
+
             slope_arr = base_grid.slope_deg
             if sc.slope_sigma_multiplier != 0.0:
                 slope_arr = np.maximum(0.0, base_grid.slope_deg + sc.slope_sigma_multiplier * sig_grid)
 
             tri_arr = base_grid.tri_m
-            if sc.tri_sigma_multiplier != 0.0:
+            if sc.tri_sigma_multiplier != 0.0 and has_tri_sigma and base_grid.tri_sigma_grid is not None:
+                eff_unc_quantified = True
+                tri_sigma_clean = np.where(np.isfinite(base_grid.tri_sigma_grid), base_grid.tri_sigma_grid, 0.0)
                 tri_arr = np.where(
                     np.isfinite(base_grid.tri_m),
-                    np.maximum(0.0, base_grid.tri_m + sc.tri_sigma_multiplier * 0.25),
+                    np.maximum(0.0, base_grid.tri_m + sc.tri_sigma_multiplier * tri_sigma_clean),
                     np.nan,
                 )
 
-            eff_cap = max(1.0, base_grid.effective_slope_limit_deg + sc.max_slope_delta_deg)
+            slope_delta = sc.max_slope_delta_deg
+            if sc.scenario_id == "strict_slope_cap":
+                slope_delta = float(pol_cfg.strict_slope_cap_delta_deg)
+            elif sc.scenario_id == "relaxed_slope_cap":
+                slope_delta = float(pol_cfg.relaxed_slope_cap_delta_deg)
+            eff_cap = max(1.0, base_grid.effective_slope_limit_deg + slope_delta)
             sc_grid = base_grid.clone_with_overrides(
                 effective_slope_limit_deg=eff_cap,
                 slope_deg_override=slope_arr,
@@ -1332,11 +1450,51 @@ class ScienceAwareRoutingService:
                     science_corridor_bonus=max(0.0, min(0.85, base_policy.science_corridor_bonus * sc.science_weight_scale)),
                 )
 
+            speed_scale = pol_cfg.walking_speed_degraded_scale if sc.scenario_id == "walking_speed_degraded" else sc.walking_speed_scale
+
+            # Analytical fast path when ONLY walking speed varies (identical grid & edge costs)
+            if (
+                sc.slope_sigma_multiplier == 0.0
+                and sc.tri_sigma_multiplier == 0.0
+                and slope_delta == 0.0
+                and sc.science_weight_scale == 1.0
+                and sc.uncertainty_penalty_scale == 1.0
+            ):
+                scaled_time: Optional[float] = (
+                    round(base_route.estimated_duration_seconds / max(0.05, speed_scale), 1)
+                    if base_route.estimated_duration_seconds is not None
+                    else None
+                )
+                sc_within_budget: Optional[bool] = None
+                if base_req.constraints.max_eva_duration_hours is not None and scaled_time is not None:
+                    usable = (base_req.constraints.max_eva_duration_hours * 3600.0) * (1.0 - base_req.constraints.safety_reserve_fraction)
+                    sc_within_budget = scaled_time <= usable
+                outcomes.append(
+                    ScenarioSensitivityOutcome(
+                        scenario_id=sc.scenario_id,
+                        label=sc.label,
+                        category=sc_cat,
+                        perturbation_parameter=sc.perturbation_parameter,
+                        perturbation_description=sc.perturbation_description,
+                        evaluated=True,
+                        uncertainty_quantified=eff_unc_quantified,
+                        route_found=True,
+                        path_changed_from_baseline=False,
+                        path_signature_diff_fraction=0.0,
+                        total_distance_m=base_route.total_surface_distance_m,
+                        estimated_time_s=scaled_time,
+                        max_slope_deg=base_route.max_slope_deg,
+                        total_objective_cost=base_route.total_cost,
+                        constraint_status_changed=(sc_within_budget != base_budget),
+                    )
+                )
+                continue
+
             sc_constraints = base_req.constraints.model_copy(
                 update={
                     "max_slope_deg": round(eff_cap / max(0.1, base_policy.effective_slope_limit_factor), 2),
                     "walking_speed_m_per_s": (
-                        base_req.constraints.walking_speed_m_per_s * sc.walking_speed_scale
+                        base_req.constraints.walking_speed_m_per_s * speed_scale
                         if base_req.constraints.walking_speed_m_per_s
                         else None
                     ),
@@ -1344,11 +1502,8 @@ class ScienceAwareRoutingService:
             )
             sc_req = base_req.model_copy(update={"constraints": sc_constraints})
 
-            # Temporarily compute without overriding main route slot or using explicit science override
             try:
-                orig_policy_mode = base_policy.mode
                 if sc.science_weight_scale != 1.0:
-                    # Run direct grid leg solver to reflect adjusted science bonus deterministically
                     sr, sc_c, _ = sc_grid.snap_to_traversable(sc_req.start.lat, sc_req.start.lon_east, "start", sc_constraints.snap_radius_m)
                     gr, gc, _ = sc_grid.snap_to_traversable(sc_req.destination.lat, sc_req.destination.lon_east, "dest", sc_constraints.snap_radius_m)
                     leg = solve_grid_leg(sc_grid, (sr, sc_c), (gr, gc), sc_policy, sc_req.algorithm)
@@ -1370,10 +1525,13 @@ class ScienceAwareRoutingService:
                         ScenarioSensitivityOutcome(
                             scenario_id=sc.scenario_id,
                             label=sc.label,
+                            category=sc_cat,
                             perturbation_parameter=sc.perturbation_parameter,
                             perturbation_description=sc.perturbation_description,
+                            evaluated=True,
+                            uncertainty_quantified=eff_unc_quantified,
                             route_found=True,
-                            path_changed_from_baseline=(ov < 0.90),
+                            path_changed_from_baseline=(ov < overlap_thresh),
                             path_signature_diff_fraction=round(1.0 - ov, 4),
                             total_distance_m=base_route.total_surface_distance_m,
                             total_objective_cost=round(leg.total_cost, 2),
@@ -1392,10 +1550,13 @@ class ScienceAwareRoutingService:
                         ScenarioSensitivityOutcome(
                             scenario_id=sc.scenario_id,
                             label=sc.label,
+                            category=sc_cat,
                             perturbation_parameter=sc.perturbation_parameter,
                             perturbation_description=sc.perturbation_description,
+                            evaluated=True,
+                            uncertainty_quantified=eff_unc_quantified,
                             route_found=True,
-                            path_changed_from_baseline=(ov < 0.90),
+                            path_changed_from_baseline=(ov < overlap_thresh),
                             path_signature_diff_fraction=round(1.0 - ov, 4),
                             total_distance_m=sc_rt.total_surface_distance_m,
                             estimated_time_s=sc_rt.estimated_duration_seconds,
@@ -1409,8 +1570,11 @@ class ScienceAwareRoutingService:
                     ScenarioSensitivityOutcome(
                         scenario_id=sc.scenario_id,
                         label=sc.label,
+                        category=sc_cat,
                         perturbation_parameter=sc.perturbation_parameter,
                         perturbation_description=sc.perturbation_description,
+                        evaluated=True,
+                        uncertainty_quantified=eff_unc_quantified,
                         route_found=False,
                         path_changed_from_baseline=True,
                         path_signature_diff_fraction=1.0,
@@ -1423,6 +1587,7 @@ class ScienceAwareRoutingService:
             baseline_route_id=route_id,
             outcomes=outcomes,
             uncertainty_basis_note=basis_note,
+            policy_config=pol_cfg,
         )
 
     def compute_robust_comparison(
@@ -1431,12 +1596,15 @@ class ScienceAwareRoutingService:
         override_grid: Optional[TerrainGrid] = None,
         override_dataset_id: str = "synthetic_test_dem",
         override_product_id: str = "SYNTHETIC_DEM",
+        cancel_event: Optional[threading.Event] = None,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
     ) -> RobustRouteCompareResponse:
         """
         Generate genuinely distinct route alternatives across explicit objectives plus spatial
         penalty diversification, rejecting near-duplicate corridors or reporting bottlenecks.
         """
         t0 = time.perf_counter()
+        stage_timings: Dict[str, float] = {}
         all_pts = [(req.start.lat, req.start.lon_east), (req.destination.lat, req.destination.lon_east)]
         req_stub = RouteComputeRequest(
             dataset_id=req.dataset_id,
@@ -1449,9 +1617,12 @@ class ScienceAwareRoutingService:
             algorithm=req.algorithm,
             constraints=req.constraints.model_copy(update={"walking_speed_m_per_s": req.walking_speed_mps}),
         )
+        t_sci = time.perf_counter()
         stops, sci_corridor, _nl, _ev = self._gather_stops_and_science(req_stub)
+        stage_timings["science_gather_ms"] = round((time.perf_counter() - t_sci) * 1000.0, 2)
         all_pts.extend((s[1], s[2]) for s in stops)
 
+        t_grid = time.perf_counter()
         if override_grid is not None:
             base_grid = override_grid
             ds_id = override_dataset_id
@@ -1460,17 +1631,20 @@ class ScienceAwareRoutingService:
             ds = self._select_dem_for_points(req.dataset_id, all_pts)
             ds_id = ds.id
             prod_id = ds.product_id
-            base_grid = build_terrain_grid_from_dataset(
-                ds,
-                self.raw_dir,
-                all_pts,
-                req.constraints,
+            base_grid = self._get_or_build_terrain_grid(
+                ds=ds,
+                all_pts=all_pts,
+                constraints=req.constraints,
                 effective_slope_limit_factor=1.0,
                 science_points=sci_corridor,
             )
+        stage_timings["terrain_grid_ms"] = round((time.perf_counter() - t_grid) * 1000.0, 2)
+        if progress_callback:
+            progress_callback("grid_ready", 1, len(req.objectives) + 2)
 
         accepted: List[Tuple[DistinctRouteCandidate, RouteComputeResponse, TerrainGrid]] = []
         rejected: List[Dict[str, Any]] = []
+        failure_reasons: List[str] = []
 
         def _consider_candidate(
             cand_id: str,
@@ -1530,6 +1704,7 @@ class ScienceAwareRoutingService:
                 except RoutePlanningError as ret_exc:
                     ret_ok = False
                     ret_stat = "RETURN_COMPUTATION_FAILED"
+                    failure_reasons.append(f"{cand_id} independent return failed: {ret_exc.message}")
 
             sens_rep = (
                 self.evaluate_route_sensitivity(rt.route_id, override_grid=cand_grid, override_req=req_stub)
@@ -1579,6 +1754,7 @@ class ScienceAwareRoutingService:
                 )
                 _consider_candidate(f"cand-{idx+1}-{obj.value.lower()}", obj, pol.label, "objective_weight", rt, obj_grid)
             except RoutePlanningError as exc:
+                failure_reasons.append(f"{obj.value}: {exc.message}")
                 rejected.append(
                     {
                         "candidate_id": f"cand-{idx+1}-{obj.value.lower()}",
@@ -1610,6 +1786,7 @@ class ScienceAwareRoutingService:
                     prim_grid,
                 )
             except RoutePlanningError as exc:
+                failure_reasons.append(f"cand-spatial-alt-1: {exc.message}")
                 rejected.append({"candidate_id": "cand-spatial-alt-1", "method": "spatial_corridor_penalty", "reason": exc.message})
 
         # Pairwise spatial overlap matrix across accepted candidates
@@ -1656,6 +1833,25 @@ class ScienceAwareRoutingService:
             dataset_id=ds_id,
             source_product_id=prod_id,
             alternative_generation_status=status,
+            search_algorithm=f"8_neighbor_terrain_grid_{req.algorithm}",
+            diversification_strategy="multi_objective_weights_plus_corridor_spatial_penalty_pass",
+            search_limits={
+                "objectives_tested": [o.value for o in req.objectives],
+                "spatial_penalty_passes": 1,
+                "spatial_penalty_factor": 4.0,
+                "spatial_corridor_radius_m": 18.0,
+                "max_overlap_threshold": req.max_overlap_threshold,
+                "overlap_vertex_tolerance_m": 12.0,
+                "max_grid_dim": req.constraints.max_grid_dim,
+            },
+            overlap_metric_definition=(
+                "Symmetric vertex proximity overlap: min(frac vertices of route A within 12.0 m of route B, "
+                "frac vertices of route B within 12.0 m of route A) on Mars IAU2000 great circle."
+            ),
+            global_optimality_disclaimer=(
+                "Generates feasible alternative routes across explicitly tested objectives and one 18 m interior spatial penalty pass "
+                "bounded by DEM grid resolution and max_overlap_threshold; does NOT claim exhaustive global optimality."
+            ),
             recommended_candidate_id=rec_id,
             recommendation_rationale=rationale,
             distinct_candidate_count=len(accepted),
@@ -1663,10 +1859,13 @@ class ScienceAwareRoutingService:
             pairwise_overlap_matrix=matrix,
             candidates=[c for (c, _rt, _g) in accepted],
             rejected_near_duplicates=rejected,
+            rejected_candidates=rejected,
+            failure_reasons=failure_reasons,
             limitations=[
                 "Route comparisons evaluate meter-scale DEM geometry and coverage limits; sub-meter obstacles (< 0.5 m) remain unresolved.",
                 "Spatial distinctness verifies corridor separation rather than life-safety certification.",
             ],
+            stage_timings_ms=stage_timings,
             compute_time_ms=round((time.perf_counter() - t0) * 1000.0, 2),
         )
 
@@ -1721,11 +1920,10 @@ class ScienceAwareRoutingService:
                 ds = self._select_dem_for_points(dataset_id, [(v.lat, v.lon_east) for v in out_verts])
                 ds_id = ds.id
                 prod_id = ds.product_id
-                ret_grid = build_terrain_grid_from_dataset(
-                    ds,
-                    self.raw_dir,
-                    [(v.lat, v.lon_east) for v in out_verts],
-                    ret_constraints,
+                ret_grid = self._get_or_build_terrain_grid(
+                    ds=ds,
+                    all_pts=[(v.lat, v.lon_east) for v in out_verts],
+                    constraints=ret_constraints,
                     effective_slope_limit_factor=1.0,
                 )
 

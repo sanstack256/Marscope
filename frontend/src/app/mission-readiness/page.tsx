@@ -1230,6 +1230,9 @@ export default function MissionReadinessPage() {
                       const active = selectedSegment?.segment_id === seg.segment_id;
                       const footCov = seg.coverage.optical_footprint_coverage_fraction ?? seg.coverage.optical_coverage_fraction;
                       const validOptCov = seg.coverage.valid_optical_pixel_coverage_fraction ?? seg.coverage.optical_coverage_fraction;
+                      const optUnmeasured =
+                        seg.coverage.optical_coverage_status === "not_evaluated_no_registered_ortho" ||
+                        (footCov == null && validOptCov == null);
                       return (
                         <tr
                           key={seg.segment_id}
@@ -1253,7 +1256,9 @@ export default function MissionReadinessPage() {
                             {(seg.coverage.valid_elevation_fraction * 100).toFixed(0)}%
                           </td>
                           <td className="py-2 pr-2 font-mono">
-                            {(footCov * 100).toFixed(0)}% / {(validOptCov * 100).toFixed(0)}%
+                            {optUnmeasured
+                              ? "UNMEASURED"
+                              : `${((footCov ?? 0) * 100).toFixed(0)}% / ${((validOptCov ?? 0) * 100).toFixed(0)}%`}
                           </td>
                           <td className="py-2 pr-2">
                             <span
@@ -2070,7 +2075,18 @@ export default function MissionReadinessPage() {
                         </span>
                       </td>
                       <td className="py-1.5 pr-2">{dom.evidence_basis}</td>
-                      <td className="py-1.5 text-slate-400">{dom.threshold_or_rule}</td>
+                      <td className="py-1.5 text-slate-400">
+                        <div>{dom.threshold_or_rule}</div>
+                        {(dom.spatial_footprint_coverage_fraction != null || dom.resolution_adequacy) && (
+                          <div className="text-[10px] font-mono text-cyan-300/90 mt-0.5">
+                            {dom.spatial_footprint_coverage_fraction != null &&
+                              `Footprint: ${(dom.spatial_footprint_coverage_fraction * 100).toFixed(0)}% `}
+                            {dom.valid_measurement_coverage_fraction != null &&
+                              `· Valid: ${(dom.valid_measurement_coverage_fraction * 100).toFixed(0)}% `}
+                            {dom.resolution_adequacy && `· Scale: ${dom.resolution_adequacy}`}
+                          </div>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -2218,10 +2234,23 @@ export default function MissionReadinessPage() {
                       Per-Pixel Error Raster: {String(corridorUncertainty.dataset_profile.has_per_pixel_error_raster)}
                     </div>
                     <div>
-                      Bits / Type: {corridorUncertainty.dataset_profile.sample_bits ?? "?"}-bit{" "}
-                      {corridorUncertainty.dataset_profile.sample_type ?? "?"} (int quantized:{" "}
-                      {String(corridorUncertainty.dataset_profile.is_integer_quantized)})
+                      Raw PDS / Proc Raster:{" "}
+                      {corridorUncertainty.dataset_profile.raw_pds_sample_bits ??
+                        corridorUncertainty.dataset_profile.sample_bits ??
+                        "?"}
+                      -bit{" "}
+                      {corridorUncertainty.dataset_profile.raw_pds_sample_type ??
+                        corridorUncertainty.dataset_profile.sample_type ??
+                        "?"}{" "}
+                      / proc={corridorUncertainty.dataset_profile.processed_raster_dtype ?? "?"} (quant available:{" "}
+                      {String(corridorUncertainty.dataset_profile.quantization_uncertainty_available ?? corridorUncertainty.dataset_profile.is_integer_quantized)})
                     </div>
+                    {corridorUncertainty.dataset_profile.scaling_factor_source && (
+                      <div className="text-[10px] text-cyan-300">
+                        Scaling: {corridorUncertainty.dataset_profile.scaling_factor ?? "unverified"} (
+                        {corridorUncertainty.dataset_profile.scaling_factor_source})
+                      </div>
+                    )}
                     {corridorUncertainty.dataset_profile.elevation_uncertainty_metrics.map((m) => (
                       <div key={m.metric_name} className="text-[10px] text-slate-300 border-t border-slate-800 pt-1">
                         {m.metric_name}: {m.value != null ? `${m.value} ${m.units ?? ""}` : m.status} ({m.status})

@@ -97,39 +97,49 @@ def solve_grid_leg(
         return LegPathResult(cells=[start_rc], total_cost=0.0, nodes_expanded=1)
 
     rows, cols = grid.rows, grid.cols
+    n_cells = rows * cols
     dx_m, dy_m = grid.dx_m, grid.dy_m
     min_mult = policy.min_cost_multiplier
     use_h = (algorithm == PathAlgorithm.ASTAR)
 
-    def h_score(r: int, c: int) -> float:
-        if not use_h:
-            return 0.0
-        return min_mult * math.hypot((c - gc) * dx_m, (r - gr) * dy_m)
+    strides, fwd_lists, _rev = grid.compiled_edge_tables(policy, penalty_grid=penalty_grid)
+    edges_with_strides = tuple(zip(strides, fwd_lists))
 
-    g_score: Dict[int, float] = {}
-    came_from: Dict[int, int] = {}
+    if use_h:
+        dr_vec = np.arange(rows, dtype=np.float64) - float(gr)
+        dc_vec = np.arange(cols, dtype=np.float64) - float(gc)
+        h_flat = (min_mult * np.hypot(dc_vec[None, :] * dx_m, dr_vec[:, None] * dy_m)).ravel().tolist()
+    else:
+        h_flat = [0.0] * n_cells
+
+    inf = float("inf")
+    g_score = [inf] * n_cells
+    came_from = [-1] * n_cells
+    closed = bytearray(n_cells)
     start_idx = sr * cols + sc
     goal_idx = gr * cols + gc
     g_score[start_idx] = 0.0
 
     # Priority queue items: (f, tie_counter, idx) for full determinism across ties
-    open_heap: List[Tuple[float, int, int]] = [(h_score(sr, sc), 0, start_idx)]
+    open_heap: List[Tuple[float, int, int]] = [(h_flat[start_idx], 0, start_idx)]
     tie = 1
-    closed = set()
     expanded = 0
+    heappop = heapq.heappop
+    heappush = heapq.heappush
 
     while open_heap:
-        _, _, cur = heapq.heappop(open_heap)
-        if cur in closed:
+        _, _, cur = heappop(open_heap)
+        if closed[cur]:
             continue
-        closed.add(cur)
+        closed[cur] = 1
         expanded += 1
 
         if cur == goal_idx:
             path_idx: List[int] = [cur]
-            while cur in came_from:
-                cur = came_from[cur]
-                path_idx.append(cur)
+            p = came_from[cur]
+            while p >= 0:
+                path_idx.append(p)
+                p = came_from[p]
             path_idx.reverse()
             cells = [(idx // cols, idx % cols) for idx in path_idx]
             return LegPathResult(
@@ -138,27 +148,19 @@ def solve_grid_leg(
                 nodes_expanded=expanded,
             )
 
-        cr, cc = cur // cols, cur % cols
         cur_g = g_score[cur]
-
-        for dr, dc in _NEIGHBORS_8:
-            nr, nc = cr + dr, cc + dc
-            if nr < 0 or nr >= rows or nc < 0 or nc >= cols:
+        for st, clist in edges_with_strides:
+            step_cost = clist[cur]
+            if step_cost < 0.0:
                 continue
-            n_idx = nr * cols + nc
-            if n_idx in closed:
+            n_idx = cur + st
+            if closed[n_idx]:
                 continue
-            if not grid.can_step(cr, cc, nr, nc):
-                continue
-
-            step_cost = grid.edge_cost(cr, cc, nr, nc, policy, penalty_grid=penalty_grid)
             tentative_g = cur_g + step_cost
-            prev_g = g_score.get(n_idx)
-            if prev_g is None or tentative_g < prev_g - 1e-9:
+            if tentative_g < g_score[n_idx] - 1e-9:
                 came_from[n_idx] = cur
                 g_score[n_idx] = tentative_g
-                f_val = tentative_g + h_score(nr, nc)
-                heapq.heappush(open_heap, (f_val, tie, n_idx))
+                heappush(open_heap, (tentative_g + h_flat[n_idx], tie, n_idx))
                 tie += 1
 
     raise RoutePlanningError(

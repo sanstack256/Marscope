@@ -7,9 +7,11 @@ blocked/no-data pixels and validating line-of-sight simplification against all p
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import heapq
 import math
+from pathlib import Path
+import threading
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -26,6 +28,8 @@ from app.routing.schemas import RoutePlanningConstraints, SnapDiagnostic
 from app.schemas.dataset import Dataset
 from app.terrain.roughness import calculate_roughness_tri_with_metadata
 from app.terrain.slope import calculate_slope
+from app.terrain_uncertainty.elevation_uncertainty import inspect_dataset_elevation_uncertainty
+from app.terrain_uncertainty.roughness_uncertainty import propagate_tri_roughness_uncertainty
 from app.terrain_uncertainty.slope_uncertainty import propagate_horn_slope_uncertainty
 
 
@@ -65,7 +69,16 @@ class TerrainGrid:
     cell_traversability_state: Optional[np.ndarray] = None  # uint8: 0=UNKNOWN, 1=EVALUATED, 2=KNOWN_EXCLUSION
     optical_valid_mask: Optional[np.ndarray] = None
     slope_sigma_grid: Optional[np.ndarray] = None
+    tri_sigma_grid: Optional[np.ndarray] = None
     uncertainty_status: str = "UNCERTAINTY_UNQUANTIFIED"
+    _compiled_step_valid: Optional[np.ndarray] = field(default=None, init=False, repr=False, compare=False)
+    _compiled_costs_cache: Dict[Any, Tuple[List[int], List[List[float]], List[List[float]]]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+    _rev_dijkstra_cache: Dict[Tuple[Tuple[int, int], Any], Tuple[Dict[int, float], Dict[int, int]]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+    _compile_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.cell_traversability_state is None:
@@ -122,6 +135,7 @@ class TerrainGrid:
             max_roughness_tri_m=r_cap,
             optical_valid_mask=self.optical_valid_mask,
             slope_sigma_grid=self.slope_sigma_grid,
+            tri_sigma_grid=self.tri_sigma_grid,
             uncertainty_status=self.uncertainty_status,
         )
 
@@ -366,6 +380,129 @@ class TerrainGrid:
             multiplier *= max(1.0, float(penalty_grid[r1, c1]))
         return horiz_m * multiplier
 
+    _GRAPH_NEIGHBORS_8: Tuple[Tuple[int, int], ...] = (
+        (-1, 0),
+        (1, 0),
+        (0, -1),
+        (0, 1),
+        (-1, -1),
+        (-1, 1),
+        (1, -1),
+        (1, 1),
+    )
+
+    def compiled_edge_tables(
+        self,
+        policy: RoutingModePolicy,
+        penalty_grid: Optional[np.ndarray] = None,
+    ) -> Tuple[List[int], List[List[float]], List[List[float]]]:
+        """
+        Precompute vectorized 8-neighbor forward and reverse edge cost flat lists once per grid+policy.
+        Invalid/blocked/corner-cutting/over-slope transitions carry negative sentinel -1.0.
+        """
+        pol_key = (
+            policy.slope_weight,
+            policy.uphill_weight,
+            policy.downhill_weight,
+            policy.roughness_weight,
+            policy.uncertainty_weight,
+            policy.nodata_proximity_weight,
+            policy.science_corridor_bonus,
+            policy.min_cost_multiplier,
+        )
+        if penalty_grid is None:
+            cached = self._compiled_costs_cache.get(pol_key)
+            if cached is not None:
+                return cached
+
+        with self._compile_lock:
+            if penalty_grid is None:
+                cached = self._compiled_costs_cache.get(pol_key)
+                if cached is not None:
+                    return cached
+
+            rows, cols = self.rows, self.cols
+            slopes_safe = np.where(np.isfinite(self.slope_deg), self.slope_deg, np.nan)
+            tri_safe = np.where(np.isfinite(self.tri_m), self.tri_m, 0.0)
+            tri_denom = max(1.0, 0.5 * (self.dx_m + self.dy_m))
+            eff_lim = max(1.0, self.effective_slope_limit_deg)
+
+            if self._compiled_step_valid is None:
+                step_valid = np.zeros((8, rows, cols), dtype=bool)
+                for k, (dr, dc) in enumerate(self._GRAPH_NEIGHBORS_8):
+                    r0s = slice(max(0, -dr), rows - max(0, dr))
+                    c0s = slice(max(0, -dc), cols - max(0, dc))
+                    r1s = slice(max(0, dr), rows - max(0, -dr))
+                    c1s = slice(max(0, dc), cols - max(0, -dc))
+                    if (r0s.stop or rows) <= (r0s.start or 0) or (c0s.stop or cols) <= (c0s.start or 0):
+                        continue
+                    v = self.traversable[r0s, c0s] & self.traversable[r1s, c1s]
+                    if abs(dr) == 1 and abs(dc) == 1:
+                        v = v & self.traversable[r1s, c0s] & self.traversable[r0s, c1s]
+                    horiz_m = math.hypot(dc * self.dx_m, dr * self.dy_m)
+                    dz_abs = np.abs(self.elevation_m[r1s, c1s] - self.elevation_m[r0s, c0s])
+                    seg_slope = np.degrees(np.arctan2(dz_abs, max(1e-6, horiz_m)))
+                    v = v & (seg_slope <= self.effective_slope_limit_deg)
+                    step_valid[k, r0s, c0s] = v
+                self._compiled_step_valid = step_valid
+
+            step_valid = self._compiled_step_valid
+            strides: List[int] = []
+            fwd_lists: List[List[float]] = []
+            rev_lists: List[List[float]] = []
+
+            node_extra = (
+                policy.uncertainty_weight * self.uncertainty_score
+                + policy.nodata_proximity_weight * self.nodata_adj_penalty
+                - policy.science_corridor_bonus * self.science_field
+            )
+            pen_arr = np.maximum(1.0, penalty_grid) if penalty_grid is not None else None
+
+            for k, (dr, dc) in enumerate(self._GRAPH_NEIGHBORS_8):
+                strides.append(dr * cols + dc)
+                r0s = slice(max(0, -dr), rows - max(0, dr))
+                c0s = slice(max(0, -dc), cols - max(0, dc))
+                r1s = slice(max(0, dr), rows - max(0, -dr))
+                c1s = slice(max(0, dc), cols - max(0, -dc))
+
+                fwd_grid = np.full((rows, cols), -1.0, dtype=np.float64)
+                rev_grid = np.full((rows, cols), -1.0, dtype=np.float64)
+
+                m = step_valid[k, r0s, c0s]
+                if np.any(m):
+                    horiz_m = math.hypot(dc * self.dx_m, dr * self.dy_m)
+                    dz = self.elevation_m[r1s, c1s] - self.elevation_m[r0s, c0s]
+                    grade = dz / max(1e-6, horiz_m)
+                    seg_slope = np.degrees(np.arctan2(np.abs(dz), max(1e-6, horiz_m)))
+                    local_slope = 0.5 * (slopes_safe[r0s, c0s] + slopes_safe[r1s, c1s])
+                    eff_slope = np.maximum(local_slope, seg_slope)
+                    slope_norm = eff_slope / eff_lim
+                    tri_norm = (0.5 * (tri_safe[r0s, c0s] + tri_safe[r1s, c1s])) / tri_denom
+                    uphill = np.maximum(0.0, grade)
+                    downhill = np.maximum(0.0, -grade)
+                    raw_mult = (
+                        1.0
+                        + policy.slope_weight * (slope_norm * slope_norm)
+                        + policy.uphill_weight * uphill
+                        + policy.downhill_weight * downhill
+                        + policy.roughness_weight * tri_norm
+                        + node_extra[r1s, c1s]
+                    )
+                    mult = np.maximum(policy.min_cost_multiplier, raw_mult)
+                    if pen_arr is not None:
+                        mult = mult * pen_arr[r1s, c1s]
+                    edge_c = np.where(m, horiz_m * mult, -1.0)
+                    fwd_grid[r0s, c0s] = edge_c
+                    rev_grid[r1s, c1s] = edge_c
+
+                fwd_lists.append(memoryview(fwd_grid.ravel()))
+                rev_lists.append(memoryview(rev_grid.ravel()))
+
+            res = (strides, fwd_lists, rev_lists)
+            if penalty_grid is None:
+                self._compiled_costs_cache[pol_key] = res
+            return res
+
     def reverse_dijkstra_to_target(
         self,
         goal_rc: Tuple[int, int],
@@ -373,46 +510,67 @@ class TerrainGrid:
     ) -> Tuple[Dict[int, float], Dict[int, int]]:
         """
         Compute exact optimal asymmetric directed return paths from EVERY reachable cell u
-        to `goal_rc` using directed checks `can_step(u, goal_neighbor)` and `edge_cost(u, goal_neighbor)`.
+        to `goal_rc` using precomputed vectorized transition tables.
         Returns (cost_to_goal_map, next_hop_map).
         """
+        pol_key = (
+            policy.slope_weight,
+            policy.uphill_weight,
+            policy.downhill_weight,
+            policy.roughness_weight,
+            policy.uncertainty_weight,
+            policy.nodata_proximity_weight,
+            policy.science_corridor_bonus,
+            policy.min_cost_multiplier,
+        )
+        cache_key = (goal_rc, pol_key)
+        cached = self._rev_dijkstra_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        strides, _fwd, rev_lists = self.compiled_edge_tables(policy)
         gr, gc = goal_rc
         cols = self.cols
         rows = self.rows
+        n_cells = rows * cols
         goal_idx = gr * cols + gc
-        dist: Dict[int, float] = {goal_idx: 0.0}
-        next_hop: Dict[int, int] = {}
+
+        inf = float("inf")
+        dist_arr = [inf] * n_cells
+        next_arr = [-1] * n_cells
+        visited = bytearray(n_cells)
+        dist_arr[goal_idx] = 0.0
+
         pq: List[Tuple[float, int, int]] = [(0.0, 0, goal_idx)]
         tie = 1
-        visited: set = set()
-        neighbors = ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1))
+        heappop = heapq.heappop
+        heappush = heapq.heappush
+        edges_with_strides = tuple(zip(strides, rev_lists))
 
         while pq:
-            cur_d, _, v_idx = heapq.heappop(pq)
-            if v_idx in visited:
+            cur_d, _, v_idx = heappop(pq)
+            if visited[v_idx]:
                 continue
-            visited.add(v_idx)
-            vr, vc = v_idx // cols, v_idx % cols
-            if not self.traversable[vr, vc]:
-                continue
-            for dr, dc in neighbors:
-                ur, uc = vr + dr, vc + dc
-                if ur < 0 or ur >= rows or uc < 0 or uc >= cols:
+            visited[v_idx] = 1
+            for st, rlist in edges_with_strides:
+                c_uv = rlist[v_idx]
+                if c_uv < 0.0:
                     continue
-                u_idx = ur * cols + uc
-                if u_idx in visited:
+                u_idx = v_idx - st
+                if visited[u_idx]:
                     continue
-                # Evaluate TRUE forward direction u -> v for return traverse toward goal
-                if not self.can_step(ur, uc, vr, vc):
-                    continue
-                alt = cur_d + self.edge_cost(ur, uc, vr, vc, policy)
-                prev = dist.get(u_idx)
-                if prev is None or alt < prev - 1e-9:
-                    dist[u_idx] = alt
-                    next_hop[u_idx] = v_idx
-                    heapq.heappush(pq, (alt, tie, u_idx))
+                alt = cur_d + c_uv
+                if alt < dist_arr[u_idx] - 1e-9:
+                    dist_arr[u_idx] = alt
+                    next_arr[u_idx] = v_idx
+                    heappush(pq, (alt, tie, u_idx))
                     tie += 1
-        return dist, next_hop
+
+        dist_map = {i: d for i, d in enumerate(dist_arr) if d < inf}
+        next_hop = {i: nxt for i, nxt in enumerate(next_arr) if nxt >= 0}
+        res = (dist_map, next_hop)
+        self._rev_dijkstra_cache[cache_key] = res
+        return res
 
     def exclusion_statistics(self) -> Dict[str, int]:
         """Count exact hard-constraint cell exclusions across the solver DEM grid."""
@@ -774,19 +932,49 @@ def build_terrain_grid_from_dataset(
             nodata_mask = ~valid_elev
 
             slope_arr, _ = calculate_slope(dem_arr, dx_m, dy_m, nodata_mask=nodata_mask)
-            tri_arr, _ = calculate_roughness_tri_with_metadata(dem_arr, dx_m, dy_m, nodata_mask=nodata_mask)
+            native_res = float(dataset.horizontal_resolution_meters or 0.5 * (dx_m + dy_m))
+            elev_prof = inspect_dataset_elevation_uncertainty(
+                dataset=dataset,
+                raw_dir=Path(raw_dir),
+                processed_dir=Path(raw_dir).parent / "processed",
+            )
+            unc_status = elev_prof.overall_elevation_uncertainty_status.value
+            sigma_probe: Optional[float] = None
+            if unc_status == "QUANTIZATION_LOWER_BOUND_ONLY":
+                q_sd_metric = next(
+                    (
+                        m
+                        for m in elev_prof.elevation_uncertainty_metrics
+                        if m.metric_name == "quantization_uniform_standard_deviation" and m.value is not None
+                    ),
+                    None,
+                )
+                sigma_probe = float(q_sd_metric.value) if q_sd_metric is not None and q_sd_metric.value is not None else None
+            elif unc_status == "QUANTIFIED_FROM_METADATA":
+                nom_metric = next(
+                    (
+                        m
+                        for m in elev_prof.elevation_uncertainty_metrics
+                        if m.metric_name == "nominal_vertical_precision_metadata" and m.value is not None
+                    ),
+                    None,
+                )
+                sigma_probe = float(nom_metric.value) if nom_metric is not None and nom_metric.value is not None else dataset.vertical_resolution_meters
+
+            tri_arr, tri_sigma_arr, _, _tri_sum = propagate_tri_roughness_uncertainty(
+                elevation_grid=dem_arr,
+                dx_meters=dx_m,
+                dy_meters=dy_m,
+                sigma_z_m=sigma_probe,
+                nodata_mask=nodata_mask,
+                neighborhood_radius_meters=None,
+                is_empirical_error_map=False,
+            )
 
             eff_limit = max(1.0, float(constraints.max_slope_deg) * float(effective_slope_limit_factor))
             trav = valid_elev & np.isfinite(slope_arr) & (slope_arr <= eff_limit)
             if constraints.max_roughness_tri_m is not None:
                 trav = trav & np.isfinite(tri_arr) & (tri_arr <= float(constraints.max_roughness_tri_m))
-
-            native_res = float(dataset.horizontal_resolution_meters or 0.5 * (dx_m + dy_m))
-            sigma_probe = dataset.vertical_resolution_meters
-            unc_status = "QUANTIFIED_FROM_METADATA" if sigma_probe is not None else "UNCERTAINTY_UNQUANTIFIED"
-            if any("QUANT" in f.upper() or "INT" in f.upper() for f in (dataset.quality_flags or [])) or "mola" in dataset.id.lower():
-                unc_status = "QUANTIZATION_LOWER_BOUND_ONLY"
-                sigma_probe = (sigma_probe or 1.0) / math.sqrt(12.0)
 
             _s_deg, slope_sigma_arr, _s_sum = propagate_horn_slope_uncertainty(
                 elevation_grid=dem_arr,
@@ -830,6 +1018,7 @@ def build_terrain_grid_from_dataset(
                     float(constraints.max_roughness_tri_m) if constraints.max_roughness_tri_m is not None else None
                 ),
                 slope_sigma_grid=slope_sigma_arr,
+                tri_sigma_grid=tri_sigma_arr if sigma_probe is not None else None,
                 uncertainty_status=unc_status,
             )
 

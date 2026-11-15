@@ -25,7 +25,7 @@ from shapely.geometry import LineString, Point, Polygon, box
 from shapely.ops import unary_union
 
 from app.evidence_intelligence.corridor import MarsLocalFrame
-from app.evidence_intelligence.schemas import CorridorSegmentAssessment
+from app.evidence_intelligence.schemas import CorridorSegmentAssessment, OpticalCoverageStatus
 from app.geospatial.crs import MARS_EQUATORIAL_RADIUS_M, normalize_longitude_360
 from app.mobility.coverage import _resolve_raw_dem_open_path
 from app.terrain.optical_analysis import (
@@ -147,7 +147,7 @@ def assess_corridor_optical_evidence(
 ) -> Tuple[
     List[OpticalCandidateFeature],
     List[RejectedOpticalCandidate],
-    float,
+    Optional[float],
     str,
     Dict[str, Any],
 ]:
@@ -155,6 +155,7 @@ def assess_corridor_optical_evidence(
     Execute corridor-constrained optical analysis across one or more local ortho products,
     compute per-segment unioned footprint + valid-pixel coverage fractions (capped in [0, 1]),
     and filter candidates strictly to the assessed corridor polygon.
+    Explicitly preserves `None` when optical coverage or footprint is unverified (never fabricates 0.0).
     """
     product_ids_ordered: List[str] = []
     for ds_id in [ortho_dataset_id] + list(ortho_dataset_ids or []):
@@ -163,22 +164,23 @@ def assess_corridor_optical_evidence(
 
     if not product_ids_ordered:
         for seg in segments:
-            seg.coverage.optical_footprint_coverage_fraction = 0.0
-            seg.coverage.valid_optical_pixel_coverage_fraction = 0.0
-            seg.coverage.optical_coverage_fraction = 0.0
-            seg.coverage.optical_covered_area_m2 = 0.0
+            seg.coverage.optical_footprint_coverage_fraction = None
+            seg.coverage.valid_optical_pixel_coverage_fraction = None
+            seg.coverage.optical_coverage_fraction = None
+            seg.coverage.optical_coverage_status = OpticalCoverageStatus.COVERAGE_UNAVAILABLE
+            seg.coverage.optical_covered_area_m2 = None
             seg.coverage.optical_contributing_product_ids = []
-            seg.coverage.optical_quality_note = "No locally acquired HiRISE orthophoto covering this corridor."
+            seg.coverage.optical_quality_note = "No locally acquired HiRISE orthophoto covering this corridor (coverage unavailable)."
         return (
             [],
             [],
-            0.0,
-            "No locally acquired HiRISE orthophoto covering this corridor.",
-            {"available": False, "dataset_id": None, "dataset_ids": []},
+            None,
+            "No locally acquired HiRISE orthophoto covering this corridor (coverage unavailable).",
+            {"available": False, "dataset_id": None, "dataset_ids": [], "optical_coverage_status": OpticalCoverageStatus.COVERAGE_UNAVAILABLE.value},
         )
 
     if not segments:
-        return [], [], 0.0, "No route segments available for optical assessment.", {"available": False}
+        return [], [], None, "No route segments available for optical assessment.", {"available": False, "optical_coverage_status": OpticalCoverageStatus.COVERAGE_UNAVAILABLE.value}
 
     mean_lat = sum(0.5 * (s.start_coord.lat + s.end_coord.lat) for s in segments) / len(segments)
     mean_lon = sum(0.5 * (s.start_coord.lon_east + s.end_coord.lon_east) for s in segments) / len(segments)
@@ -250,22 +252,36 @@ def assess_corridor_optical_evidence(
     footprint_union_m = unary_union(footprint_boxes_m) if footprint_boxes_m else None
 
     # Compute exact per-segment footprint + valid pixel coverage using spatial union (<= 1.0)
-    corridor_total_area_m2 = 0.0
+    # Never coerce unverified footprint / unreadable pixel grids into 0.0!
+    corridor_verified_area_m2 = 0.0
     corridor_covered_area_m2 = 0.0
 
     for seg in segments:
         poly_m = seg_polys_m[seg.segment_id]
         poly_ll = seg_polys_ll[seg.segment_id]
         seg_area = max(1e-6, float(poly_m.area))
-        corridor_total_area_m2 += seg_area
 
-        if footprint_union_m is not None:
-            inter_area = float(poly_m.intersection(footprint_union_m).area)
-            foot_cov = min(1.0, max(0.0, inter_area / seg_area))
-        else:
-            foot_cov = 0.0
+        if footprint_union_m is None:
+            seg.coverage.optical_footprint_coverage_fraction = None
+            seg.coverage.valid_optical_pixel_coverage_fraction = None
+            seg.coverage.optical_coverage_fraction = None
+            seg.coverage.optical_coverage_status = OpticalCoverageStatus.FOOTPRINT_UNVERIFIED
+            seg.coverage.optical_covered_area_m2 = None
+            seg.coverage.optical_contributing_product_ids = []
+            seg.coverage.optical_quality_note = (
+                f"Segment {seg.segment_id}: optical footprint & valid-pixel coverage UNVERIFIED "
+                "(configured optical dataset(s) could not be opened locally)."
+            )
+            continue
 
-        if shared_transform is not None and union_valid_mask.any():
+        inter_area = float(poly_m.intersection(footprint_union_m).area)
+        foot_cov = min(1.0, max(0.0, inter_area / seg_area))
+
+        px_cov: Optional[float]
+        if foot_cov <= 0.0:
+            px_cov = 0.0
+            seg_status = OpticalCoverageStatus.VERIFIED_ZERO_COVERAGE
+        elif shared_transform is not None:
             seg_mask = geometry_mask(
                 [poly_ll],
                 out_shape=(grid_h, grid_w),
@@ -275,14 +291,16 @@ def assess_corridor_optical_evidence(
             )
             seg_px = int(np.count_nonzero(seg_mask))
             val_px = int(np.count_nonzero(seg_mask & union_valid_mask))
-            px_cov = float(val_px) / float(seg_px) if seg_px > 0 else 0.0
+            px_cov = min(1.0, max(0.0, float(val_px) / float(seg_px) if seg_px > 0 else 0.0))
+            if px_cov <= 0.0:
+                seg_status = OpticalCoverageStatus.VERIFIED_ZERO_COVERAGE
+            elif px_cov >= 0.99:
+                seg_status = OpticalCoverageStatus.COMPLETE_COVERAGE
+            else:
+                seg_status = OpticalCoverageStatus.PARTIAL_COVERAGE
         else:
-            px_cov = 0.0
-
-        px_cov = min(1.0, max(0.0, px_cov))
-        # Valid optical pixel coverage cannot exceed optical footprint coverage if footprint is tiny/zero
-        if foot_cov <= 0.0:
-            px_cov = 0.0
+            px_cov = None
+            seg_status = OpticalCoverageStatus.FOOTPRINT_UNVERIFIED
 
         seg_contribs = [
             prod_id
@@ -291,20 +309,27 @@ def assess_corridor_optical_evidence(
         ]
 
         seg.coverage.optical_footprint_coverage_fraction = round(foot_cov, 4)
-        seg.coverage.valid_optical_pixel_coverage_fraction = round(px_cov, 4)
-        seg.coverage.optical_coverage_fraction = round(px_cov, 4)
-        seg.coverage.optical_covered_area_m2 = round(seg_area * px_cov, 2)
+        seg.coverage.valid_optical_pixel_coverage_fraction = round(px_cov, 4) if px_cov is not None else None
+        seg.coverage.optical_coverage_fraction = round(px_cov, 4) if px_cov is not None else None
+        seg.coverage.optical_coverage_status = seg_status
+        seg.coverage.optical_covered_area_m2 = round(seg_area * px_cov, 2) if px_cov is not None else None
         seg.coverage.optical_contributing_product_ids = seg_contribs
-        seg.coverage.optical_quality_note = (
-            f"Segment {seg.segment_id}: {px_cov * 100:.1f}% valid optical pixels across "
-            f"{foot_cov * 100:.1f}% footprint ({', '.join(seg_contribs) if seg_contribs else 'none'})."
-        )
-        corridor_covered_area_m2 += seg_area * px_cov
+        if px_cov is not None:
+            seg.coverage.optical_quality_note = (
+                f"Segment {seg.segment_id}: {px_cov * 100:.1f}% valid optical pixels across "
+                f"{foot_cov * 100:.1f}% footprint [{seg_status.value}] ({', '.join(seg_contribs) if seg_contribs else 'none'})."
+            )
+            corridor_verified_area_m2 += seg_area
+            corridor_covered_area_m2 += seg_area * px_cov
+        else:
+            seg.coverage.optical_quality_note = (
+                f"Segment {seg.segment_id}: {foot_cov * 100:.1f}% footprint intersects corridor, valid-pixel fraction unverified."
+            )
 
-    corridor_valid_cov = (
-        round(min(1.0, corridor_covered_area_m2 / corridor_total_area_m2), 4)
-        if corridor_total_area_m2 > 0
-        else 0.0
+    corridor_valid_cov: Optional[float] = (
+        round(min(1.0, corridor_covered_area_m2 / corridor_verified_area_m2), 4)
+        if corridor_verified_area_m2 > 0
+        else None
     )
 
     # Filter & associate every optical candidate strictly inside the assessed corridor polygon
@@ -354,20 +379,34 @@ def assess_corridor_optical_evidence(
         seg.optical_candidate_ids = seg_cand_map.get(seg.segment_id, [])
 
     kept_candidates = kept_candidates[:max_candidates]
+    cov_pct_label = (
+        f"{corridor_valid_cov * 100:.1f}%"
+        if corridor_valid_cov is not None
+        else "unverified (footprint/pixel mask unavailable)"
+    )
     note = (
         f"Corridor optical evidence ({'; '.join(notes)}): {len(kept_candidates)} in-corridor candidates, "
-        f"{len(raw_rejected)} rejected/excluded, area-weighted valid coverage {corridor_valid_cov * 100:.1f}%."
+        f"{len(raw_rejected)} rejected/excluded, area-weighted valid coverage {cov_pct_label}."
         if notes
         else "No usable optical analysis available."
     )
     meta = {
         **primary_meta,
-        "available": bool(primary_meta.get("available") or kept_candidates or corridor_valid_cov > 0),
+        "available": bool(primary_meta.get("available") or kept_candidates or (corridor_valid_cov is not None and corridor_valid_cov > 0)),
         "dataset_ids": product_ids_ordered,
         "contributing_product_ids": [p[1] for p in contributing_products],
         "candidate_count": len(kept_candidates),
         "rejected_count": len(raw_rejected),
         "corridor_valid_coverage_fraction": corridor_valid_cov,
+        "optical_coverage_status": (
+            OpticalCoverageStatus.FOOTPRINT_UNVERIFIED.value
+            if corridor_valid_cov is None
+            else (
+                OpticalCoverageStatus.VERIFIED_ZERO_COVERAGE.value
+                if corridor_valid_cov <= 0.0
+                else OpticalCoverageStatus.PARTIAL_COVERAGE.value
+            )
+        ),
         "analysis_note": note,
     }
     return kept_candidates, raw_rejected[:50], corridor_valid_cov, note, meta

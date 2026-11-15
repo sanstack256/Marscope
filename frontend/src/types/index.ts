@@ -804,6 +804,15 @@ export type TargetProvenanceStatus =
   | "evidence_backed"
   | "manual_unverified_administrative";
 
+export type InvestigationTargetEvidenceState =
+  | "confirmed_local_observation"
+  | "orbital_detection_only"
+  | "inferred_regional_context_only"
+  | "optical_morphology_candidate_unverified"
+  | "manual_waypoint_unverified"
+  | "data_gap_unassessed"
+  | "conflicting_evidence";
+
 export interface ScienceTarget {
   id: string;
   name: string;
@@ -813,9 +822,15 @@ export interface ScienceTarget {
   crs?: string;
   geology_type: string;
   scientific_value: number;
+  exploration_priority_score?: number | null;
+  prioritization_is_heuristic?: boolean;
+  prioritization_label?: string;
+  prioritization_breakdown?: Record<string, unknown>;
   instrument_source: string;
   provenance_product_id: string;
   target_status?: TargetProvenanceStatus;
+  evidence_state?: InvestigationTargetEvidenceState;
+  study_region?: string;
   evidence_ids?: string[];
   matched_species?: string | null;
   distance_from_astronaut_m?: number | null;
@@ -1697,9 +1712,10 @@ export interface SegmentCoverageReport {
   valid_elevation_fraction: number;
   slope_available: boolean;
   tri_available: boolean;
-  optical_coverage_fraction: number;
-  optical_footprint_coverage_fraction?: number;
-  valid_optical_pixel_coverage_fraction?: number;
+  optical_coverage_fraction?: number | null;
+  optical_coverage_status?: string;
+  optical_footprint_coverage_fraction?: number | null;
+  valid_optical_pixel_coverage_fraction?: number | null;
   optical_covered_area_m2?: number | null;
   optical_contributing_product_ids?: string[];
   segment_corridor_area_m2?: number | null;
@@ -1825,6 +1841,14 @@ export interface DomainAssessmentRecord {
   evidence_basis: string;
   policy_version: string;
   threshold_or_rule: string;
+  spatial_footprint_coverage_fraction?: number | null;
+  valid_measurement_coverage_fraction?: number | null;
+  product_availability?: string;
+  scientific_validation_state?: string;
+  spatial_association_quality?: string;
+  resolution_adequacy?: string;
+  temporal_relevance?: string;
+  missing_inputs?: string[];
   notes: string[];
 }
 
@@ -2082,6 +2106,14 @@ export interface DatasetUncertaintyProfile {
   horizontal_resolution_m?: number | null;
   sample_bits?: number | null;
   sample_type?: string | null;
+  raw_pds_sample_bits?: number | null;
+  raw_pds_sample_type?: string | null;
+  processed_raster_dtype?: string | null;
+  raw_raster_dtype?: string | null;
+  scaling_factor?: number | null;
+  scaling_factor_source?: string | null;
+  scaling_factor_conflict?: boolean;
+  quantization_uncertainty_available?: boolean;
   is_integer_quantized: boolean;
   has_per_pixel_error_raster: boolean;
   pds_keywords_present: Record<string, unknown>;
@@ -2232,8 +2264,15 @@ export interface RouteTraversabilitySummary {
 export interface ScenarioSensitivityOutcome {
   scenario_id: string;
   label: string;
+  category?:
+    | "MEASUREMENT_UNCERTAINTY_PROPAGATION"
+    | "MEASUREMENT_SENSITIVITY_ANALYSIS"
+    | "ALGORITHM_PARAMETER_SENSITIVITY"
+    | "MISSION_ASSUMPTION_SENSITIVITY";
   perturbation_parameter: string;
   perturbation_description: string;
+  evaluated?: boolean;
+  uncertainty_quantified?: boolean | null;
   route_found: boolean;
   path_changed_from_baseline: boolean;
   path_signature_diff_fraction?: number | null;
@@ -2248,6 +2287,7 @@ export interface ScenarioSensitivityOutcome {
 export interface RouteSensitivityReport {
   policy_id: string;
   policy_version: string;
+  policy_config?: Record<string, unknown>;
   baseline_route_id: string;
   stability_status:
     | "STABLE_ACROSS_EVALUATED_SCENARIOS"
@@ -2259,6 +2299,7 @@ export interface RouteSensitivityReport {
   scenarios_where_infeasible: number;
   dominant_sensitivity_driver?: string | null;
   uncertainty_basis_note: string;
+  category_summaries?: Record<string, Record<string, unknown>>;
   scenarios: ScenarioSensitivityOutcome[];
 }
 
@@ -2285,6 +2326,11 @@ export interface RobustRouteCompareResponse {
     | "DISTINCT_ALTERNATIVES_AVAILABLE"
     | "SINGLE_CORRIDOR_BOTTLENECK"
     | "INSUFFICIENT_FEASIBLE_ROUTES";
+  search_algorithm?: string;
+  diversification_strategy?: string;
+  search_limits?: Record<string, unknown>;
+  overlap_metric_definition?: string;
+  global_optimality_disclaimer?: string;
   recommended_candidate_id?: string | null;
   recommendation_rationale: string;
   distinct_candidate_count: number;
@@ -2292,7 +2338,10 @@ export interface RobustRouteCompareResponse {
   pairwise_overlap_matrix: Record<string, Record<string, number>>;
   candidates: DistinctRouteCandidate[];
   rejected_near_duplicates: Array<Record<string, unknown>>;
+  rejected_candidates?: Array<Record<string, unknown>>;
+  failure_reasons?: string[];
   limitations: string[];
+  stage_timings_ms?: Record<string, number>;
   compute_time_ms: number;
 }
 
@@ -2336,4 +2385,409 @@ export interface IndependentReturnAlternative {
   spatial_overlap_with_primary_fraction: number;
   overlap_with_outbound_fraction: number;
   vertices: RouteVertex[];
+}
+
+
+// ============================================================
+// PROMPT 17 — SCIENCE CAMPAIGN, INSTRUMENT CAPABILITIES & OBSERVATION COMPARISON
+// ============================================================
+
+export type InstrumentPlatformKind = "orbital" | "surface_in_situ";
+
+export type MeasurementClass =
+  | "mineralogy_spectral"
+  | "mineralogy_xrd"
+  | "elemental_chemistry"
+  | "volatile_organic_isotope"
+  | "morphology_highres"
+  | "topography_elevation"
+  | "thermal_inertia_composition"
+  | "hydrated_neutron_subsurface"
+  | "meteorology_environment";
+
+export type RequirementFulfillmentState =
+  | "satisfied_direct"
+  | "satisfied_proxy_only"
+  | "partial_coverage_or_resolution_limited"
+  | "missing_required_data"
+  | "conflict_requires_resolution"
+  | "cannot_be_verified_with_available_archive";
+
+export type EvidenceMatchStrength =
+  | "direct_local_in_situ"
+  | "orbital_footprint_intersection"
+  | "context_only_scale_mismatch"
+  | "unverified_optical_only"
+  | "absent_data_gap"
+  | "mission_isolated_rejected";
+
+export type CampaignFreshnessState =
+  | "current"
+  | "stale_upstream_dependency_changed";
+
+export type CampaignPlanStatus =
+  | "complete_constrained_plan"
+  | "partial_missing_observations"
+  | "infeasible_under_constraints"
+  | "data_insufficient";
+
+export type ArchiveComparisonOutcome =
+  | "consistent_with_archive"
+  | "extends_archive_coverage"
+  | "differs_from_prior_local_measurement"
+  | "differs_from_orbital_scale_expectation"
+  | "conflict_unresolved"
+  | "no_co_located_archive_for_comparison";
+
+export interface InstrumentCapabilityRecord {
+  instrument_id: string;
+  instrument_name: string;
+  mission_host: string;
+  study_region_scope: string;
+  platform_kind: InstrumentPlatformKind;
+  measurement_class: MeasurementClass;
+  typical_spatial_scale_m: number;
+  measured_observables: string[];
+  allowed_inferences: string[];
+  prohibited_inferences: string[];
+  mission_isolated_from_gale: boolean;
+  mission_isolation_note?: string | null;
+}
+
+export interface InferenceValidationRequest {
+  instrument_id: string;
+  claimed_inference: string;
+}
+
+export interface InferenceValidationResponse {
+  instrument_id: string;
+  claimed_inference: string;
+  allowed: boolean;
+  classification: string;
+  rationale: string;
+  prohibited_inferences: string[];
+}
+
+export interface MeasurementRequirementSpec {
+  requirement_id: string;
+  label: string;
+  measurement_class: MeasurementClass;
+  required_observables: string[];
+  allowed_instrument_ids: string[];
+  prohibited_substitutions: string[];
+  essential: boolean;
+  minimum_spatial_resolution_m?: number | null;
+  justification: string;
+}
+
+export interface ScienceQuestionDefinition {
+  question_id: string;
+  title: string;
+  study_region: string;
+  hypothesis: string;
+  geological_setting: string;
+  is_user_defined: boolean;
+  target_phenomena: string[];
+  required_measurement_specs: MeasurementRequirementSpec[];
+  preferred_stop_count: number;
+  minimum_evidence_note: string;
+  created_at_utc: string;
+}
+
+export interface CustomScienceQuestionCreateRequest {
+  title: string;
+  study_region?: string;
+  hypothesis: string;
+  geological_setting?: string;
+  target_phenomena?: string[];
+  required_measurement_classes?: MeasurementClass[];
+  preferred_stop_count?: number;
+}
+
+export interface RequirementEvaluationRecord {
+  requirement_id: string;
+  label: string;
+  measurement_class: MeasurementClass;
+  essential: boolean;
+  fulfillment_state: RequirementFulfillmentState;
+  satisfying_source_ids: string[];
+  satisfying_instruments: string[];
+  matched_evidence_count: number;
+  limitations_and_gaps: string[];
+  prohibited_substitutions: string[];
+}
+
+export interface EvidenceMatchRecord {
+  match_id: string;
+  source_type: string;
+  source_id: string;
+  instrument_id: string;
+  mission_host: string;
+  study_region: string;
+  dataset_status: string;
+  evidence_strength: EvidenceMatchStrength;
+  spatial_scale_m?: number | null;
+  matched_observables: string[];
+  scale_mismatch_warning?: string | null;
+  prohibited_inference_guard?: string | null;
+  rejected_for_gale_reason?: string | null;
+  citation?: string | null;
+}
+
+export interface QuestionEvidenceDiscoveryResponse {
+  question: ScienceQuestionDefinition;
+  matched_records: EvidenceMatchRecord[];
+  isolated_or_rejected_records: EvidenceMatchRecord[];
+  requirements_evaluation: RequirementEvaluationRecord[];
+  overall_evidence_readiness: string;
+  critical_data_gaps: string[];
+  discovered_at_utc: string;
+}
+
+export interface TargetEvaluationRequest {
+  question_id?: string;
+  target_ids?: string[];
+  include_discovered_candidates?: boolean;
+  astronaut_latitude?: number | null;
+  astronaut_longitude?: number | null;
+  search_radius_m?: number;
+  max_candidates?: number;
+  study_bounds?: Record<string, number> | null;
+}
+
+export interface CandidateTargetEvaluation {
+  target_id: string;
+  name: string;
+  latitude: number;
+  longitude_east: number;
+  elevation_m?: number | null;
+  crs: string;
+  evidence_state: InvestigationTargetEvidenceState;
+  study_region: string;
+  matched_species?: string | null;
+  distinct_instruments: string[];
+  local_observation_count: number;
+  nearest_observation_distance_m?: number | null;
+  covering_datasets: string[];
+  known_facts: string[];
+  inferred_context: string[];
+  unknowns_and_gaps: string[];
+  conflicting_records: string[];
+  heuristic_priority_score: number;
+  prioritization_is_heuristic: boolean;
+  prioritization_breakdown: Record<string, unknown>;
+  eligibility_for_sampling: string;
+  prohibited_inference_flags: string[];
+  evidence_ids: string[];
+}
+
+export interface TargetEvaluationBatchResponse {
+  question_id: string;
+  evaluated_at_utc: string;
+  targets: CandidateTargetEvaluation[];
+  state_counts: Record<string, number>;
+  prioritization_disclaimer: string;
+}
+
+export interface ObservationActionPlan {
+  stop_id: string;
+  target_id: string;
+  target_name: string;
+  recommended_instruments: string[];
+  measurements_to_collect: string[];
+  context_imaging_checks: string[];
+  calibration_or_reference_checks: string[];
+  expected_dwell_s: number;
+  estimated_data_volume_mb: number;
+  explicit_uncertainty_notes: string[];
+  prohibited_shortcut_notes: string[];
+}
+
+export interface SamplingProtocolSpec {
+  stop_id: string;
+  target_id: string;
+  sample_type: string;
+  eligibility_state: string;
+  scientific_rationale: string;
+  required_pre_sample_measurements: string[];
+  contamination_controls: string[];
+  sample_preservation_notes: string[];
+  prohibited_without_evidence: boolean;
+}
+
+export interface CampaignStopPlan {
+  stop_index: number;
+  stop_id: string;
+  target_id: string;
+  name: string;
+  latitude: number;
+  longitude_east: number;
+  evidence_state: InvestigationTargetEvidenceState;
+  dwell_s: number;
+  heuristic_priority_score: number;
+  known_summary: string[];
+  unknown_summary: string[];
+  observation_plan: ObservationActionPlan;
+  sampling_protocol: SamplingProtocolSpec;
+}
+
+export interface CampaignRouteCandidate {
+  alternative_id: string;
+  label: string;
+  objective: string;
+  routing_mode: PlanningMode;
+  stop_order_ids: string[];
+  outbound_route_id?: string | null;
+  outbound_distance_m?: number | null;
+  outbound_elevation_gain_m?: number | null;
+  max_slope_deg?: number | null;
+  outbound_duration_s?: number | null;
+  science_dwell_s: number;
+  return_route_computed: boolean;
+  return_distance_m?: number | null;
+  return_duration_s?: number | null;
+  total_duration_s?: number | null;
+  total_climb_work_j?: number | null;
+  feasible_within_constraints?: boolean | null;
+  scientific_coverage_summary: string;
+  explanation: string;
+  failure_reason?: string | null;
+}
+
+export interface CampaignBuildRequest {
+  campaign_id?: string | null;
+  campaign_name?: string;
+  question_id?: string;
+  dataset_id?: string;
+  start: RouteCoordinateInput;
+  destination?: RouteCoordinateInput | null;
+  selected_target_ids?: string[];
+  candidate_targets?: CandidateTargetEvaluation[];
+  routing_mode?: PlanningMode;
+  constraints?: Partial<RoutePlanningConstraints> | null;
+  walking_speed_mps?: number | null;
+  use_tobler_grade_approximation?: boolean;
+  mission_duration_limit_s?: number | null;
+  return_reserve_fraction?: number | null;
+  operational_overhead_s?: number;
+  stop_dwell_seconds?: Record<string, number>;
+  default_stop_dwell_s?: number;
+  astronaut_suit_mass_kg?: number | null;
+  payload_mass_kg?: number | null;
+  resources?: EvaExplicitResourceSpec[];
+  include_alternatives?: boolean;
+  optimize_stop_order?: boolean;
+}
+
+export interface CampaignSummary {
+  campaign_id: string;
+  campaign_name: string;
+  question_id: string;
+  dataset_id: string;
+  plan_status: CampaignPlanStatus;
+  freshness_state: CampaignFreshnessState;
+  stop_count: number;
+  total_distance_m?: number | null;
+  total_duration_s?: number | null;
+  created_at_utc: string;
+}
+
+export interface CampaignFreshnessReport {
+  campaign_id: string;
+  freshness_state: CampaignFreshnessState;
+  stored_signature: string;
+  current_signature: string;
+  staleness_reasons: string[];
+  checked_at_utc: string;
+}
+
+export interface ScienceCampaignPlan {
+  campaign_id: string;
+  campaign_name: string;
+  question: ScienceQuestionDefinition;
+  dataset_id: string;
+  study_region: string;
+  plan_status: CampaignPlanStatus;
+  freshness_state: CampaignFreshnessState;
+  staleness_reasons: string[];
+  dependency_signature: string;
+  dependency_snapshot: Record<string, unknown>;
+  operational_safety_certified: boolean;
+  request: CampaignBuildRequest;
+  requirements_evaluation: RequirementEvaluationRecord[];
+  stop_plans: CampaignStopPlan[];
+  outbound_route_id?: string | null;
+  outbound_route_summary: Record<string, unknown>;
+  outbound_vertices: Array<{
+    lat: number;
+    lon_east: number;
+    elevation_m?: number | null;
+    slope_deg?: number | null;
+  }>;
+  return_plan?: EvaReturnPlanReport | null;
+  eva_envelope?: EvaMissionEnvelopeResponse | null;
+  alternatives: CampaignRouteCandidate[];
+  missing_inputs: string[];
+  uncertainty_and_gaps: string[];
+  decision_justification: string[];
+  provenance_graph: ProvenanceDependencyGraph;
+  data_classification: ScientificDataClassification;
+  created_at_utc: string;
+  compute_time_ms: number;
+}
+
+export interface RecordObservationRequest {
+  campaign_id?: string | null;
+  stop_id?: string | null;
+  target_id?: string | null;
+  instrument_id: string;
+  measurement_type: string;
+  species_or_feature: string;
+  measured_value: unknown;
+  units?: string;
+  latitude: number;
+  longitude_east: number;
+  sol_or_timestamp?: string | null;
+  notes?: string | null;
+  measurement_scale_m?: number | null;
+  quality_flag?: string;
+}
+
+export interface RecordedFieldObservation {
+  observation_id: string;
+  campaign_id?: string | null;
+  stop_id?: string | null;
+  target_id?: string | null;
+  instrument_id: string;
+  measurement_type: string;
+  species_or_feature: string;
+  measured_value: unknown;
+  units: string;
+  latitude: number;
+  longitude_east: number;
+  sol_or_timestamp?: string | null;
+  notes?: string | null;
+  measurement_scale_m?: number | null;
+  quality_flag: string;
+  prohibited_inference_warning?: string | null;
+  recorded_at_utc: string;
+}
+
+export interface ObservationArchiveComparison {
+  comparison_id: string;
+  observation_id: string;
+  outcome: ArchiveComparisonOutcome;
+  search_radius_m: number;
+  same_scale_archive_records: Array<Record<string, unknown>>;
+  orbital_context_records: Array<Record<string, unknown>>;
+  scale_disparity_notes: string[];
+  value_comparison_summary: Record<string, unknown>;
+  explanation: string;
+  next_verification_steps: string[];
+  compared_at_utc: string;
+}
+
+export interface IngestionLedgerResponse {
+  acquisition_ledger: Array<Record<string, unknown>>;
+  query_provenance: Array<Record<string, unknown>>;
 }

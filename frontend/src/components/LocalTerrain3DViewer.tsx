@@ -112,8 +112,23 @@ export interface LivePositionMarker {
   heading_deg?: number | null;
 }
 
+export interface InvestigationPinMarker {
+  id: string;
+  label: string;
+  latitude: number;
+  longitude_east: number;
+  kind: "campaign_stop" | "field_observation";
+  evidence_state?: string;
+}
+
 interface LocalTerrain3DViewerProps {
   targets?: ScienceTarget[];
+  investigationPins?: InvestigationPinMarker[];
+  campaignRouteVertices?: Array<{
+    lat: number;
+    lon_east: number;
+    elevation_m?: number | null;
+  }>;
   simulationProgressM?: number | null;
   livePositionMarker?: LivePositionMarker | null;
   onSurfaceInspect?: (point: PickedSurfacePoint) => void;
@@ -122,6 +137,8 @@ interface LocalTerrain3DViewerProps {
 
 export function LocalTerrain3DViewer({
   targets = [],
+  investigationPins = [],
+  campaignRouteVertices = [],
   simulationProgressM = null,
   livePositionMarker = null,
   onSurfaceInspect,
@@ -1031,6 +1048,33 @@ export function LocalTerrain3DViewer({
       addBeaconPin(pos, "#f59e0b", 0.95, { kind: "custom_waypoint" }, "waypoint");
     });
 
+    // Render Prompt 17 Science Investigation stops & recorded field observations
+    if (investigationPins.length > 0) {
+      investigationPins.forEach((pin) => {
+        const elev = lookupElevNear(pin.latitude, pin.longitude_east);
+        const pos = toSceneVec(pin.latitude, pin.longitude_east, elev, 2.2);
+        const pinColor = pin.kind === "field_observation" ? "#ec4899" : "#06b6d4";
+        addBeaconPin(
+          pos,
+          pinColor,
+          pin.kind === "field_observation" ? 1.15 : 1.25,
+          { kind: "science_target", targetId: pin.id },
+          pin.kind === "field_observation" ? "target" : "waypoint"
+        );
+      });
+    }
+
+    // Render Prompt 17 Campaign Route polyline if provided without activeRoute override
+    if (!activeRoute && campaignRouteVertices.length >= 2) {
+      const pts = campaignRouteVertices.map((v) => {
+        const elev = v.elevation_m ?? lookupElevNear(v.lat, v.lon_east);
+        return toSceneVec(v.lat, v.lon_east, elev, 2.2);
+      });
+      const campGeom = new THREE.BufferGeometry().setFromPoints(pts);
+      const campMat = new THREE.LineBasicMaterial({ color: "#06b6d4" });
+      overlayGroup.add(new THREE.Line(campGeom, campMat));
+    }
+
     // Render explicit Start & Destination markers
     if (startPoint) {
       const elev = activeRoute?.vertices[0]?.elevation_m ?? lookupElevNear(startPoint.lat, startPoint.lon_east);
@@ -1473,6 +1517,8 @@ export function LocalTerrain3DViewer({
     destinationPoint,
     customWaypoints,
     targets,
+    investigationPins,
+    campaignRouteVertices,
     showTargets,
     selectedTargetIds,
     selectedWaypointSeq,

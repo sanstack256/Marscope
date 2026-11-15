@@ -426,6 +426,16 @@ class RobustRouteCompareResponse(BaseModel):
     dataset_id: str
     source_product_id: str
     alternative_generation_status: str  # DISTINCT_ALTERNATIVES_AVAILABLE | SINGLE_CORRIDOR_BOTTLENECK | INSUFFICIENT_FEASIBLE_ROUTES
+    search_algorithm: str = "8_neighbor_terrain_grid_pathfinder"
+    diversification_strategy: str = "multi_objective_weights_plus_corridor_spatial_penalty_pass"
+    search_limits: Dict[str, Any] = Field(default_factory=dict)
+    overlap_metric_definition: str = (
+        "Symmetric vertex proximity overlap fraction: min(frac A vertices within tolerance_m of B, frac B vertices within tolerance_m of A)."
+    )
+    global_optimality_disclaimer: str = (
+        "Generates heuristic feasible alternatives bounded by DEM grid resolution, configured objectives, and spatial penalty passes; "
+        "does NOT guarantee discovery of every globally Pareto-optimal corridor."
+    )
     recommended_candidate_id: Optional[str] = None
     recommendation_rationale: str
     distinct_candidate_count: int
@@ -433,5 +443,8 @@ class RobustRouteCompareResponse(BaseModel):
     pairwise_overlap_matrix: Dict[str, Dict[str, float]] = Field(default_factory=dict)
     candidates: List[DistinctRouteCandidate] = Field(default_factory=list)
     rejected_near_duplicates: List[Dict[str, Any]] = Field(default_factory=list)
+    rejected_candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    failure_reasons: List[str] = Field(default_factory=list)
     limitations: List[str] = Field(default_factory=list)
+    stage_timings_ms: Dict[str, float] = Field(default_factory=dict)
     compute_time_ms: float = 0.0

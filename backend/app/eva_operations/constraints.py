@@ -148,16 +148,18 @@ def evaluate_eva_constraints(
 
     # 5. Evidence coverage threshold
     valid_dem = float(corridor.uncertainty.corridor_valid_fraction)
-    opt_cov = float(corridor.coverage_summary.get("mean_optical_coverage_fraction", 0.0))
-    ev_pass = valid_dem >= 0.95 and opt_cov >= 0.50 and route.native_dem_resolution_m <= 2.0
+    raw_opt_cov = corridor.coverage_summary.get("mean_optical_coverage_fraction")
+    opt_cov: Optional[float] = float(raw_opt_cov) if raw_opt_cov is not None else None
+    ev_pass = valid_dem >= 0.95 and opt_cov is not None and opt_cov >= 0.50 and route.native_dem_resolution_m <= 2.0
+    opt_label = f"{opt_cov * 100:.1f}%" if opt_cov is not None else f"unverified ({corridor.coverage_summary.get('optical_coverage_status', 'UNAVAILABLE')})"
     records.append(
         ConstraintCheckRecord(
             constraint_id="corridor_evidence_completeness",
             category="evidence",
             status="PASS" if ev_pass else "FAIL" if valid_dem < 0.50 else "UNVALIDATED",
             configured_limit="DEM valid >= 95%, Optical >= 50%, DEM <= 2.0 m/px",
-            evaluated_value=f"DEM {valid_dem * 100:.1f}%, Optical {opt_cov * 100:.1f}%, Res {route.native_dem_resolution_m:.2f} m/px",
-            explanation="Derived from polygon-masked DEM and non-double-counted optical union.",
+            evaluated_value=f"DEM {valid_dem * 100:.1f}%, Optical {opt_label}, Res {route.native_dem_resolution_m:.2f} m/px",
+            explanation="Derived from polygon-masked DEM and non-double-counted optical union (unverified optical never coerced to 0%).",
         )
     )
 

@@ -195,11 +195,26 @@ export default function TargetExplorerPage() {
                       </span>
                     </span>
                   </div>
-                  <div className="text-[11px] font-mono text-slate-300">
-                    Species: {tgt.matched_species || tgt.geology_type} · Heuristic Priority:{" "}
-                    {tgt.scientific_value != null ? tgt.scientific_value.toFixed(3) : "N/A"} · Instr: {tgt.instrument_source}
-                    {tgt.distance_from_astronaut_m != null &&
-                      ` · Dist: ${(tgt.distance_from_astronaut_m / 1000).toFixed(2)} km`}
+                  <div className="text-[11px] font-mono text-slate-300 flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span>
+                      Species: {tgt.matched_species || tgt.geology_type} · Exploration Heuristic Priority:{" "}
+                      {(tgt.exploration_priority_score ?? tgt.scientific_value) != null
+                        ? (tgt.exploration_priority_score ?? tgt.scientific_value)!.toFixed(3)
+                        : "N/A"}{" "}
+                      · Instr: {tgt.instrument_source}
+                      {tgt.distance_from_astronaut_m != null &&
+                        ` · Dist: ${(tgt.distance_from_astronaut_m / 1000).toFixed(2)} km`}
+                    </span>
+                    {tgt.evidence_state && (
+                      <span className="px-1.5 py-0.5 rounded border border-cyan-500/35 bg-cyan-500/10 text-cyan-300 text-[9px] uppercase">
+                        {tgt.evidence_state}
+                      </span>
+                    )}
+                    {tgt.prioritization_is_heuristic !== false && (
+                      <span className="px-1.5 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-200 text-[9px] uppercase">
+                        {tgt.prioritization_label || "engineering_heuristic"}
+                      </span>
+                    )}
                   </div>
                   {tgt.explanation && (
                     <div className="text-[10px] text-slate-400 leading-relaxed">{tgt.explanation}</div>

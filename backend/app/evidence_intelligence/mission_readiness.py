@@ -128,7 +128,9 @@ def evaluate_readiness_state(
 
     reasons: List[str] = []
     valid_frac = corridor.uncertainty.corridor_valid_fraction
-    opt_cov = float(corridor.coverage_summary.get("mean_optical_coverage_fraction", 0.0))
+    raw_opt_cov = corridor.coverage_summary.get("mean_optical_coverage_fraction")
+    opt_cov: Optional[float] = float(raw_opt_cov) if raw_opt_cov is not None else None
+    opt_status = str(corridor.coverage_summary.get("optical_coverage_status") or "COVERAGE_UNAVAILABLE")
 
     min_usable_dem = READINESS_POLICY["min_dem_valid_fraction_usable"]
     min_assessed_dem = READINESS_POLICY["min_dem_valid_fraction_assessed"]
@@ -146,7 +148,7 @@ def evaluate_readiness_state(
             reasons.append(
                 f"[{READINESS_POLICY['policy_version']}] DEM native resolution ({native_resolution_m:.1f} m/px) exceeds {max_assess_res:.1f} m/px limit and is regional scale only."
             )
-    elif missing_inputs or valid_frac < min_assessed_dem or opt_cov < min_opt or native_resolution_m > max_local_res:
+    elif missing_inputs or valid_frac < min_assessed_dem or opt_cov is None or opt_cov < min_opt or native_resolution_m > max_local_res:
         state = ReadinessState.PARTIALLY_ASSESSED
         if missing_inputs:
             reasons.append(
@@ -156,7 +158,11 @@ def evaluate_readiness_state(
             reasons.append(
                 f"[{READINESS_POLICY['policy_version']}] Corridor DEM valid fraction ({valid_frac * 100:.1f}%) is below {min_assessed_dem * 100:.0f}% completeness policy."
             )
-        if opt_cov < min_opt:
+        if opt_cov is None:
+            reasons.append(
+                f"[{READINESS_POLICY['policy_version']}] Optical imagery coverage is unverified ({opt_status}; never coerced to 0%)."
+            )
+        elif opt_cov < min_opt:
             reasons.append(
                 f"[{READINESS_POLICY['policy_version']}] Area-weighted valid optical coverage ({opt_cov * 100:.1f}%) is below {min_opt * 100:.0f}% policy threshold."
             )
@@ -258,14 +264,42 @@ def evaluate_multidomain_readiness(
     """
     pv = READINESS_POLICY["policy_version"]
     valid_dem = float(corridor.uncertainty.corridor_valid_fraction)
-    opt_cov = float(corridor.coverage_summary.get("mean_optical_coverage_fraction", 0.0))
+    raw_opt_cov = corridor.coverage_summary.get("mean_optical_coverage_fraction")
+    opt_cov: Optional[float] = float(raw_opt_cov) if raw_opt_cov is not None else None
+    raw_opt_foot = corridor.coverage_summary.get("mean_optical_footprint_coverage_fraction")
+    opt_foot_cov: Optional[float] = float(raw_opt_foot) if raw_opt_foot is not None else None
+    opt_status = str(corridor.coverage_summary.get("optical_coverage_status") or "COVERAGE_UNAVAILABLE")
+
     segs = corridor.segments
+    seg_count = len(segs)
+    if segs:
+        seg_weights = [
+            float(s.coverage.segment_corridor_area_m2 or s.corridor_area_m2 or max(1.0, s.geodesic_distance_m))
+            for s in segs
+        ]
+        tot_seg_w = max(1e-6, sum(seg_weights))
+        slope_cov_frac = round(sum((1.0 if s.coverage.slope_available else 0.0) * w for s, w in zip(segs, seg_weights)) / tot_seg_w, 4)
+        tri_cov_frac = round(sum((1.0 if s.coverage.tri_available else 0.0) * w for s, w in zip(segs, seg_weights)) / tot_seg_w, 4)
+        geo_cov_frac = round(sum(float(s.coverage.geological_coverage_fraction or (1.0 if s.coverage.geological_map_coverage else 0.0)) * w for s, w in zip(segs, seg_weights)) / tot_seg_w, 4)
+        spec_cov_frac = round(sum(float(s.coverage.spectral_coverage_fraction or 0.0) * w for s, w in zip(segs, seg_weights)) / tot_seg_w, 4)
+        therm_cov_frac = round(sum(float(s.coverage.thermal_coverage_fraction or 0.0) * w for s, w in zip(segs, seg_weights)) / tot_seg_w, 4)
+        geo_segs = sum(1 for s in segs if s.coverage.geological_map_coverage)
+        spec_segs = sum(1 for s in segs if s.coverage.spectral_data_available)
+        therm_segs = sum(1 for s in segs if s.coverage.thermal_data_available)
+    else:
+        slope_cov_frac = 0.0
+        tri_cov_frac = 0.0
+        geo_cov_frac = 0.0
+        spec_cov_frac = 0.0
+        therm_cov_frac = 0.0
+        geo_segs = 0
+        spec_segs = 0
+        therm_segs = 0
+
     has_slope = all(s.coverage.slope_available for s in segs) if segs else False
     has_tri = all(s.coverage.tri_available for s in segs) if segs else False
-    has_geo = any(s.coverage.geological_map_coverage for s in segs)
-    has_spec = any(s.coverage.spectral_data_available for s in segs)
-    has_therm = any(s.coverage.thermal_data_available for s in segs)
     obs_count = len(corridor.observations)
+    obs_segs = sum(1 for s in segs if s.coverage.rover_observation_count > 0)
 
     dem_status = (
         "ASSESSED"
@@ -278,6 +312,11 @@ def evaluate_multidomain_readiness(
             else "PARTIALLY_ASSESSED"
         )
     )
+    dem_res_adequacy = (
+        "adequate_for_engineering_slope"
+        if native_resolution_m <= READINESS_POLICY["max_local_dem_resolution_m"]
+        else ("regional_only" if native_resolution_m <= READINESS_POLICY["max_assessable_dem_resolution_m"] else "insufficient")
+    )
 
     domains: List[DomainAssessmentRecord] = [
         DomainAssessmentRecord(
@@ -286,67 +325,161 @@ def evaluate_multidomain_readiness(
             evidence_basis=f"{corridor.source_product_id} ({native_resolution_m:.2f} m/px, {valid_dem * 100:.1f}% corridor valid)",
             policy_version=pv,
             threshold_or_rule=f"valid >= {READINESS_POLICY['min_dem_valid_fraction_assessed'] * 100:.0f}% & res <= {READINESS_POLICY['max_local_dem_resolution_m']:.1f} m/px (local slope screening ONLY; sub-meter obstacles < 0.5 m unresolved)",
+            spatial_footprint_coverage_fraction=round(valid_dem, 4),
+            valid_measurement_coverage_fraction=round(valid_dem, 4),
+            product_availability="verified_local" if valid_dem > 0 else "unavailable",
+            scientific_validation_state="calibrated_pds_dtm_unquantified_per_pixel_sigma",
+            spatial_association_quality="full_corridor_polygon_mask",
+            resolution_adequacy=dem_res_adequacy,
+            temporal_relevance="static_orbital_dtm",
+            missing_inputs=["per_pixel_vertical_rmse_raster", "sub_meter_obstacle_height_map"],
             notes=["Corridor polygon masked via rasterio.geometry_mask; empirical per-pixel DEM height sigma raster absent in PDS3."],
         ),
         DomainAssessmentRecord(
             domain="slope_and_relief",
-            status="ASSESSED" if (has_slope and dem_status == "ASSESSED") else ("PARTIALLY_ASSESSED" if has_slope else "UNAVAILABLE"),
-            evidence_basis="Horn 3x3 windowed DEM slope across convolution-buffered corridor",
+            status="ASSESSED" if (has_slope and dem_status == "ASSESSED") else ("PARTIALLY_ASSESSED" if slope_cov_frac > 0.0 else "UNAVAILABLE"),
+            evidence_basis=f"Horn 3x3 windowed DEM slope across {slope_cov_frac * 100:.1f}% weighted corridor coverage",
             policy_version=pv,
-            threshold_or_rule="All corridor segments have finite slope & local relief",
+            threshold_or_rule="All corridor segments require finite slope & local relief",
+            spatial_footprint_coverage_fraction=slope_cov_frac,
+            valid_measurement_coverage_fraction=slope_cov_frac,
+            product_availability="verified_local" if slope_cov_frac > 0 else "unavailable",
+            scientific_validation_state="derived_from_dem_finite_differences",
+            spatial_association_quality="full_corridor_raster",
+            resolution_adequacy=dem_res_adequacy,
+            temporal_relevance="static_orbital_dtm",
+            missing_inputs=[] if has_slope else ["nodata_corridor_segments"],
         ),
         DomainAssessmentRecord(
             domain="surface_roughness",
-            status="ASSESSED" if (has_tri and dem_status == "ASSESSED") else ("PARTIALLY_ASSESSED" if has_tri else "UNAVAILABLE"),
-            evidence_basis="5.0 m physical-radius RMS TRI",
+            status="ASSESSED" if (has_tri and dem_status == "ASSESSED") else ("PARTIALLY_ASSESSED" if tri_cov_frac > 0.0 else "UNAVAILABLE"),
+            evidence_basis=f"5.0 m physical-radius RMS TRI across {tri_cov_frac * 100:.1f}% weighted corridor coverage",
             policy_version=pv,
             threshold_or_rule="Features below 2x DEM pixel scale remain unresolved",
+            spatial_footprint_coverage_fraction=tri_cov_frac,
+            valid_measurement_coverage_fraction=tri_cov_frac,
+            product_availability="verified_local" if tri_cov_frac > 0 else "unavailable",
+            scientific_validation_state="derived_riley_tri_5m_kernel",
+            spatial_association_quality="full_corridor_raster",
+            resolution_adequacy="resolution_limited" if native_resolution_m > 0.5 else "adequate",
+            temporal_relevance="static_orbital_dtm",
+            missing_inputs=["sub_dem_scale_boulder_size_frequency_distribution"],
         ),
         DomainAssessmentRecord(
             domain="optical_imagery",
-            status="ASSESSED" if opt_cov >= READINESS_POLICY["min_optical_valid_fraction_assessed"] else ("PARTIALLY_ASSESSED" if opt_cov > 0 else "UNAVAILABLE"),
-            evidence_basis=f"Area-weighted valid HiRISE optical coverage {opt_cov * 100:.1f}%",
+            status=(
+                "ASSESSED"
+                if (opt_cov is not None and opt_cov >= READINESS_POLICY["min_optical_valid_fraction_assessed"])
+                else ("PARTIALLY_ASSESSED" if (opt_cov is not None and opt_cov > 0.0) else ("INSUFFICIENT_EVIDENCE" if opt_cov == 0.0 else "UNAVAILABLE"))
+            ),
+            evidence_basis=(
+                f"Area-weighted valid HiRISE optical coverage {opt_cov * 100:.1f}% (footprint {(opt_foot_cov or 0.0) * 100:.1f}%, status {opt_status})"
+                if opt_cov is not None
+                else f"Optical imagery coverage unverified ({opt_status}; never coerced to 0%)"
+            ),
             policy_version=pv,
             threshold_or_rule=f"valid_optical >= {READINESS_POLICY['min_optical_valid_fraction_assessed'] * 100:.0f}%",
+            spatial_footprint_coverage_fraction=opt_foot_cov,
+            valid_measurement_coverage_fraction=opt_cov,
+            product_availability="verified_local" if (opt_cov is not None and opt_cov > 0.0) else opt_status.lower(),
+            scientific_validation_state="calibrated_pds_orthophoto" if (opt_cov is not None and opt_cov > 0.0) else "unverified",
+            spatial_association_quality="shapely_union_footprint_and_valid_pixel_mask" if opt_cov is not None else "unverified_footprint",
+            resolution_adequacy="adequate_0.25m_visual" if (opt_cov is not None and opt_cov > 0.0) else "unverified",
+            temporal_relevance="static_orbital_orthophoto",
+            missing_inputs=[] if (opt_cov is not None and opt_cov >= READINESS_POLICY["min_optical_valid_fraction_assessed"]) else ["complete_corridor_hirise_orthophoto_mosaic"],
         ),
         DomainAssessmentRecord(
             domain="optical_candidate_features",
-            status="PARTIALLY_ASSESSED" if corridor.optical_candidates else "UNAVAILABLE",
+            status="PARTIALLY_ASSESSED" if corridor.optical_candidates else ("UNAVAILABLE" if opt_cov is None else "INSUFFICIENT_EVIDENCE"),
             evidence_basis=f"{len(corridor.optical_candidates)} in-corridor contrast/edge candidates (interpretation required)",
             policy_version=pv,
             threshold_or_rule="2D optical candidates are never promoted to confirmed boulder counts or 3D heights",
+            spatial_footprint_coverage_fraction=opt_foot_cov,
+            valid_measurement_coverage_fraction=opt_cov,
+            product_availability="verified_local" if corridor.optical_candidates else "none_detected_or_unavailable",
+            scientific_validation_state="candidate_requiring_interpretation",
+            spatial_association_quality="in_corridor_polygon_filtered",
+            resolution_adequacy="visual_proxy_only",
+            temporal_relevance="static_orbital_orthophoto",
+            missing_inputs=["stereo_height_verification_for_2d_candidates"],
         ),
         DomainAssessmentRecord(
             domain="geological_context",
-            status="PARTIALLY_ASSESSED" if has_geo else "UNAVAILABLE",
-            evidence_basis="USGS SIM 3292 global geological context (1:20,000,000 scale)" if has_geo else "No geological raster/map verified",
+            status="PARTIALLY_ASSESSED" if geo_cov_frac > 0.0 else "UNAVAILABLE",
+            evidence_basis=(
+                f"USGS SIM 3292 global geological map ({geo_cov_frac * 100:.1f}% weighted, {geo_segs}/{seg_count} segments; 1:20,000,000 scale)"
+                if geo_cov_frac > 0.0
+                else "No geological raster/map verified for corridor"
+            ),
             policy_version=pv,
             threshold_or_rule="Regional 1:20M geology is insufficient for outcrop-scale trafficability",
+            spatial_footprint_coverage_fraction=geo_cov_frac,
+            valid_measurement_coverage_fraction=geo_cov_frac,
+            product_availability="verified_local" if geo_cov_frac > 0.0 else "unavailable",
+            scientific_validation_state="published_usgs_map_regional_only",
+            spatial_association_quality="coarse_1_20M_regional_polygon" if geo_cov_frac > 0.0 else "none",
+            resolution_adequacy="insufficient_for_outcrop_scale",
+            temporal_relevance="static_geologic_map",
+            missing_inputs=["outcrop_scale_geological_map"],
         ),
         DomainAssessmentRecord(
             domain="mineralogical_spectral_context",
-            status="PARTIALLY_ASSESSED" if has_spec else "UNAVAILABLE",
-            evidence_basis="Nearby Curiosity ChemCam/APXS PDS records" if has_spec else "No verified corridor spectral coverage",
+            status="PARTIALLY_ASSESSED" if spec_cov_frac > 0.0 else "UNAVAILABLE",
+            evidence_basis=(
+                f"Localized Curiosity ChemCam/APXS PDS records near {spec_segs}/{seg_count} corridor segments "
+                f"(point-sample proxy fraction {spec_cov_frac * 100:.1f}%; not continuous orbital spectroscopy)"
+                if spec_cov_frac > 0.0
+                else "No verified corridor spectral or geochemical coverage"
+            ),
             policy_version=pv,
             threshold_or_rule="Point measurements do not establish whole-corridor mineral continuity",
+            spatial_footprint_coverage_fraction=spec_cov_frac,
+            valid_measurement_coverage_fraction=spec_cov_frac,
+            product_availability="verified_local" if spec_cov_frac > 0.0 else "unavailable",
+            scientific_validation_state="localized_rover_elemental_proxy_not_continuous_crism",
+            spatial_association_quality="point_records_within_search_radius" if spec_cov_frac > 0.0 else "none",
+            resolution_adequacy="point_samples_only_insufficient_for_continuous_corridor",
+            temporal_relevance="historical_msl_archive",
+            missing_inputs=["continuous_crism_orbital_hyperspectral_cube", "in_situ_chemin_xrd_at_destination"],
         ),
         DomainAssessmentRecord(
             domain="thermal_inertia_and_temperature",
-            status="PARTIALLY_ASSESSED" if has_therm else "UNAVAILABLE",
-            evidence_basis="Historical REMS thermal archive near Gale" if has_therm else "No verified thermal inertia raster or live temperature",
+            status="PARTIALLY_ASSESSED" if therm_cov_frac > 0.0 else "UNAVAILABLE",
+            evidence_basis=(
+                f"Historical REMS thermal archive near {therm_segs}/{seg_count} corridor segments "
+                f"(point proxy {therm_cov_frac * 100:.1f}%; no THEMIS/orbital thermal inertia raster)"
+                if therm_cov_frac > 0.0
+                else "No verified thermal inertia raster or live temperature"
+            ),
             policy_version=pv,
             threshold_or_rule="Historical PDS records only; live thermal environment unavailable",
+            spatial_footprint_coverage_fraction=therm_cov_frac,
+            valid_measurement_coverage_fraction=therm_cov_frac,
+            product_availability="verified_local" if therm_cov_frac > 0.0 else "unavailable",
+            scientific_validation_state="historical_point_archive_unsuitable_for_live_forecast",
+            spatial_association_quality="historical_localized_rems_only" if therm_cov_frac > 0.0 else "none",
+            resolution_adequacy="no_spatial_thermal_inertia_map",
+            temporal_relevance="historical_archive_stale_for_live_weather",
+            missing_inputs=["orbital_themis_thermal_inertia_raster", "live_surface_air_and_ground_temperature"],
         ),
         DomainAssessmentRecord(
             domain="rover_and_surface_observations",
             status="PARTIALLY_ASSESSED" if obs_count > 0 else "UNAVAILABLE",
             evidence_basis=(
-                f"{obs_count} localized Gale / Curiosity point observation records indexed by Shapely STRtree (non-continuous corridor coverage)"
+                f"{obs_count} localized Gale / Curiosity point observation records indexed near {obs_segs}/{seg_count} segments (non-continuous coverage)"
                 if obs_count > 0
                 else "No spatially associated Curiosity point records within corridor search radius"
             ),
             policy_version=pv,
             threshold_or_rule="Localized Curiosity records anchor point sites ONLY and never certify whole-corridor ground truth; Perseverance/Jezero records isolated",
+            spatial_footprint_coverage_fraction=round(obs_segs / max(1, seg_count), 4) if seg_count else 0.0,
+            valid_measurement_coverage_fraction=round(obs_segs / max(1, seg_count), 4) if seg_count else 0.0,
+            product_availability="verified_local" if obs_count > 0 else "unavailable",
+            scientific_validation_state="published_msl_pds_observations",
+            spatial_association_quality="strtree_point_and_footprint_association" if obs_count > 0 else "none",
+            resolution_adequacy="point_observations_only",
+            temporal_relevance="historical_msl_traverse_archive",
+            missing_inputs=[] if obs_count > 0 else ["in_corridor_curiosity_observations"],
         ),
         DomainAssessmentRecord(
             domain="navigation_and_return_feasibility",
@@ -369,6 +502,14 @@ def evaluate_multidomain_readiness(
             ),
             policy_version=pv,
             threshold_or_rule="Requires independent destination->origin path computation, checkpoint turnback verification, and <= 2.0 m/px DEM slope coverage",
+            spatial_footprint_coverage_fraction=round(valid_dem, 4),
+            valid_measurement_coverage_fraction=round(valid_dem, 4),
+            product_availability="computed" if corridor.route_surface_distance_m > 0 else "unavailable",
+            scientific_validation_state="validated_8_neighbor_dijkstra_on_dem",
+            spatial_association_quality="exact_route_geometry",
+            resolution_adequacy=dem_res_adequacy,
+            temporal_relevance="computed_for_current_dem",
+            missing_inputs=[] if getattr(request, "independent_return_computed", False) else ["independent_destination_to_start_return_route"],
         ),
         DomainAssessmentRecord(
             domain="kinematic_duration_budget",
@@ -384,6 +525,12 @@ def evaluate_multidomain_readiness(
             evidence_basis="Constant user speed vs unvalidated Tobler grade scaling",
             policy_version=pv,
             threshold_or_rule="Explicit user walking_speed_mps, duration limit, and reserve required",
+            product_availability="user_configured" if request.walking_speed_mps is not None else "unavailable",
+            scientific_validation_state="explicit_user_assumption_unvalidated_biomechanics",
+            spatial_association_quality="corridor_segment_integration",
+            resolution_adequacy=dem_res_adequacy,
+            temporal_relevance="mission_assumption",
+            missing_inputs=[k for k in ("walking_speed_mps", "mission_duration_limit_s", "return_reserve_fraction") if getattr(request, k) is None],
         ),
         DomainAssessmentRecord(
             domain="gravitational_energy_work",
@@ -391,6 +538,14 @@ def evaluate_multidomain_readiness(
             evidence_basis="W = m * g_mars; dPE = m * g * dh (Mars Standard Gravity 3.72076 m/s^2)",
             policy_version=pv,
             threshold_or_rule="Requires explicit suit + payload mass; downhill does NOT recover metabolic energy",
+            spatial_footprint_coverage_fraction=round(valid_dem, 4) if energy_budget.available else None,
+            valid_measurement_coverage_fraction=round(valid_dem, 4) if energy_budget.available else None,
+            product_availability="computed_from_user_mass" if energy_budget.available else "unavailable",
+            scientific_validation_state="classical_mechanics_lower_bound_only",
+            spatial_association_quality="corridor_elevation_profile",
+            resolution_adequacy=dem_res_adequacy,
+            temporal_relevance="physics_constant",
+            missing_inputs=[] if energy_budget.available else ["astronaut_suit_mass_kg", "payload_mass_kg"],
         ),
         DomainAssessmentRecord(
             domain="consumables_and_eva_endurance",
@@ -398,6 +553,12 @@ def evaluate_multidomain_readiness(
             evidence_basis="Unit-aware explicit user EVA supply limits" if consumables_configured else "No user O2/battery/cooling supply limits supplied",
             policy_version=pv,
             threshold_or_rule="Never infers suit consumables from route length without explicit consumption rate",
+            product_availability="user_configured" if consumables_configured else "unavailable",
+            scientific_validation_state="unvalidated_hardware_model" if not consumables_configured else "explicit_user_linear_budget",
+            spatial_association_quality="not_spatially_varying",
+            resolution_adequacy="not_applicable",
+            temporal_relevance="mission_assumption",
+            missing_inputs=[] if consumables_configured else ["explicit_o2_battery_water_cooling_limits"],
         ),
         DomainAssessmentRecord(
             domain="live_localization_and_telemetry",
@@ -405,6 +566,12 @@ def evaluate_multidomain_readiness(
             evidence_basis="Live authenticated SSE telemetry only when external feed active" if live_telemetry_connected else "No verified live astronaut position feed connected",
             policy_version=pv,
             threshold_or_rule="Zero fabricated live astronaut coordinates",
+            product_availability="connected" if live_telemetry_connected else "unavailable",
+            scientific_validation_state="external_telemetry_dependent",
+            spatial_association_quality="live_stream" if live_telemetry_connected else "none",
+            resolution_adequacy="sensor_dependent" if live_telemetry_connected else "unavailable",
+            temporal_relevance="real_time_required",
+            missing_inputs=[] if live_telemetry_connected else ["authenticated_eva_telemetry_feed"],
         ),
         DomainAssessmentRecord(
             domain="astronaut_survivability_safety_certification",
@@ -412,6 +579,12 @@ def evaluate_multidomain_readiness(
             evidence_basis="Regolith bearing strength, dust depth, subsurface voids, and suit thermal endurance are unmodeled",
             policy_version=pv,
             threshold_or_rule="MARSCOPE is an analytical planning support engine, NEVER an EVA life-safety certification",
+            product_availability="unavailable",
+            scientific_validation_state="unvalidated",
+            spatial_association_quality="none",
+            resolution_adequacy="unmodeled_geotechnical_and_physiological",
+            temporal_relevance="not_applicable",
+            missing_inputs=["regolith_geotechnical_strength", "radiation_weather_live_clearance", "eva_flight_certification"],
         ),
     ]
 

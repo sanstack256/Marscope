@@ -137,28 +137,64 @@ def test_dataset_uncertainty_never_fabricates_numeric_sigma_without_metadata(tmp
     )
     assert any("per-pixel" in f.lower() or "vertical" in f.lower() or "empirical" in f.lower() for f in prof_f32.missing_uncertainty_fields)
 
-    # Quantized int16 TIFF exposes strict half-LSB quantization floor without inventing stereo error
+    # Prompt 17 Defect 1.1 fix: integer TIFF WITHOUT PDS SCALING_FACTOR or catalog vertical_resolution_meters
+    # must NEVER silently default SCALING_FACTOR to 1.0 m!
     int_path = _write_test_geotiff(
         tmp_path / "synth_i16.tif",
         np.round(arr).astype(np.int16),
         dtype="int16",
         nodata=-32768,
     )
-    ds_i16 = _make_dataset_stub("synth_i16", "SYNTH_INT16", int_path, res_m=463.0)
+    ds_i16_unscaled = _make_dataset_stub("synth_i16_unscaled", "SYNTH_INT16", int_path, res_m=463.0, vertical_res_m=None)
+    prof_i16_unscaled = inspect_dataset_elevation_uncertainty(
+        dataset=ds_i16_unscaled, raw_dir=RAW_DIR, processed_dir=PROCESSED_DIR
+    )
+    assert prof_i16_unscaled.overall_elevation_uncertainty_status == UncertaintyStatus.UNCERTAINTY_UNQUANTIFIED
+    assert prof_i16_unscaled.is_integer_quantized is True
+    assert prof_i16_unscaled.quantization_uncertainty_available is False
+    assert prof_i16_unscaled.scaling_factor_source == "unestablished"
+    assert prof_i16_unscaled.processed_raster_dtype == "int16" or prof_i16_unscaled.raw_raster_dtype == "int16"
+    assert all(
+        m.value is None
+        for m in prof_i16_unscaled.elevation_uncertainty_metrics
+        if m.metric_name in ("elevation_quantization_step", "quantization_uniform_standard_deviation")
+    )
+
+    # With explicit vertical_resolution_meters OR explicit PDS SCALING_FACTOR keyword, quantization bound is quantified
+    ds_i16_explicit = _make_dataset_stub("synth_i16_scaled", "SYNTH_INT16_SCALED", int_path, res_m=463.0, vertical_res_m=0.5)
     prof_i16 = inspect_dataset_elevation_uncertainty(
-        dataset=ds_i16, raw_dir=RAW_DIR, processed_dir=PROCESSED_DIR
+        dataset=ds_i16_explicit, raw_dir=RAW_DIR, processed_dir=PROCESSED_DIR
     )
     assert prof_i16.overall_elevation_uncertainty_status == UncertaintyStatus.QUANTIZATION_LOWER_BOUND_ONLY
     assert prof_i16.is_integer_quantized is True
+    assert prof_i16.quantization_uncertainty_available is True
+    assert prof_i16.scaling_factor_source == "explicit_catalog_vertical_resolution"
     assert prof_i16.has_per_pixel_error_raster is False
     assert any(
-        m.metric_name == "elevation_quantization_step" and math.isclose(m.value or 0.0, 1.0, rel_tol=1e-6)
+        m.metric_name == "elevation_quantization_step" and math.isclose(m.value or 0.0, 0.5, rel_tol=1e-6)
         for m in prof_i16.elevation_uncertainty_metrics
     )
     assert any(
-        m.metric_name == "quantization_uniform_standard_deviation" and (m.value or 0.0) > 0.28
+        m.metric_name == "quantization_uniform_standard_deviation" and math.isclose(m.value or 0.0, 0.5 / math.sqrt(12.0), rel_tol=1e-3)
         for m in prof_i16.elevation_uncertainty_metrics
     )
+
+    # Conflicting PDS SCALING_FACTOR keywords must be detected and refused
+    conflict_lbl = tmp_path / "conflict.lbl"
+    conflict_lbl.write_text(
+        "PDS_VERSION_ID = PDS3\nOBJECT = IMAGE\nSAMPLE_TYPE = MSB_INTEGER\nSAMPLE_BITS = 16\n"
+        "SCALING_FACTOR = 1.0\nEND_OBJECT = IMAGE\nSCALING_FACTOR = 0.25\nEND\n",
+        encoding="utf-8",
+    )
+    ds_conflict = _make_dataset_stub("synth_i16_conflict", "CONFLICT_INT16", int_path, res_m=463.0, vertical_res_m=1.0).model_copy(
+        update={"local_label_path": str(conflict_lbl)}
+    )
+    prof_conflict = inspect_dataset_elevation_uncertainty(
+        dataset=ds_conflict, raw_dir=RAW_DIR, processed_dir=PROCESSED_DIR
+    )
+    assert prof_conflict.scaling_factor_conflict is True
+    assert prof_conflict.quantization_uncertainty_available is False
+    assert prof_conflict.overall_elevation_uncertainty_status == UncertaintyStatus.UNCERTAINTY_UNQUANTIFIED
 
     # Real local HiRISE Gale Crater DTM check via endpoint
     r = client.get("/api/terrain-uncertainty/dataset/hirise_dteec_009149_1750")

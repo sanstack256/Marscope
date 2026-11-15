@@ -25,8 +25,9 @@ def summarize_eva_uncertainties(
         uncertainties.append(
             f"Return climb exceeds outbound climb by +{return_plan.asymmetric_climb_delta_m:.1f} m; fatigue on return cannot be neglected."
         )
-    if float(corridor.coverage_summary.get("mean_optical_coverage_fraction", 0.0)) < 0.5:
-        uncertainties.append("Partial or missing HiRISE optical coverage leaves surface blockiness unverified visually.")
+    raw_opt_cov = corridor.coverage_summary.get("mean_optical_coverage_fraction")
+    if raw_opt_cov is None or float(raw_opt_cov) < 0.5:
+        uncertainties.append("Partial, zero, or unverified HiRISE optical coverage leaves surface blockiness unverified visually.")
 
     limitations: List[str] = [
         "NOT a certified human astronaut EVA safety system.",

@@ -199,6 +199,7 @@ class ImageryArchiveService:
             raise ArchiveError(f"PDS Imaging Atlas HTTP {response.status_code}")
         payload = response.json()
         if payload.get("error"):
+            self._append_query_provenance(archive="NASA PDS Imaging Atlas", endpoint="atlas_search", params={"limit": limit, "offset": offset}, http_status=200, result_count=None, success=False, error=str(payload["error"]))
             raise ArchiveError(f"PDS Imaging Atlas error: {payload['error']}")
         hits = payload.get("hits", {})
         total_value = hits.get("total", 0)
@@ -206,8 +207,10 @@ class ImageryArchiveService:
         total = total_value.get("value", 0) if isinstance(total_value, dict) else total_value
         products = [normalize_atlas_hit(hit) for hit in hits.get("hits", [])]
         self._merge_catalog(products)
+        prov = self._append_query_provenance(archive="NASA PDS Imaging Atlas", endpoint="atlas_search", params={"limit": limit, "offset": offset}, http_status=200, result_count=len(products), success=True)
         return {"source": "NASA PDS Imaging Atlas", "queried_at": datetime.now(timezone.utc),
-                "total": total, "total_relation": total_relation, "limit": limit, "offset": offset, "products": products}
+                "total": total, "total_relation": total_relation, "limit": limit, "offset": offset, "products": products,
+                "query_provenance": prov}
 
     async def ode_search(self, *, instrument_host_id: Optional[str] = None,
                          instrument_id: Optional[str] = None, product_type: Optional[str] = None,
@@ -237,20 +240,52 @@ class ImageryArchiveService:
         async with create_async_http_client(timeout_seconds=30) as client:
             response = await client.get(ODE_URL, params=params)
         if response.status_code != 200:
+            self._append_query_provenance(archive="Mars ODE REST", endpoint=ODE_URL, params=params, http_status=response.status_code, result_count=None, success=False, error=f"ODE REST HTTP {response.status_code}")
             raise ArchiveError(f"ODE REST HTTP {response.status_code}")
         payload = response.json()
         result = payload.get("ODEResults", {})
         if str(result.get("Status", "")).upper() == "ERROR" or result.get("Error"):
-            raise ArchiveError(f"ODE REST error: {result.get('Error', 'unknown archive error')}")
+            err_msg = str(result.get("Error", "unknown archive error"))
+            self._append_query_provenance(archive="Mars ODE REST", endpoint=ODE_URL, params=params, http_status=200, result_count=None, success=False, error=err_msg)
+            raise ArchiveError(f"ODE REST error: {err_msg}")
         raw_products = result.get("Products", {}).get("Product", [])
         if isinstance(raw_products, dict):
             raw_products = [raw_products]
         products = [normalize_ode_product(item) for item in raw_products]
         self._merge_catalog(products)
+        prov = self._append_query_provenance(archive="Mars ODE REST", endpoint=ODE_URL, params=params, http_status=200, result_count=len(products), success=True)
         count = result.get("Count")
         return {"source": "Mars ODE REST", "queried_at": datetime.now(timezone.utc),
                 "total": int(count) if str(count).isdigit() else len(products), "limit": params["limit"],
-                "offset": params["offset"], "products": products}
+                "offset": params["offset"], "products": products, "query_provenance": prov}
+
+    def _append_query_provenance(
+        self,
+        *,
+        archive: str,
+        endpoint: str,
+        params: dict[str, Any],
+        http_status: Optional[int],
+        result_count: Optional[int],
+        success: bool,
+        error: Optional[str] = None,
+    ) -> dict[str, Any]:
+        rec = {
+            "queried_at_utc": datetime.now(timezone.utc).isoformat(),
+            "archive": archive,
+            "endpoint": endpoint,
+            "params": params,
+            "http_status": http_status,
+            "result_count": result_count,
+            "success": success,
+            "error": error,
+            "stage": "discovered_only_not_acquired",
+        }
+        prov_path = self.catalog_path.parent / "query_provenance.jsonl"
+        prov_path.parent.mkdir(parents=True, exist_ok=True)
+        with prov_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(rec, sort_keys=True) + "\n")
+        return rec
 
     def get(self, product_id: str) -> Optional[ImageryProduct]:
         return self._read_catalog().get(product_id)

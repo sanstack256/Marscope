@@ -177,12 +177,26 @@ def propagate_horn_slope_uncertainty(
         if is_empirical_error_map
         else UncertaintyStatus.QUANTIFIED_FROM_METADATA
     )
+    near_flat_frac = float(near_flat_count) / float(max(1, valid_count)) if valid_count > 0 else None
+    near_flat_used = near_flat_count > 0
+    linearized_valid_frac = round(max(0.0, 1.0 - (near_flat_frac or 0.0)), 4) if near_flat_frac is not None else None
+    summary_metric_kind = (
+        MeasurementQuantityKind.APPROXIMATE_UNCERTAINTY_BOUND
+        if (near_flat_frac is not None and near_flat_frac > 0.5)
+        else MeasurementQuantityKind.STANDARD_DEVIATION
+    )
+    near_flat_note: Optional[str] = (
+        f"Non-Gaussian Rice/Rayleigh near-flat gradient approximation applied on {near_flat_count}/{max(1, valid_count)} cells "
+        f"({(near_flat_frac or 0.0)*100:.1f}%): linearized Horn Jacobian standard deviation is valid ONLY on the remaining {(linearized_valid_frac or 0.0)*100:.1f}% steeper cells."
+        if near_flat_used
+        else None
+    )
     return (
         slope_deg,
         slope_sigma_deg,
         SlopeUncertaintySummary(
             status=status,
-            metric_kind=MeasurementQuantityKind.STANDARD_DEVIATION,
+            metric_kind=summary_metric_kind,
             basis_sigma_z_m=round(scalar_basis, 4),
             basis_description=basis_description
             or (
@@ -195,9 +209,13 @@ def propagate_horn_slope_uncertainty(
             mean_slope_sigma_deg=round(float(np.mean(fin_sig_deg)), 3) if has_fin else None,
             max_slope_sigma_deg=round(float(np.max(fin_sig_deg)), 3) if has_fin else None,
             median_slope_sigma_deg=round(float(np.median(fin_sig_deg)), 3) if has_fin else None,
-            near_flat_bias_affected_fraction=round(float(near_flat_count) / float(max(1, valid_count)), 4)
-            if valid_count > 0
-            else None,
+            near_flat_bias_affected_fraction=round(near_flat_frac, 4) if near_flat_frac is not None else None,
+            near_flat_approximation_used=near_flat_used,
+            linearized_regime_valid_fraction=linearized_valid_frac,
+            near_flat_regime_metric_kind=(
+                MeasurementQuantityKind.APPROXIMATE_UNCERTAINTY_BOUND if near_flat_used else None
+            ),
+            near_flat_assumption_note=near_flat_note,
             invalid_neighborhood_fraction=round(inv_frac_full, 4),
             notes=notes,
         ),
