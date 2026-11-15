@@ -26,13 +26,26 @@ PY
 
 # Do not download 390 MB+ NASA DEMs during Cloud Run web startup; use the dedicated
 # Cloud Run Job (scripts/acquire_datasets_job.py) + GCS persistence (MARSCOPE_GCS_BUCKET).
+echo "[MARSCOPE] Startup dataset check: datasets_dir=${DATASETS_DIR} gcs_bucket=${MARSCOPE_GCS_BUCKET:-<unset>} startup_acquire_dems=${MARSCOPE_STARTUP_ACQUIRE_DEMS:-false} target_datasets=mola_megt00n090hb,mola_megt90n000cb,hirise_dteec_009149_1750"
 if [ "${MARSCOPE_STARTUP_ACQUIRE_DEMS:-false}" = "true" ]; then
   if [ ! -f "${DATASETS_DIR}/raw/dteec_009149_1750_009294_1750_u01.img" ] && [ ! -f "${DATASETS_DIR}/raw/DTEEC_009149_1750_009294_1750_U01.IMG" ]; then
-    echo "[MARSCOPE] MARSCOPE_STARTUP_ACQUIRE_DEMS=true; starting sequential NASA PDS acquisition..."
+    echo "[MARSCOPE] Scheduling background NASA dataset acquisition (mode=startup_background_job, datasets=mola_megt00n090hb,mola_megt90n000cb,hirise_dteec_009149_1750, datasets_dir=${DATASETS_DIR})"
     (
-      PYTHONPATH="${PYTHONPATH:-/app/backend}" python3 /app/backend/scripts/acquire_datasets_job.py --no-gcs
+      set +e
+      echo "[MARSCOPE] Background acquisition task started (mode=startup_background_job, datasets=mola_megt00n090hb,mola_megt90n000cb,hirise_dteec_009149_1750)"
+      if [ -z "${MARSCOPE_GCS_BUCKET:-}" ]; then
+        PYTHONPATH="${PYTHONPATH:-/app/backend}" python3 /app/backend/scripts/acquire_datasets_job.py --no-gcs
+      else
+        PYTHONPATH="${PYTHONPATH:-/app/backend}" python3 /app/backend/scripts/acquire_datasets_job.py
+      fi
+      rc=$?
+      echo "[MARSCOPE] Background acquisition task completed (exit_status=${rc})"
     ) &
+  else
+    echo "[MARSCOPE] Startup background acquisition skipped: HiRISE DEM already present in ${DATASETS_DIR}/raw"
   fi
+else
+  echo "[MARSCOPE] Startup DEM acquisition disabled (mode=cloud_run_job_and_gcs_on_demand, datasets=mola_megt00n090hb,mola_megt90n000cb,hirise_dteec_009149_1750)"
 fi
 
 exec uvicorn app.main:app \

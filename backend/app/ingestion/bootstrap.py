@@ -143,16 +143,33 @@ def load_bootstrap_manifest(manifest_path: Optional[Path] = None) -> Dict[str, A
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _resolve_case_insensitive_path(base_dir: Path, rel_path: str) -> Path:
+    """Resolve a relative path under base_dir, supporting case-insensitive filename lookup on Linux."""
+    candidate = base_dir / rel_path
+    if candidate.exists():
+        return candidate
+    parent = candidate.parent
+    target_lower = candidate.name.lower()
+    if parent.exists() and parent.is_dir():
+        for entry in parent.iterdir():
+            if entry.name.lower() == target_lower:
+                return entry
+    return candidate
+
+
 def verify_local_datasets(
     *,
     datasets_dir: Optional[Path] = None,
     manifest_path: Optional[Path] = None,
     verify_checksums: bool = True,
     strict: bool = False,
+    dataset_ids: Optional[List[str]] = None,
 ) -> BootstrapVerificationReport:
     """
     Mode A: Inspect local files against the authoritative bootstrap manifest without
     network access or modifying tracked catalogs.
+    When dataset_ids is provided, performs targeted preflight for only those datasets
+    (and their companions) without requiring unrelated manifest products.
     """
     ds_root = datasets_dir or default_datasets_dir()
     candidate_manifest = manifest_path or (ds_root / "bootstrap_manifest.json")
@@ -161,7 +178,19 @@ def verify_local_datasets(
         if seed_manifest.exists():
             candidate_manifest = seed_manifest
     manifest = load_bootstrap_manifest(candidate_manifest)
-    entries = list(manifest.get("products") or [])
+    all_entries = list(manifest.get("products") or [])
+    if dataset_ids is not None:
+        wanted = [str(d).strip() for d in dataset_ids if str(d).strip()]
+        wanted_set = set(wanted)
+        entries = [item for item in all_entries if str(item["dataset_id"]) in wanted_set]
+        found_ids = {str(item["dataset_id"]) for item in entries}
+        missing_from_manifest = [d for d in wanted if d not in found_ids]
+        if missing_from_manifest:
+            raise ValueError(
+                f"Requested dataset_id(s) not found in bootstrap manifest: {', '.join(missing_from_manifest)}"
+            )
+    else:
+        entries = all_entries
     statuses: List[BootstrapProductStatus] = []
 
     verified_count = 0
@@ -173,15 +202,16 @@ def verify_local_datasets(
         ds_id = str(item["dataset_id"])
         pid = str(item["product_id"])
         rel_raw = str(item["expected_raw_path"])
-        raw_path = ds_root / rel_raw
-        mandatory = bool(item.get("mandatory_for_gale_workflow", False))
+        raw_path = _resolve_case_insensitive_path(ds_root, rel_raw)
+        # In targeted mode, every explicitly requested dataset is mandatory for that run.
+        mandatory = True if dataset_ids is not None else bool(item.get("mandatory_for_gale_workflow", False))
         expected_sha = item.get("expected_sha256")
         expected_size = item.get("expected_size_bytes")
         companions = [str(c) for c in (item.get("companion_dependencies") or [])]
 
         notes: List[str] = []
         raw_exists = raw_path.exists() and raw_path.is_file()
-        missing_comp = [c for c in companions if not (ds_root / c).exists()]
+        missing_comp = [c for c in companions if not _resolve_case_insensitive_path(ds_root, c).exists()]
 
         actual_size: Optional[int] = raw_path.stat().st_size if raw_exists else None
         actual_sha: Optional[str] = None
@@ -204,8 +234,9 @@ def verify_local_datasets(
                 state = "MISSING_OPTIONAL"
                 notes.append(f"Optional local source product absent at '{rel_raw}'.")
         else:
-            if expected_size is not None and actual_size != int(expected_size):
-                notes.append(f"Size difference: expected {expected_size} B, got {actual_size} B.")
+            size_ok = expected_size is None or actual_size == int(expected_size)
+            if not size_ok:
+                notes.append(f"Size mismatch: expected {expected_size} B, got {actual_size} B.")
             if verify_checksums:
                 actual_sha = compute_sha256(raw_path)
                 if expected_sha:
@@ -223,21 +254,28 @@ def verify_local_datasets(
 
             # Companion label parse check
             lbl_rel = item.get("expected_label_path")
-            if lbl_rel and (ds_root / str(lbl_rel)).exists():
-                lbl_path = ds_root / str(lbl_rel)
-                try:
-                    if lbl_path.suffix.lower() == ".xml":
-                        extract_pds4_metadata(lbl_path)
-                    else:
-                        extract_pds3_metadata(lbl_path)
-                    lbl_ok = True
-                except Exception as exc:
+            if lbl_rel:
+                lbl_path = _resolve_case_insensitive_path(ds_root, str(lbl_rel))
+                if lbl_path.exists():
+                    try:
+                        if lbl_path.suffix.lower() == ".xml":
+                            extract_pds4_metadata(lbl_path)
+                        else:
+                            extract_pds3_metadata(lbl_path)
+                        lbl_ok = True
+                    except Exception as exc:
+                        lbl_ok = False
+                        notes.append(f"Companion label parse failed ({lbl_path.name}): {exc}")
+                else:
                     lbl_ok = False
-                    notes.append(f"Companion label parse failed ({lbl_path.name}): {exc}")
+                    missing_comp.append(str(lbl_rel))
 
             if checksum_ok is False:
                 mismatch_count += 1
                 state = "CHECKSUM_MISMATCH"
+            elif not size_ok:
+                mismatch_count += 1
+                state = "SIZE_MISMATCH"
             elif sig_ok is False or lbl_ok is False:
                 mismatch_count += 1
                 state = "INVALID_FORMAT"
@@ -247,7 +285,7 @@ def verify_local_datasets(
             else:
                 verified_count += 1
                 state = "VERIFIED_LOCAL"
-                notes.append("Verified local file presence, signature, companion label, and SHA-256.")
+                notes.append("Verified local file presence, size, signature, companion label, and SHA-256.")
 
         statuses.append(
             BootstrapProductStatus(

@@ -98,15 +98,50 @@ class GCSDatasetStore:
             )
         obj_name = self._object_name(relative_key)
         blob = self.bucket.blob(obj_name)
+        actual_size = local_path.stat().st_size
         blob.chunk_size = 8 * 1024 * 1024  # 8 MiB resumable upload chunks
         blob.metadata = {"sha256": actual_sha}
         blob.upload_from_filename(str(local_path))
+        verified = self.verify_uploaded_object(
+            obj_name,
+            expected_size_bytes=actual_size,
+            expected_sha256=actual_sha,
+        )
         return {
             "bucket": self.bucket_name,
             "object_name": obj_name,
-            "size_bytes": local_path.stat().st_size,
+            "size_bytes": actual_size,
             "sha256": actual_sha,
+            "verified": verified,
         }
+
+    def verify_uploaded_object(
+        self,
+        object_name: str,
+        *,
+        expected_size_bytes: Optional[int] = None,
+        expected_sha256: Optional[str] = None,
+    ) -> bool:
+        """Verify an uploaded GCS object exists and matches expected size and SHA-256 metadata."""
+        blob = self.bucket.blob(object_name)
+        if not blob.exists():
+            raise FileNotFoundError(
+                f"Uploaded GCS object 'gs://{self.bucket_name}/{object_name}' could not be verified (not found)."
+            )
+        if hasattr(blob, "reload"):
+            blob.reload()
+        remote_size = getattr(blob, "size", None)
+        if expected_size_bytes is not None and remote_size is not None and int(remote_size) != int(expected_size_bytes):
+            raise ValueError(
+                f"GCS object '{object_name}' size mismatch after upload: got {remote_size}, expected {expected_size_bytes}."
+            )
+        remote_meta = getattr(blob, "metadata", None) or {}
+        remote_sha = str(remote_meta.get("sha256") or "").strip().lower()
+        if expected_sha256 and remote_sha and remote_sha != expected_sha256.strip().lower():
+            raise ValueError(
+                f"GCS object '{object_name}' SHA-256 metadata mismatch after upload: got {remote_sha}, expected {expected_sha256}."
+            )
+        return True
 
     def download_file_streaming(
         self,

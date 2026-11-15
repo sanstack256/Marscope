@@ -95,8 +95,15 @@ def _resolve_raw_dem_open_path(dataset: Dataset, raw_dir: Path) -> Tuple[Path, O
             manifest_path = raw_dir.parent / "bootstrap_manifest.json"
             expected_sha = dataset.sha256_checksum
             expected_size = dataset.file_size_bytes
+            manifest = None
             if manifest_path.exists():
                 manifest = load_bootstrap_manifest(manifest_path)
+            else:
+                try:
+                    manifest = load_bootstrap_manifest(None)
+                except FileNotFoundError:
+                    manifest = None
+            if manifest is not None:
                 for entry in manifest.get("products", []):
                     if entry.get("dataset_id") == dataset.id:
                         expected_sha = expected_sha or entry.get("expected_sha256")

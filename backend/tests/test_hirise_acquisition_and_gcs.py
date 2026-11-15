@@ -336,40 +336,52 @@ async def test_concurrent_acquisition_is_serialized(
 
 
 class _FakeBlob:
-    def __init__(self, store: Dict[str, bytes], name: str) -> None:
+    def __init__(self, store: Dict[str, bytes], name: str, metadata_store: Optional[Dict[str, Dict[str, str]]] = None) -> None:
         self._store = store
+        self._metadata_store = metadata_store if metadata_store is not None else {}
         self.name = name
         self.chunk_size: Optional[int] = None
-        self.metadata: Dict[str, str] = {}
+        self.metadata: Dict[str, str] = dict(self._metadata_store.get(name, {}))
+        self.size: Optional[int] = len(store[name]) if name in store else None
 
     def exists(self) -> bool:
         return self.name in self._store
 
+    def reload(self) -> None:
+        if self.name in self._store:
+            self.size = len(self._store[self.name])
+            self.metadata = dict(self._metadata_store.get(self.name, {}))
+
     def upload_from_filename(self, filename: str) -> None:
-        self._store[self.name] = Path(filename).read_bytes()
+        data = Path(filename).read_bytes()
+        self._store[self.name] = data
+        self.size = len(data)
+        self._metadata_store[self.name] = dict(self.metadata)
 
     def download_to_file(self, fh: io.BufferedWriter) -> None:
         fh.write(self._store[self.name])
 
 
 class _FakeBucket:
-    def __init__(self, store: Dict[str, bytes]) -> None:
+    def __init__(self, store: Dict[str, bytes], metadata_store: Dict[str, Dict[str, str]]) -> None:
         self._store = store
+        self._metadata_store = metadata_store
 
     def blob(self, name: str) -> _FakeBlob:
-        return _FakeBlob(self._store, name)
+        return _FakeBlob(self._store, name, self._metadata_store)
 
 
 class _FakeGCSClient:
     def __init__(self) -> None:
         self.objects: Dict[str, bytes] = {}
+        self.metadata_store: Dict[str, Dict[str, str]] = {}
 
     def bucket(self, bucket_name: str) -> _FakeBucket:
-        return _FakeBucket(self.objects)
+        return _FakeBucket(self.objects, self.metadata_store)
 
     def list_blobs(self, bucket_name: str, prefix: str = "") -> List[_FakeBlob]:
         return [
-            _FakeBlob(self.objects, k)
+            _FakeBlob(self.objects, k, self.metadata_store)
             for k in sorted(self.objects.keys())
             if k.startswith(prefix)
         ]
@@ -415,6 +427,8 @@ def test_gcs_store_streaming_upload_download_and_case_insensitive_lookup(
     local_raw_dir.mkdir(parents=True, exist_ok=True)
     ds = _make_pds3_dataset()
     ds.local_file_path = f"raw/{ds.product_id}"
+    ds.sha256_checksum = expected_sha
+    ds.file_size_bytes = len(payload)
 
     monkeypatch.setattr("app.ingestion.gcs_storage.GCSDatasetStore.from_env", classmethod(lambda cls: store))
     retrieved_path, _ = _resolve_raw_dem_open_path(ds, local_raw_dir)
@@ -473,3 +487,204 @@ def test_acquisition_job_fails_nonzero_when_mandatory_missing(
 
     exit_code = acquire_datasets_job.main()
     assert exit_code == 1
+
+
+def test_production_manifest_route_reads_gcs_persisted_dem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+    from app.api import terrain_mesh as terrain_mesh_api
+    from app.ingestion.catalog import DatasetCatalogService
+    from app.main import app
+    from app.terrain.mesh import TerrainMeshService
+
+    ds_dir = tmp_path / "datasets"
+    (ds_dir / "catalog").mkdir(parents=True, exist_ok=True)
+    (ds_dir / "raw").mkdir(parents=True, exist_ok=True)
+
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_bounds
+
+    ds = _make_pds3_dataset(product_id="DTEEC_009149_1750_009294_1750_U01.tif")
+    ds.local_file_path = f"raw/{ds.product_id}"
+    catalog = DatasetCatalogService(ds_dir / "catalog")
+    catalog.register_dataset(ds)
+
+    src_file = tmp_path / "src" / ds.product_id
+    src_file.parent.mkdir(parents=True, exist_ok=True)
+    elev = np.linspace(-4500.0, -4400.0, 16 * 16, dtype=np.float32).reshape((16, 16))
+    with rasterio.open(
+        src_file,
+        "w",
+        driver="GTiff",
+        height=16,
+        width=16,
+        count=1,
+        dtype="float32",
+        crs="+proj=longlat +a=3396190 +b=3396190 +no_defs",
+        transform=from_bounds(137.0, -5.6, 137.8, -4.5, 16, 16),
+    ) as dst:
+        dst.write(elev, 1)
+    expected_sha = hashlib.sha256(src_file.read_bytes()).hexdigest()
+    ds.sha256_checksum = expected_sha
+    ds.file_size_bytes = src_file.stat().st_size
+    catalog.register_dataset(ds)
+
+    fake_client = _FakeGCSClient()
+    store = GCSDatasetStore(bucket_name="marscope-test-bucket", prefix="datasets", client=fake_client)
+    store.upload_file_streaming(src_file, f"raw/{ds.product_id}", expected_sha256=expected_sha)
+
+    monkeypatch.setattr(
+        terrain_mesh_api,
+        "terrain_mesh_service",
+        TerrainMeshService(catalog_service=catalog, raw_dir=ds_dir / "raw"),
+    )
+    monkeypatch.setattr("app.ingestion.gcs_storage.GCSDatasetStore.from_env", classmethod(lambda cls: store))
+
+    client = TestClient(app)
+    resp = client.get("/api/terrain/mesh/manifest", params={"dataset_id": "hirise_dteec_009149_1750"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["dataset_id"] == "hirise_dteec_009149_1750"
+    assert body["product_id"] == ds.product_id
+    assert len(body["lod_levels"]) > 0
+    assert len(body["tiles"]) > 0
+    assert (ds_dir / "raw" / ds.product_id).exists()
+
+
+def test_targeted_hirise_acquisition_and_full_manifest_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.ingestion.bootstrap import verify_local_datasets
+
+    datasets_dir = tmp_path / "datasets"
+    datasets_dir.mkdir(parents=True, exist_ok=True)
+    payload = _sample_pds3_img_bytes(16384)
+    expected_sha = hashlib.sha256(payload).hexdigest()
+
+    manifest_path = datasets_dir / "bootstrap_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "manifest_version": "1.0",
+                "products": [
+                    {
+                        "id": "hirise_dteec_009149_1750",
+                        "dataset_id": "hirise_dteec_009149_1750",
+                        "product_id": "DTEEC_009149_1750_009294_1750_U01.IMG",
+                        "product_title": "HiRISE Gale Crater DTM",
+                        "product_type": "DEM",
+                        "mission": "Mars Reconnaissance Orbiter",
+                        "instrument": "HiRISE",
+                        "source_archive": "NASA PDS HiRISE",
+                        "original_product_url": "https://example.org/pds/DTEEC_009149_1750_009294_1750_U01.IMG",
+                        "source_url": "https://example.org/pds/DTEEC_009149_1750_009294_1750_U01.IMG",
+                        "attribution": "NASA/JPL-Caltech/UArizona",
+                        "coverage": {
+                            "min_latitude": -5.6,
+                            "max_latitude": -4.5,
+                            "min_longitude": 137.0,
+                            "max_longitude": 137.8,
+                        },
+                        "mandatory_for_gale_workflow": True,
+                        "expected_raw_path": "raw/dteec_009149_1750_009294_1750_u01.img",
+                        "expected_label_path": "raw/dteec_009149_1750_009294_1750_u01.img",
+                        "expected_size_bytes": len(payload),
+                        "expected_sha256": expected_sha,
+                    },
+                    {
+                        "id": "rems_env_surface",
+                        "dataset_id": "rems_env_surface",
+                        "product_id": "REMS_ENV.TAB",
+                        "product_title": "REMS Environmental",
+                        "product_type": "ATMOSPHERIC",
+                        "mission": "MSL",
+                        "instrument": "REMS",
+                        "source_archive": "NASA PDS",
+                        "original_product_url": "https://example.org/pds/REMS_ENV.TAB",
+                        "source_url": "https://example.org/pds/REMS_ENV.TAB",
+                        "attribution": "NASA/JPL",
+                        "coverage": {
+                            "min_latitude": -5.6,
+                            "max_latitude": -4.5,
+                            "min_longitude": 137.0,
+                            "max_longitude": 137.8,
+                        },
+                        "mandatory_for_gale_workflow": True,
+                        "expected_raw_path": "raw/rems_env.tab",
+                        "expected_size_bytes": 1024,
+                        "expected_sha256": "a" * 64,
+                    },
+                    {
+                        "id": "chemcam_libs_spectra",
+                        "dataset_id": "chemcam_libs_spectra",
+                        "product_id": "CHEMCAM.CSV",
+                        "product_title": "ChemCam LIBS",
+                        "product_type": "SPECTRUM",
+                        "mission": "MSL",
+                        "instrument": "ChemCam",
+                        "source_archive": "NASA PDS",
+                        "original_product_url": "https://example.org/pds/CHEMCAM.CSV",
+                        "source_url": "https://example.org/pds/CHEMCAM.CSV",
+                        "attribution": "NASA/LANL",
+                        "coverage": {
+                            "min_latitude": -5.6,
+                            "max_latitude": -4.5,
+                            "min_longitude": 137.0,
+                            "max_longitude": 137.8,
+                        },
+                        "mandatory_for_gale_workflow": False,
+                        "expected_raw_path": "raw/chemcam.csv",
+                        "expected_size_bytes": 512,
+                        "expected_sha256": "b" * 64,
+                    },
+                ],
+            }
+        )
+    )
+
+    def handler(method: str, url: str, headers: Dict[str, str]) -> _FakeResponse:
+        return _FakeResponse(
+            status_code=200,
+            chunks=[payload[:8192], payload[8192:]],
+            headers={"Content-Length": str(len(payload)), "Content-Type": "application/octet-stream"},
+        )
+
+    fake_client = _FakeGCSClient()
+    store = GCSDatasetStore(
+        bucket_name="marscope-datasets-marscope-514815",
+        prefix="datasets",
+        client=fake_client,
+    )
+    monkeypatch.setattr(
+        "app.ingestion.acquisition.create_async_http_client",
+        lambda **kwargs: _FakeAsyncClient(handler),
+    )
+    monkeypatch.setattr("app.ingestion.gcs_storage.GCSDatasetStore.from_env", classmethod(lambda cls: store))
+
+    # 1. Targeted HiRISE acquisition mode succeeds without unrelated REMS/ChemCam files
+    result = acquire_datasets_job.run_acquisition_job(
+        datasets_dir=datasets_dir,
+        dataset_ids=["hirise_dteec_009149_1750"],
+        upload_to_gcs=True,
+        mode="targeted",
+    )
+    assert result["preflight_passed"] is True
+    assert result["verification"]["verified_count"] == 1
+    assert result["verification"]["total_manifest_products"] == 1
+    assert result["verification"]["missing_mandatory_count"] == 0
+    raw_uploads = [u for u in result["gcs_uploads"] if u["object_name"].endswith(".IMG")]
+    assert len(raw_uploads) == 1
+    assert raw_uploads[0]["bucket"] == "marscope-datasets-marscope-514815"
+    assert raw_uploads[0]["object_name"] == "datasets/raw/DTEEC_009149_1750_009294_1750_U01.IMG"
+    assert raw_uploads[0]["sha256"] == expected_sha
+    assert raw_uploads[0]["verified"] is True
+
+    # 2. Full-manifest preflight still requires all mandatory products and does not falsely pass
+    full_report = verify_local_datasets(datasets_dir=datasets_dir, verify_checksums=True, strict=True)
+    assert full_report.preflight_passed is False
+    assert full_report.total_manifest_products == 3
+    assert full_report.verified_count == 1
+    assert full_report.missing_mandatory_count == 1
+    assert full_report.missing_optional_count == 1
