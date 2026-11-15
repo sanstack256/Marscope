@@ -93,9 +93,7 @@ def build_observation_action_plan(
             f"Paired geochemical transect tied to '{question.title}' ({', '.join(question.target_phenomena[:4])})"
         )
 
-    # Estimate conservative data volume (~18 MB base context + ~12 MB per additional instrument)
     dedup_insts = list(dict.fromkeys(recommended))
-    est_mb = round(18.0 + 12.0 * len(dedup_insts), 1)
 
     return ObservationActionPlan(
         stop_id=stop_id,
@@ -106,7 +104,8 @@ def build_observation_action_plan(
         context_imaging_checks=context_checks,
         calibration_or_reference_checks=cal_checks,
         expected_dwell_s=float(dwell_s),
-        estimated_data_volume_mb=est_mb,
+        estimated_data_volume_mb=None,
+        data_volume_status="UNAVAILABLE_NO_TELEMETRY_BITRATE_CONFIGURED",
         explicit_uncertainty_notes=uncertainty_notes,
         prohibited_shortcut_notes=list(dict.fromkeys(prohibited_notes)),
     )

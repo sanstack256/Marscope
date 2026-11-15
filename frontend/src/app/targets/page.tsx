@@ -198,13 +198,18 @@ export default function TargetExplorerPage() {
                   <div className="text-[11px] font-mono text-slate-300 flex flex-wrap items-center gap-x-2 gap-y-1">
                     <span>
                       Species: {tgt.matched_species || tgt.geology_type} · Exploration Heuristic Priority:{" "}
-                      {(tgt.exploration_priority_score ?? tgt.scientific_value) != null
-                        ? (tgt.exploration_priority_score ?? tgt.scientific_value)!.toFixed(3)
-                        : "N/A"}{" "}
+                      {tgt.exploration_priority_score != null
+                        ? tgt.exploration_priority_score.toFixed(3)
+                        : "Uncomputed"}{" "}
                       · Instr: {tgt.instrument_source}
                       {tgt.distance_from_astronaut_m != null &&
                         ` · Dist: ${(tgt.distance_from_astronaut_m / 1000).toFixed(2)} km`}
                     </span>
+                    {tgt.scientific_confidence_state && (
+                      <span className="px-1.5 py-0.5 rounded border border-slate-600/60 bg-slate-900 text-slate-300 text-[9px] uppercase">
+                        Conf: {tgt.scientific_confidence_state}
+                      </span>
+                    )}
                     {tgt.evidence_state && (
                       <span className="px-1.5 py-0.5 rounded border border-cyan-500/35 bg-cyan-500/10 text-cyan-300 text-[9px] uppercase">
                         {tgt.evidence_state}

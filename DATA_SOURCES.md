@@ -108,3 +108,19 @@ Seven newly acquired/verified NASA planetary terrain, orthorectified image, and 
 | **NASA Worldview / GIBS** (`nasa_worldview_gibs`) | Earth-observation daily imagery (`worldview.earthdata.nasa.gov`) | Audited via `/api/sources/audit`; excluded as Earth-only observation tooling without Mars IAU2000 datasets | **EXCLUDED (`excluded_earth_only`)** |
 
 Clean Git checkouts with empty `datasets/raw/` and `datasets/processed/` reconcile file availability purely in memory inside `DatasetCatalogService` and `LayerCatalogService` without mutating tracked JSON catalogs under `datasets/catalog/`.
+
+---
+
+## Prompt 18 Authoritative Archive Acquisition, Product Integrity & Limitation Records
+
+### Live NASA PDS Geosciences Acquisition Record (`test_live_nasa_pds_discovery_acquisition_and_validation`)
+- **Archive Endpoint:** `https://pds-geosciences.wustl.edu/msl/msl-m-chemin-4-rdr-v1/mslcmn_1xxx/data/rdr5/`
+- **Query Filter & Result:** `collection="chemin_rdr5"`, `sol_min=75`, `sol_max=90` (`total_matched = 1`, persisted cleanly via query provenance ledger)
+- **Acquired Product:** `CMA_404470826MIN00790050104CH11503P1` (`cma_404470826min00790050104ch11503p1.csv`, `152 bytes` + companion `.lbl`)
+- **Verified SHA-256 Digest:** `0e4cbfa2b190148966a92b499710cbc7bcd51ad856c3490a08de02f929d2954b`
+- **Pipeline Verification:** Passed live HTTP acquisition (`INTEGRITY_VALIDATED`), companion PDS3 `.LBL` metadata verification (`instrument_id = CHEMIN`), and isolated `DatasetCatalogService.validate_dataset_integrity` (`PRODUCT_VALIDATED`, `validation_passed = true`).
+
+### Real-Product Validation Honesty Notes
+- **HiRISE Stereo DTM (`DTEEC_009149_1750_009294_1750_U01.IMG`):** Official `MRO-M-HIRISE-5-DTM-V1.0` PDS3 headers specify `SCALING_FACTOR = 1.0`, `OFFSET = 0.0`, `SAMPLE_TYPE = PC_REAL`, and declare physical elevation units `"elevations in meters"` inside `OBJECT = IMAGE -> NOTE` (without a separate `UNIT` keyword). `extract_pds3_metadata` parses `"meters"` directly with `units_source = "pds3_note"` and keeps `scaling_factor = 1.0`. Processed GeoTIFF stats across `hirise_dteec_009149_1750_dem.tif` inspect cleanly (`2,143,296` valid pixels, `[-4283.48, -3742.88] m`).
+- **MOLA MEGDR (`MEGT00N090HB.LBL`, `MEGT90N000CB.LBL`):** Official `MGS-M-MOLA-5-MEGDR-L3-V1.0` PDS3 labels specify `SAMPLE_TYPE = MSB_INTEGER` and `UNIT = METER` while omitting `SCALING_FACTOR`. Under Prompt 18's no-fabrication policy, MARSCOPE retains `scaling_factor = None`, `offset = None`, and explicitly flags `Integer PDS3 DEM label lacks required SCALING_FACTOR` in `validate_dataset_integrity` rather than silently assuming `1.0`.
+- **Acquisition & Query Provenance Ledgers:** `AcquisitionService` persists append-only manifests, `acquisition_ledger.jsonl`, and `query_provenance.jsonl` entries tracking retry/HTTP `206` Range resume, non-overwrite protection (`FileExistsError`), and SHA-256 outcomes. Mutating catalog/rebuild routes fail closed without `X-Mars-Operator-Token` (`MARSCOPE_OPERATOR_TOKEN`).

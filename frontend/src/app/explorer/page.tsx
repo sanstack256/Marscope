@@ -266,8 +266,18 @@ export default function SurfaceExplorerPage() {
     setRebuildingIndex(true);
     setCompositionError(null);
     try {
-      const res = await fetch(`${API_BASE_URL}/composition/index/rebuild`, { method: "POST" });
-      if (!res.ok) throw new Error(`HTTP ${res.status} rebuilding index`);
+      const token =
+        typeof window !== "undefined" ? window.sessionStorage.getItem("marscope_operator_token") : null;
+      const headers: Record<string, string> = {};
+      if (token) headers["X-Mars-Operator-Token"] = token;
+      const res = await fetch(`${API_BASE_URL}/composition/index/rebuild`, {
+        method: "POST",
+        headers,
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status} rebuilding index`);
+      }
       const st: CompositionIndexStatus = await res.json();
       setIndexStatus(st);
     } catch (err) {
@@ -304,7 +314,8 @@ export default function SurfaceExplorerPage() {
         elevation_m: cand.elevation_m ?? null,
         crs: cand.crs,
         geology_type: cand.best_species_id,
-        scientific_value: Number(Math.min(1, Math.max(0, cand.ranking.composite_rank_score ?? 0)).toFixed(4)),
+        scientific_value: null,
+        exploration_priority_score: Number(Math.min(1, Math.max(0, cand.ranking.composite_rank_score ?? 0)).toFixed(4)),
         instrument_source: cand.distinct_instruments.join(", "),
         provenance_product_id: cand.evidence_ids[0] || cand.candidate_id,
         target_status: "evidence_backed",

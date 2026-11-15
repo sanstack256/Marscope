@@ -5,7 +5,7 @@ Martian Surface Intelligence & Exploration System
 
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -20,6 +20,48 @@ class DatasetLifecycleStatus(str, Enum):
     FAILED_DOWNLOAD = "failed_download"
     FAILED_VALIDATION = "failed_validation"
     FAILED_PROCESSING = "failed_processing"
+
+
+class AcquisitionState(str, Enum):
+    DISCOVERED = "DISCOVERED"
+    AVAILABLE = "AVAILABLE"
+    DOWNLOAD_PENDING = "DOWNLOAD_PENDING"
+    DOWNLOADING = "DOWNLOADING"
+    DOWNLOADED = "DOWNLOADED"
+    INTEGRITY_VALIDATED = "INTEGRITY_VALIDATED"
+    PRODUCT_VALIDATED = "PRODUCT_VALIDATED"
+    PROCESSING_PENDING = "PROCESSING_PENDING"
+    PROCESSING = "PROCESSING"
+    PROCESSED = "PROCESSED"
+    INDEXED = "INDEXED"
+    REJECTED = "REJECTED"
+    FAILED = "FAILED"
+    UNAVAILABLE = "UNAVAILABLE"
+    UNVERIFIED = "UNVERIFIED"
+
+
+def lifecycle_to_acquisition_state(
+    status: DatasetLifecycleStatus,
+    *,
+    is_wmts: bool = False,
+    validation_passed: Optional[bool] = None,
+    has_local_file: bool = False,
+) -> AcquisitionState:
+    if status == DatasetLifecycleStatus.FAILED_VALIDATION:
+        return AcquisitionState.REJECTED
+    if status in {DatasetLifecycleStatus.FAILED_DOWNLOAD, DatasetLifecycleStatus.FAILED_PROCESSING}:
+        return AcquisitionState.FAILED
+    if status == DatasetLifecycleStatus.PROCESSED:
+        return AcquisitionState.PROCESSED
+    if status == DatasetLifecycleStatus.VALIDATED:
+        return AcquisitionState.PRODUCT_VALIDATED if validation_passed is not False else AcquisitionState.REJECTED
+    if status == DatasetLifecycleStatus.DOWNLOADED:
+        return AcquisitionState.INTEGRITY_VALIDATED if has_local_file else AcquisitionState.DOWNLOADED
+    if status in {DatasetLifecycleStatus.METADATA_VERIFIED, DatasetLifecycleStatus.LICENSE_VERIFIED}:
+        return AcquisitionState.AVAILABLE if is_wmts else AcquisitionState.UNVERIFIED
+    if status == DatasetLifecycleStatus.AVAILABLE:
+        return AcquisitionState.AVAILABLE
+    return AcquisitionState.DISCOVERED
 
 
 class VerificationState(str, Enum):
@@ -105,8 +147,24 @@ class Dataset(BaseModel):
     file_size_bytes: Optional[int] = Field(None, description="File size on disk or archive")
     sha256_checksum: Optional[str] = Field(None, description="SHA-256 verification hash")
     status: DatasetLifecycleStatus = Field(DatasetLifecycleStatus.DISCOVERED, description="Current lifecycle state")
+    acquisition_state: Optional[AcquisitionState] = Field(
+        None,
+        description="Explicit 15-state Prompt 18 acquisition lifecycle state (DISCOVERED..INDEXED/REJECTED/UNVERIFIED).",
+    )
     verification: MetadataVerification = Field(default_factory=MetadataVerification)
     failure_reason: Optional[str] = Field(None, description="Reason for failure if status is in FAILED_* state")
+    validation_report: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Structured format/label/header validation diagnostics (never fabricated).",
+    )
+    raw_product_immutable: bool = Field(
+        True,
+        description="Guarantees original source artifacts remain immutable and separated from processed derivatives.",
+    )
+    processing_provenance: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Traceable processing operation record (algorithm, version, params, CRS, units, checksums).",
+    )
     quality_flags: List[str] = Field(default_factory=list, description="Quality indicators or flags")
     known_limitations: List[str] = Field(default_factory=list, description="Documented instrument or interpolation limitations")
     processing_history: List[str] = Field(default_factory=list, description="Audit log of pipeline processing steps")

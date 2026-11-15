@@ -415,7 +415,7 @@ def extract_pds3_metadata(label_path: Path) -> Dict[str, Any]:
         or {}
     )
 
-    # Units
+    # Units (check explicit PDS3 UNIT keyword first, then explicit IMAGE/TABLE NOTE meters declaration)
     raw_unit = (
         img_obj.get("UNIT")
         or tbl_obj.get("UNIT")
@@ -423,7 +423,9 @@ def extract_pds3_metadata(label_path: Path) -> Dict[str, Any]:
         or ("DIGITAL_NUMBER" if "CHEMCAM-PSV" in str(parsed.get("PRODUCT_TYPE", "")).upper() else "")
     )
     unit_norm = "unknown"
+    units_source: Optional[str] = None
     if raw_unit:
+        units_source = "pds3_unit_keyword"
         u_low = str(raw_unit).lower()
         if u_low in {"meter", "meters", "m"}:
             unit_norm = "meters"
@@ -431,6 +433,11 @@ def extract_pds3_metadata(label_path: Path) -> Dict[str, Any]:
             unit_norm = "kilometers"
         else:
             unit_norm = str(raw_unit).strip()
+    else:
+        note_text = str(img_obj.get("NOTE") or tbl_obj.get("NOTE") or "").lower()
+        if "elevations in meters" in note_text or "values in meters" in note_text or "units are meters" in note_text:
+            unit_norm = "meters"
+            units_source = "pds3_note"
 
     # Scaling & Offset & Missing constant
     scaling = _parse_num(img_obj.get("SCALING_FACTOR"))
@@ -503,6 +510,7 @@ def extract_pds3_metadata(label_path: Path) -> Dict[str, Any]:
         "pointers": raw_pointers,
         "rover_motion_counter": _extract_rmc_info(parsed),
         "units": unit_norm,
+        "units_source": units_source,
         "scaling_factor": scaling,
         "offset": offset,
         "missing_constant": missing,
@@ -672,3 +680,77 @@ def parse_pds4_table_delimited(xml_path: Path) -> Dict[str, Any]:
         "rights_statements": rights_statements,
         "schema_version": f"pds4:{logical_id or xml_path.stem}@{version_id or 'unknown'}",
     }
+
+
+def extract_pds4_metadata(xml_path: Path) -> Dict[str, Any]:
+    """
+    Validate and extract product-level metadata from a PDS4 XML label (Product_Observational).
+    Never invents missing scaling factors, units, or coordinate metadata.
+    """
+    if not xml_path.exists():
+        raise FileNotFoundError(f"PDS4 XML label not found: {xml_path}")
+    xml_bytes = xml_path.read_bytes()
+    try:
+        root = ET.fromstring(xml_bytes.decode("utf-8", errors="strict"))
+    except (ET.ParseError, UnicodeDecodeError) as exc:
+        raise ValueError(f"Malformed PDS4 XML label '{xml_path.name}': {exc}") from exc
+
+    root_tag = _strip_ns(root.tag)
+    if not root_tag.startswith("Product_"):
+        raise ValueError(f"XML file '{xml_path.name}' root element <{root_tag}> is not a valid PDS4 Product_* label.")
+
+    meta: Dict[str, Any] = {
+        "label_standard": "PDS4",
+        "root_class": root_tag,
+        "logical_identifier": None,
+        "version_id": None,
+        "title": None,
+        "product_class": None,
+        "processing_level": None,
+        "start_date_time": None,
+        "stop_date_time": None,
+        "scaling_factor": None,
+        "offset": None,
+        "units": None,
+        "data_type": None,
+        "axes_lines": None,
+        "axes_samples": None,
+        "target_name": None,
+    }
+    for elem in root.iter():
+        tag = _strip_ns(elem.tag)
+        txt = (elem.text or "").strip()
+        if not txt:
+            continue
+        if tag == "logical_identifier" and meta["logical_identifier"] is None:
+            meta["logical_identifier"] = txt
+        elif tag == "version_id" and meta["version_id"] is None:
+            meta["version_id"] = txt
+        elif tag == "title" and meta["title"] is None:
+            meta["title"] = txt
+        elif tag == "product_class" and meta["product_class"] is None:
+            meta["product_class"] = txt
+        elif tag == "processing_level" and meta["processing_level"] is None:
+            meta["processing_level"] = txt
+        elif tag == "start_date_time" and meta["start_date_time"] is None:
+            meta["start_date_time"] = txt
+        elif tag == "stop_date_time" and meta["stop_date_time"] is None:
+            meta["stop_date_time"] = txt
+        elif tag == "scaling_factor" and meta["scaling_factor"] is None:
+            try:
+                meta["scaling_factor"] = float(txt)
+            except ValueError:
+                pass
+        elif tag == "value_offset" and meta["offset"] is None:
+            try:
+                meta["offset"] = float(txt)
+            except ValueError:
+                pass
+        elif tag == "unit" and meta["units"] is None:
+            meta["units"] = txt
+        elif tag == "data_type" and meta["data_type"] is None:
+            meta["data_type"] = txt
+
+    if not meta["logical_identifier"]:
+        raise ValueError(f"PDS4 XML label '{xml_path.name}' is missing required <logical_identifier>.")
+    return meta

@@ -88,3 +88,17 @@ Original label files are retained. PDS3 ODL labels use the existing parser; PDS4
 1. **Clean-Checkout Non-Mutation:** With empty local `datasets/raw/` and `datasets/processed/` directories, `DatasetCatalogService` and `LayerCatalogService` demote absent local binaries strictly in memory without rewriting tracked catalog JSON files or fabricating available DEM layers.
 2. **Source Audit Exclusions & Mission Separation:** USGS SIM 3292 (`1:20,000,000`) is restricted to global geological context with unverified Gale route applicability; NASA Worldview / GIBS is explicitly audited and excluded as Earth-only; and Mars 2020 Perseverance imagery (`/api/imagery/perseverance`) is strictly isolated to Jezero Crater (`isolated_from_gale_planning = true`).
 3. **No Terrestrial Geolocation or Auto-Rerouting:** Browser `navigator.geolocation` and synthetic live telemetry are prohibited (`"Live Mars position unavailable — no mission positioning provider connected."`). Live positioning accepts only token-authenticated `IAU2000:49900` feeds, and off-route replan proposals strictly require explicit user confirmation (`/api/tracking/replan-preview`).
+
+---
+
+## 8. Prompt 18 Product Acquisition, Validation & CRS Registration Policy
+
+1. **15-State Acquisition State Machine (`app/schemas/dataset.py`, `app/ingestion/acquisition.py`):**
+   - Products advance strictly through `DISCOVERED`, `METADATA_FETCHED`, `PRODUCT_QUEUED`, `DOWNLOADING`, `DOWNLOADED`, `CHECKSUM_VERIFIED`, `INTEGRITY_VALIDATED`, `PRODUCT_VALIDATED`, `REGISTERED`, `INDEXED`, `READY_FOR_SCIENCE`, `READY_FOR_ROUTING`, `PARTIAL`, `FAILED`, and `REJECTED`.
+   - Downloads enforce retries on transient failures (`HTTP 429/500/502/503/504`), HTTP `206` Range resume with `If-Range` / `ETag` verification using unbuffered streaming (`aiter_bytes(chunk_size=None)` so interrupted transfers flush received bytes cleanly), non-overwrite guards (`FileExistsError` when `overwrite=False`), byte-size caps, binary/text signature checks (GeoTIFF/JP2/PDS3/PDS4 XML/CSV), SHA-256 verification, and append-only `acquisition_ledger.jsonl` + `query_provenance.jsonl` logging.
+2. **Zero Fabrication on Missing Labels, Scaling, Units, Uncertainty & Telemetry:**
+   - Missing PDS3 `SCALING_FACTOR` on integer DEMs never defaults to `1.0` (`MOLA MEGDR` keeps `scaling_factor = None`); missing measurement units never default to `"meters"` (`units = "unknown"` unless explicitly declared in `UNIT` or an unambiguous PDS3 `IMAGE.NOTE` such as HiRISE `"elevations in meters"` -> `units_source = "pds3_note"`).
+   - Missing instrument uncertainties remain `None` / `"UNAVAILABLE"`; observation telemetry volume remains `estimated_data_volume_mb = None` (`UNAVAILABLE_NO_TELEMETRY_BITRATE_CONFIGURED`).
+3. **Mars Spatial Registration (`app/geospatial/crs.py`, `evaluate_spatial_registration`):**
+   - Rejects Earth-bound EPSG codes (e.g. `EPSG:4326`, `EPSG:3857`) cleanly (`INCOMPATIBLE_REFERENCE_SYSTEM`).
+   - Enforces explicit 7-state `SpatialRegistrationState` (`REGISTERED`, `REGISTERED_WITH_LIMITATIONS`, `PARTIALLY_OVERLAPPING`, `NOT_REGISTERED`, `INCOMPATIBLE_REFERENCE_SYSTEM`, `INSUFFICIENT_METADATA`, `REGISTRATION_UNVERIFIED`) checking latitude convention (`Planetocentric` vs `Planetographic`), longitude direction (`East` vs `West`), planetary ellipsoid radii, bounding intersection, spatial resolution compatibility, and resampling provenance.

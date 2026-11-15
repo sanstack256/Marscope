@@ -25,7 +25,7 @@ import rasterio
 from app.geospatial.alignment import FootprintPlanError, clip_raster_to_bounding_box, plan_clip_to_bounding_box
 from app.geospatial.crs import angular_displacement_to_metric, validate_mars_crs
 from app.geospatial.raster import RasterInspectionService
-from app.schemas.dataset import Dataset, DatasetLifecycleStatus, VerificationState
+from app.schemas.dataset import AcquisitionState, Dataset, DatasetLifecycleStatus, VerificationState
 from app.schemas.terrain import InsufficientCoverageReport, PlanningSlopeThreshold
 from app.terrain.aspect import calculate_aspect
 from app.terrain.dem_validator import DEMValidator
@@ -251,7 +251,9 @@ class DEMProcessingService:
         cache_key = compute_analysis_cache_key(dataset.sha256_checksum, requested_frozen, roughness_radius_meters, planning_threshold)
         manifest_path = processed_dir / f"{dataset.id}.processing.json"
         processed_dir.mkdir(parents=True, exist_ok=True)
-        cached = DEMProcessingService._load_valid_cache(manifest_path, processed_dir, cache_key)
+        cached = DEMProcessingService._load_valid_cache(
+            manifest_path, processed_dir, cache_key, expected_source_sha256=dataset.sha256_checksum
+        )
         if cached is not None:
             cached["cache_hit"] = True
             return cached
@@ -379,6 +381,26 @@ class DEMProcessingService:
 
         dataset.processed_file_path = f"processed/{dem_out.name}"
         dataset.status = DatasetLifecycleStatus.PROCESSED
+        dataset.acquisition_state = AcquisitionState.PROCESSED
+        dataset.failure_reason = None
+        dataset.processing_provenance = {
+            "parent_product_ids": [dataset.id, dataset.product_id],
+            "parent_sha256": dataset.sha256_checksum,
+            "software": "MARSCOPE DEMProcessingService",
+            "algorithm_version": PROCESSING_VERSION,
+            "algorithm": "Horn 3x3 slope + compass aspect + RMS TRI under no_expansion_v1 clipping",
+            "parameters": {
+                "requested_bounds": requested_frozen,
+                "roughness_radius_meters_requested": roughness_radius_meters,
+            },
+            "coordinate_transformation": f"Source preserved in {crs_str}",
+            "units": "meters",
+            "output_product_id": dem_out.name,
+            "processing_timestamp_utc": manifest_data["processed_at_utc"],
+            "checksums": file_checksums,
+            "warnings": [],
+            "validation_status": "verified",
+        }
         dataset.verification.processing_verification = VerificationState.VERIFIED
         dataset.verification.field_verification["units"] = VerificationState.VERIFIED
         dataset.verification.field_verification["crs"] = VerificationState.VERIFIED
@@ -387,13 +409,21 @@ class DEMProcessingService:
         return manifest_data
 
     @staticmethod
-    def _load_valid_cache(manifest_path: Path, processed_dir: Path, cache_key: str) -> Optional[Dict[str, Any]]:
-        """Return an existing manifest only if its cache key matches AND every output checksum verifies."""
+    def _load_valid_cache(
+        manifest_path: Path,
+        processed_dir: Path,
+        cache_key: str,
+        *,
+        expected_source_sha256: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return an existing manifest only if its cache key, source checksum, and every output checksum verify."""
         if not manifest_path.exists():
             return None
         try:
             m = json.loads(manifest_path.read_text(encoding="utf-8"))
             if m.get("cache_key") != cache_key or m.get("manifest_version") != PROCESSING_VERSION:
+                return None
+            if expected_source_sha256 and m.get("source_sha256") != expected_source_sha256:
                 return None
             for name, digest in (m.get("file_sha256") or {}).items():
                 fp = processed_dir / name

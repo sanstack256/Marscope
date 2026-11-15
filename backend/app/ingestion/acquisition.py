@@ -16,8 +16,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import httpx
 from app.ingestion.http_client import create_async_http_client
-from app.ingestion.pds_label import extract_pds3_metadata
+from app.ingestion.pds_label import extract_pds3_metadata, extract_pds4_metadata
 from app.schemas.dataset import (
+    AcquisitionState,
     Dataset,
     DatasetLifecycleStatus,
     DatasetManifest,
@@ -241,12 +242,15 @@ class AcquisitionService:
         max_bytes: Optional[int] = 1_500_000_000,
         overwrite: bool = False,
         expected_sha256: Optional[str] = None,
+        max_retries: int = 3,
+        allow_resume: bool = True,
     ) -> DatasetManifest:
         """
-        Stream a verified NASA scientific product and its companion PDS3 label (if present),
+        Stream a verified NASA scientific product and its companion PDS label (if present),
         computing SHA-256 on the fly to a sibling temporary file with strict max_bytes,
-        magic-byte validation, and non-overwrite guarantees.
-        Sets lifecycle status to DOWNLOADED (distinct from DISCOVERED and VALIDATED).
+        magic-byte validation, non-overwrite guarantees, bounded transient retries, and
+        strictly verified HTTP Range resumption only when the server honors Range/If-Range.
+        Sets explicit acquisition_state transitions without inventing missing metadata.
         """
         source_url = dataset.original_product_url
         if "{" in source_url:
@@ -261,6 +265,7 @@ class AcquisitionService:
         target_file_path = self.raw_data_dir / filename
         manifest_file_path = self.manifests_dir / f"{dataset.id}.manifest.json"
         label_rel_path: Optional[str] = None
+        dataset.acquisition_state = AcquisitionState.DOWNLOAD_PENDING
 
         # Download companion PDS3/PDS4 label atomically first when available
         if dataset.original_label_url:
@@ -287,7 +292,7 @@ class AcquisitionService:
                             )
                             label_rel_path = str(target_lbl_path.relative_to(self.raw_data_dir.parent))
                             dataset.local_label_path = label_rel_path
-                            self._apply_pds3_label_verification(dataset, target_lbl_path)
+                            self._apply_pds_label_verification(dataset, target_lbl_path)
                         else:
                             dataset.verification.evidence_notes.append(
                                 f"Companion label HTTP {lbl_resp.status_code} from {dataset.original_label_url}; preserved local file if any."
@@ -295,7 +300,7 @@ class AcquisitionService:
                 except Exception as exc:
                     dataset.verification.evidence_notes.append(f"Companion label fetch warning: {exc}")
 
-        # Reuse verified file if intact manifest matches SHA-256
+        # Reuse verified file if intact manifest matches SHA-256 (prevent duplicate downloads)
         if target_file_path.exists() and manifest_file_path.exists() and not overwrite:
             existing_size = target_file_path.stat().st_size
             if existing_size > 0:
@@ -303,16 +308,31 @@ class AcquisitionService:
                 calc_sha = self._compute_file_sha256(target_file_path)
                 if calc_sha == existing_manifest.sha256_checksum:
                     dataset.status = DatasetLifecycleStatus.DOWNLOADED
+                    dataset.acquisition_state = AcquisitionState.INTEGRITY_VALIDATED
+                    dataset.failure_reason = None
                     dataset.local_file_path = str(target_file_path.relative_to(self.raw_data_dir.parent))
                     dataset.file_size_bytes = existing_size
                     dataset.sha256_checksum = calc_sha
                     dataset.verification.archive_availability = VerificationState.VERIFIED
                     dataset.verification.download_verification = VerificationState.VERIFIED
+                    self._record_acquisition_ledger(
+                        {
+                            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                            "dataset_id": dataset.id,
+                            "product_id": dataset.product_id,
+                            "source_url": source_url,
+                            "outcome": "REUSED_VERIFIED_ARTIFACT",
+                            "sha256_checksum": calc_sha,
+                            "byte_size": existing_size,
+                            "stage_after": AcquisitionState.INTEGRITY_VALIDATED.value,
+                        }
+                    )
                     return existing_manifest
 
         # Non-overwrite protection for unmanifested or pre-existing files
         if target_file_path.exists() and not overwrite:
             msg = f"Refusing to overwrite existing local file '{target_file_path.name}' when overwrite=False."
+            dataset.acquisition_state = AcquisitionState.REJECTED
             self._record_acquisition_ledger(
                 {
                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -321,54 +341,112 @@ class AcquisitionService:
                     "source_url": source_url,
                     "outcome": "FAILED_OVERWRITE_PROTECTED",
                     "error": msg,
-                    "stage_after": dataset.status.value,
+                    "stage_after": AcquisitionState.REJECTED.value,
                 }
             )
             raise FileExistsError(msg)
 
-        # Stream directly to sibling temporary file (never holding full binary payload in memory)
         target_file_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = target_file_path.parent / f".{target_file_path.name}.download_tmp"
-        if temp_path.exists():
-            temp_path.unlink()
-        sha = hashlib.sha256()
-        prefix_chunks = bytearray()
+        resume_meta_path = target_file_path.parent / f".{target_file_path.name}.resume.json"
+        if not allow_resume and temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+            resume_meta_path.unlink(missing_ok=True)
+
         total_downloaded = 0
         declared_size: Optional[int] = None
         content_type: Optional[str] = None
         http_status = 0
+        resumed_from_bytes = 0
+        calculated_sha = ""
+        sig_meta: Dict[str, Any] = {}
 
         try:
-            async with create_async_http_client(timeout_seconds=timeout_seconds) as client:
-                async with client.stream("GET", source_url) as response:
-                    http_status = response.status_code
-                    content_type = response.headers.get("content-type")
-                    if response.status_code != 200:
-                        raise RuntimeError(
-                            f"HTTP Error {response.status_code} while downloading from {source_url}"
-                        )
-                    declared = response.headers.get("content-length")
-                    if declared and declared.isdigit():
-                        declared_size = int(declared)
-                        if max_bytes is not None and declared_size > max_bytes:
-                            raise ValueError(
-                                f"Declared payload size ({declared_size} bytes) exceeds max_bytes limit ({max_bytes} bytes)."
-                            )
-                    with temp_path.open("wb") as stream:
-                        async for chunk in response.aiter_bytes(chunk_size=chunk_size):
-                            if not chunk:
-                                continue
-                            total_downloaded += len(chunk)
-                            if max_bytes is not None and total_downloaded > max_bytes:
-                                raise ValueError(
-                                    f"Streamed download exceeded max_bytes limit ({max_bytes} bytes) for '{target_file_path.name}'."
-                                )
-                            if len(prefix_chunks) < 4096:
-                                take = min(len(chunk), 4096 - len(prefix_chunks))
-                                prefix_chunks.extend(chunk[:take])
-                            sha.update(chunk)
-                            stream.write(chunk)
+            dataset.acquisition_state = AcquisitionState.DOWNLOADING
+            last_exc: Optional[Exception] = None
+            attempts = max(1, int(max_retries))
+            for attempt in range(attempts):
+                try:
+                    headers: Dict[str, str] = {}
+                    existing_partial = temp_path.stat().st_size if (allow_resume and temp_path.exists()) else 0
+                    saved_meta: Dict[str, Any] = {}
+                    if existing_partial > 0 and resume_meta_path.exists():
+                        try:
+                            saved_meta = json.loads(resume_meta_path.read_text(encoding="utf-8"))
+                        except Exception:
+                            saved_meta = {}
+                    if existing_partial > 0 and saved_meta.get("source_url") == source_url:
+                        headers["Range"] = f"bytes={existing_partial}-"
+                        if saved_meta.get("etag"):
+                            headers["If-Range"] = str(saved_meta["etag"])
+                    else:
+                        existing_partial = 0
+                        temp_path.unlink(missing_ok=True)
 
+                    async with create_async_http_client(timeout_seconds=timeout_seconds) as client:
+                        async with client.stream("GET", source_url, headers=headers) as response:
+                            http_status = response.status_code
+                            content_type = response.headers.get("content-type")
+                            if response.status_code not in {200, 206}:
+                                raise RuntimeError(
+                                    f"HTTP Error {response.status_code} while downloading from {source_url}"
+                                )
+
+                            is_partial = response.status_code == 206 and existing_partial > 0
+                            if existing_partial > 0 and not is_partial:
+                                # Server ignored Range and restarted from byte 0: do not append duplicate bytes!
+                                existing_partial = 0
+                                temp_path.unlink(missing_ok=True)
+
+                            resumed_from_bytes = existing_partial if is_partial else 0
+                            etag_hdr = response.headers.get("etag")
+                            if is_partial:
+                                cr = response.headers.get("content-range", "")
+                                if "/" in cr and cr.split("/")[-1].isdigit():
+                                    declared_size = int(cr.split("/")[-1])
+                            else:
+                                declared = response.headers.get("content-length")
+                                declared_size = int(declared) if (declared and declared.isdigit()) else None
+
+                            if declared_size is not None and max_bytes is not None and declared_size > max_bytes:
+                                raise ValueError(
+                                    f"Declared payload size ({declared_size} bytes) exceeds max_bytes limit ({max_bytes} bytes)."
+                                )
+
+                            resume_meta_path.write_text(
+                                json.dumps({"source_url": source_url, "etag": etag_hdr}),
+                                encoding="utf-8",
+                            )
+                            mode = "ab" if is_partial else "wb"
+                            with temp_path.open(mode) as stream:
+                                # Stream decoded bytes as they arrive (chunk_size=None) so mid-stream
+                                # interruptions persist received bytes immediately for Range resumption.
+                                async for chunk in response.aiter_bytes(chunk_size=None):
+                                    if not chunk:
+                                        continue
+                                    cur_size = resumed_from_bytes + (stream.tell() - resumed_from_bytes if is_partial else stream.tell())
+                                    if max_bytes is not None and (cur_size + len(chunk)) > max_bytes:
+                                        raise ValueError(
+                                            f"Streamed download exceeded max_bytes limit ({max_bytes} bytes) for '{target_file_path.name}'."
+                                        )
+                                    stream.write(chunk)
+                                stream.flush()
+                    last_exc = None
+                    break
+                except (httpx.TimeoutException, httpx.TransportError, RuntimeError) as exc:
+                    last_exc = exc
+                    transient_http = isinstance(exc, RuntimeError) and any(
+                        tok in str(exc) for tok in ("HTTP Error 429", "HTTP Error 500", "HTTP Error 502", "HTTP Error 503", "HTTP Error 504")
+                    )
+                    retryable = isinstance(exc, (httpx.TimeoutException, httpx.TransportError)) or transient_http
+                    if attempt + 1 >= attempts or not retryable:
+                        raise
+                    await asyncio.sleep(0.1 * (2 ** attempt))
+
+            if last_exc is not None:
+                raise last_exc
+
+            total_downloaded = temp_path.stat().st_size if temp_path.exists() else 0
             if total_downloaded == 0:
                 raise ValueError(f"Empty download payload from '{source_url}' for '{target_file_path.name}'.")
             if declared_size is not None and declared_size != total_downloaded:
@@ -376,7 +454,9 @@ class AcquisitionService:
                     f"Truncated or inconsistent download for '{target_file_path.name}': received {total_downloaded} bytes, archive declared {declared_size}."
                 )
 
-            sig_meta = validate_artifact_signature(bytes(prefix_chunks), target_file_path, content_type)
+            with temp_path.open("rb") as pf:
+                prefix_bytes = pf.read(4096)
+            sig_meta = validate_artifact_signature(prefix_bytes, target_file_path, content_type)
             if target_file_path.suffix.lower() == ".json" and total_downloaded <= 50_000_000:
                 try:
                     json.loads(temp_path.read_text(encoding="utf-8"))
@@ -385,13 +465,14 @@ class AcquisitionService:
                         f"Downloaded JSON '{target_file_path.name}' failed JSON validation: {exc}"
                     ) from exc
 
-            calculated_sha = sha.hexdigest()
+            calculated_sha = self._compute_file_sha256(temp_path)
             if expected_sha256 and calculated_sha != expected_sha256.strip().lower():
                 raise ValueError(
                     f"SHA-256 checksum mismatch for '{target_file_path.name}': got {calculated_sha}, expected {expected_sha256}."
                 )
 
             os.replace(temp_path, target_file_path)
+            resume_meta_path.unlink(missing_ok=True)
             now_utc = datetime.now(timezone.utc)
             dl_meta = {
                 "file_name": target_file_path.name,
@@ -401,6 +482,7 @@ class AcquisitionService:
                 "retrieval_timestamp_utc": now_utc.isoformat(),
                 "sha256_checksum": calculated_sha,
                 "byte_size": total_downloaded,
+                "resumed_from_bytes": resumed_from_bytes,
                 "signature_kind": sig_meta["signature_kind"],
                 "signature_verified": True,
             }
@@ -410,9 +492,10 @@ class AcquisitionService:
             os.replace(tmp_sc, sidecar)
         except Exception as exc:
             dataset.status = DatasetLifecycleStatus.FAILED_DOWNLOAD
+            dataset.acquisition_state = AcquisitionState.FAILED
             dataset.failure_reason = str(exc)
             dataset.verification.download_verification = VerificationState.FAILED
-            if http_status and http_status != 200:
+            if http_status and http_status not in {200, 206}:
                 dataset.verification.archive_availability = VerificationState.FAILED
             self._record_acquisition_ledger(
                 {
@@ -423,16 +506,18 @@ class AcquisitionService:
                     "http_status": http_status,
                     "outcome": "FAILED",
                     "error": str(exc),
-                    "stage_after": DatasetLifecycleStatus.FAILED_DOWNLOAD.value,
+                    "stage_after": AcquisitionState.FAILED.value,
                 }
             )
             raise
         finally:
-            if temp_path.exists():
-                try:
-                    temp_path.unlink()
-                except OSError:
-                    pass
+            # Retain temp_path ONLY when interrupted mid-stream on network timeout/transport error and allow_resume=True;
+            # remove temp_path if final state succeeded or corruption/validation error occurred.
+            if temp_path.exists() and (dataset.acquisition_state == AcquisitionState.FAILED):
+                err_l = (dataset.failure_reason or "").lower()
+                if any(tok in err_l for tok in ("checksum mismatch", "signature", "html", "exceeds max_bytes", "malformed")):
+                    temp_path.unlink(missing_ok=True)
+                    resume_meta_path.unlink(missing_ok=True)
 
         manifest = DatasetManifest(
             product_id=dataset.product_id,
@@ -450,6 +535,8 @@ class AcquisitionService:
         os.replace(tmp_manifest, manifest_file_path)
 
         dataset.status = DatasetLifecycleStatus.DOWNLOADED
+        dataset.acquisition_state = AcquisitionState.INTEGRITY_VALIDATED
+        dataset.failure_reason = None
         dataset.local_file_path = manifest.storage_path
         dataset.file_size_bytes = total_downloaded
         dataset.sha256_checksum = calculated_sha
@@ -473,7 +560,7 @@ class AcquisitionService:
                 "byte_size": total_downloaded,
                 "sha256_checksum": calculated_sha,
                 "signature_kind": sig_meta["signature_kind"],
-                "stage_after": DatasetLifecycleStatus.DOWNLOADED.value,
+                "stage_after": AcquisitionState.INTEGRITY_VALIDATED.value,
             }
         )
         return manifest
@@ -612,29 +699,44 @@ class AcquisitionService:
                 temp_path.unlink()
 
     @staticmethod
+    def _apply_pds_label_verification(dataset: Dataset, label_path: Path) -> None:
+        sfx = label_path.suffix.lower()
+        if sfx == ".lbl":
+            meta = extract_pds3_metadata(label_path)
+            if meta.get("units") and meta["units"] != "unknown":
+                dataset.units = str(meta["units"])
+                dataset.verification.field_verification["units"] = VerificationState.VERIFIED
+            if meta.get("planetary_radii_m"):
+                dataset.planetary_radii_m = meta["planetary_radii_m"]
+                dataset.verification.field_verification["crs"] = VerificationState.VERIFIED
+            if meta.get("map_scale_m_per_px"):
+                dataset.horizontal_resolution_meters = float(meta["map_scale_m_per_px"])
+                dataset.verification.field_verification["resolution"] = VerificationState.VERIFIED
+            if meta.get("latitude_convention") != "unknown":
+                dataset.latitude_convention = str(meta["latitude_convention"])
+            if meta.get("longitude_direction") != "unknown":
+                dataset.longitude_direction = str(meta["longitude_direction"])
+            if meta.get("longitude_range") != "unknown":
+                dataset.coverage.longitude_range = str(meta["longitude_range"])
+                dataset.verification.field_verification["coverage"] = VerificationState.VERIFIED
+            dataset.verification.metadata_verification = VerificationState.VERIFIED
+            dataset.verification.coverage_verification = VerificationState.VERIFIED
+            dataset.verification.evidence_notes.append(f"Verified metadata from PDS3 label {label_path.name}")
+        elif sfx == ".xml":
+            meta = extract_pds4_metadata(label_path)
+            if meta.get("units"):
+                dataset.units = str(meta["units"])
+                dataset.verification.field_verification["units"] = VerificationState.VERIFIED
+            if meta.get("processing_level"):
+                dataset.processing_level = str(meta["processing_level"])
+            if meta.get("logical_identifier") and not dataset.doi_or_pds_id:
+                dataset.doi_or_pds_id = str(meta["logical_identifier"])
+            dataset.verification.metadata_verification = VerificationState.VERIFIED
+            dataset.verification.evidence_notes.append(f"Verified metadata from PDS4 XML label {label_path.name}")
+
+    @staticmethod
     def _apply_pds3_label_verification(dataset: Dataset, label_path: Path) -> None:
-        if label_path.suffix.lower() != ".lbl":
-            return
-        meta = extract_pds3_metadata(label_path)
-        if meta.get("units") and meta["units"] != "unknown":
-            dataset.units = str(meta["units"])
-            dataset.verification.field_verification["units"] = VerificationState.VERIFIED
-        if meta.get("planetary_radii_m"):
-            dataset.planetary_radii_m = meta["planetary_radii_m"]
-            dataset.verification.field_verification["crs"] = VerificationState.VERIFIED
-        if meta.get("map_scale_m_per_px"):
-            dataset.horizontal_resolution_meters = float(meta["map_scale_m_per_px"])
-            dataset.verification.field_verification["resolution"] = VerificationState.VERIFIED
-        if meta.get("latitude_convention") != "unknown":
-            dataset.latitude_convention = str(meta["latitude_convention"])
-        if meta.get("longitude_direction") != "unknown":
-            dataset.longitude_direction = str(meta["longitude_direction"])
-        if meta.get("longitude_range") != "unknown":
-            dataset.coverage.longitude_range = str(meta["longitude_range"])
-            dataset.verification.field_verification["coverage"] = VerificationState.VERIFIED
-        dataset.verification.metadata_verification = VerificationState.VERIFIED
-        dataset.verification.coverage_verification = VerificationState.VERIFIED
-        dataset.verification.evidence_notes.append(f"Verified metadata from PDS3 label {label_path.name}")
+        AcquisitionService._apply_pds_label_verification(dataset, label_path)
 
     @staticmethod
     def _compute_file_sha256(file_path: Path) -> str:

@@ -7,7 +7,7 @@ Never assumes Earth WGS84 for Martian data and rejects ambiguous/unreferenced CR
 """
 
 import math
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from pyproj import CRS, Transformer
 
 # Canonical Mars Radii (IAU 2000)
@@ -202,3 +202,209 @@ def angular_displacement_to_metric(
     dy_m = radius_m * d_lat_rad
 
     return abs(dx_m), abs(dy_m)
+
+
+def evaluate_spatial_registration(
+    *,
+    product_a_id: str,
+    product_b_id: str,
+    crs_a: Optional[str],
+    crs_b: Optional[str],
+    bounds_a: Optional[Dict[str, float]],
+    bounds_b: Optional[Dict[str, float]],
+    resolution_a_m: Optional[float],
+    resolution_b_m: Optional[float],
+    lat_conv_a: str = "unknown",
+    lat_conv_b: str = "unknown",
+    lon_dir_a: str = "unknown",
+    lon_dir_b: str = "unknown",
+    projection_a: str = "unknown",
+    projection_b: str = "unknown",
+    radii_a_m: Optional[Dict[str, float]] = None,
+    radii_b_m: Optional[Dict[str, float]] = None,
+    registration_method: str = "coordinate_transform_and_footprint_intersection",
+    resampling_method: Optional[str] = None,
+    declared_registration_error_m: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Evaluate formal Mars spatial registration compatibility between two products
+    (Prompt 18 Section 10). Never treats overlapping bounding boxes alone as proof
+    of accurate registration and never treats resampled coarse rasters as high-res evidence.
+    """
+    warnings: List[str] = []
+    blockers: List[str] = []
+    provenance_steps: List[str] = []
+
+    if not crs_a or not crs_b or bounds_a is None or bounds_b is None:
+        return {
+            "product_a_id": product_a_id,
+            "product_b_id": product_b_id,
+            "registration_state": "INSUFFICIENT_METADATA",
+            "crs_compatible": False,
+            "projection_compatible": False,
+            "overlap_ratio": None,
+            "resolution_ratio": None,
+            "registration_method": registration_method,
+            "registration_error_m": None,
+            "registration_error_status": "UNQUANTIFIED_INSUFFICIENT_METADATA",
+            "resampling_method": resampling_method,
+            "warnings": warnings,
+            "blockers": ["Missing CRS or spatial footprint metadata for spatial registration check."],
+            "transformation_provenance": ["Registration halted: missing CRS or coverage bounds."],
+        }
+
+    # 1. CRS & Earth datum rejection
+    crs_a_ok = validate_mars_crs(crs_a)
+    crs_b_ok = validate_mars_crs(crs_b)
+    if not crs_a_ok or not crs_b_ok:
+        blockers.append(
+            f"Non-Martian or invalid CRS detected (a={crs_a!r} valid={crs_a_ok}, b={crs_b!r} valid={crs_b_ok})."
+        )
+        return {
+            "product_a_id": product_a_id,
+            "product_b_id": product_b_id,
+            "registration_state": "INCOMPATIBLE_REFERENCE_SYSTEM",
+            "crs_compatible": False,
+            "projection_compatible": False,
+            "overlap_ratio": None,
+            "resolution_ratio": None,
+            "registration_method": registration_method,
+            "registration_error_m": None,
+            "registration_error_status": "REJECTED_INVALID_CRS",
+            "resampling_method": resampling_method,
+            "warnings": warnings,
+            "blockers": blockers,
+            "transformation_provenance": ["Rejected Earth/unreferenced CRS prior to coordinate transformation."],
+        }
+
+    # 2. Planetary coordinate convention checks
+    if lat_conv_a != "unknown" and lat_conv_b != "unknown" and lat_conv_a != lat_conv_b:
+        blockers.append(
+            f"Latitude convention mismatch without conversion ({lat_conv_a} vs {lat_conv_b}): "
+            "Planetographic vs Planetocentric shift reaches ~0.35 deg at mid-latitudes."
+        )
+    elif "unknown" in {lat_conv_a, lat_conv_b}:
+        warnings.append(f"Unverified latitude convention ({lat_conv_a} vs {lat_conv_b}).")
+
+    if lon_dir_a != "unknown" and lon_dir_b != "unknown" and lon_dir_a != lon_dir_b:
+        warnings.append(
+            f"Longitude direction differs ({lon_dir_a} vs {lon_dir_b}); requires explicit East-positive normalization."
+        )
+
+    # 3. Ellipsoid / radii comparison
+    if radii_a_m and radii_b_m:
+        a1 = float(radii_a_m.get("a", 0.0))
+        a2 = float(radii_b_m.get("a", 0.0))
+        c1 = float(radii_a_m.get("c", a1))
+        c2 = float(radii_b_m.get("c", a2))
+        if a1 > 0 and a2 > 0 and abs(a1 - a2) > 50000.0:
+            blockers.append(f"Major planetary radius incompatible ({a1} m vs {a2} m).")
+        elif (a1 > 0 and c1 > 0) and (a2 > 0 and c2 > 0) and abs((a1 - c1) - (a2 - c2)) > 5000.0:
+            warnings.append(
+                f"Spherical MOLA vs oblate IAU2000 ellipsoid polar flattening difference ({abs((a1-c1)-(a2-c2)):.0f} m)."
+            )
+
+    # 4. Projection compatibility & transform verification
+    proj_compatible = True
+    if projection_a != "unknown" and projection_b != "unknown" and projection_a.lower() != projection_b.lower():
+        proj_compatible = False
+        warnings.append(f"Map projections differ ({projection_a} vs {projection_b}); explicit reprojection required.")
+
+    try:
+        validate_crs_transformation(crs_a, crs_b)
+        provenance_steps.append(f"Verified pyproj CRS transform path: {crs_a} <-> {crs_b}")
+    except CRSError as exc:
+        blockers.append(str(exc))
+
+    # 5. Spatial footprint overlap
+    try:
+        min_lat_a = float(bounds_a["min_latitude"])
+        max_lat_a = float(bounds_a["max_latitude"])
+        min_lon_a = normalize_longitude_360(float(bounds_a["min_longitude"]))
+        max_lon_a = normalize_longitude_360(float(bounds_a["max_longitude"]))
+        min_lat_b = float(bounds_b["min_latitude"])
+        max_lat_b = float(bounds_b["max_latitude"])
+        min_lon_b = normalize_longitude_360(float(bounds_b["min_longitude"]))
+        max_lon_b = normalize_longitude_360(float(bounds_b["max_longitude"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        return {
+            "product_a_id": product_a_id,
+            "product_b_id": product_b_id,
+            "registration_state": "INSUFFICIENT_METADATA",
+            "crs_compatible": True,
+            "projection_compatible": proj_compatible,
+            "overlap_ratio": None,
+            "resolution_ratio": None,
+            "registration_method": registration_method,
+            "registration_error_m": None,
+            "registration_error_status": "UNQUANTIFIED_MALFORMED_BOUNDS",
+            "resampling_method": resampling_method,
+            "warnings": warnings,
+            "blockers": [f"Malformed bounds structure: {exc}"],
+            "transformation_provenance": provenance_steps,
+        }
+
+    # Global wrap handling
+    if max_lon_b == 0.0 and float(bounds_b.get("max_longitude", 0.0)) >= 360.0:
+        max_lon_b = 360.0
+    if max_lon_a == 0.0 and float(bounds_a.get("max_longitude", 0.0)) >= 360.0:
+        max_lon_a = 360.0
+
+    i_min_lat = max(min_lat_a, min_lat_b)
+    i_max_lat = min(max_lat_a, max_lat_b)
+    i_min_lon = max(min_lon_a, min_lon_b)
+    i_max_lon = min(max_lon_a, max_lon_b)
+    area_a = max(1e-12, (max_lat_a - min_lat_a) * max(1e-9, max_lon_a - min_lon_a))
+    if i_min_lat < i_max_lat and i_min_lon < i_max_lon:
+        inter_area = (i_max_lat - i_min_lat) * (i_max_lon - i_min_lon)
+        overlap_ratio = min(1.0, inter_area / area_a)
+    else:
+        overlap_ratio = 0.0
+
+    # 6. Resolution disparity check
+    res_ratio: Optional[float] = None
+    if resolution_a_m and resolution_b_m and min(resolution_a_m, resolution_b_m) > 0:
+        res_ratio = max(resolution_a_m, resolution_b_m) / min(resolution_a_m, resolution_b_m)
+        if res_ratio > 10.0:
+            warnings.append(
+                f"Large resolution disparity ({resolution_a_m:.2f} m vs {resolution_b_m:.2f} m; {res_ratio:.1f}x): "
+                "coarse grid must NEVER be treated as high-resolution evidence."
+            )
+
+    if blockers:
+        state = "INCOMPATIBLE_REFERENCE_SYSTEM"
+    elif overlap_ratio == 0.0:
+        state = "NOT_REGISTERED"
+        blockers.append("Spatial footprints do not intersect.")
+    elif "unknown" in {lat_conv_a, lat_conv_b, lon_dir_a, lon_dir_b} or declared_registration_error_m is None:
+        state = "PARTIALLY_OVERLAPPING" if overlap_ratio < 0.99 else "REGISTRATION_UNVERIFIED"
+        if declared_registration_error_m is None:
+            warnings.append("Inter-product tie-point registration residual error is not reported (UNQUANTIFIED).")
+    elif overlap_ratio < 0.99:
+        state = "PARTIALLY_OVERLAPPING"
+    elif warnings:
+        state = "REGISTERED_WITH_LIMITATIONS"
+    else:
+        state = "REGISTERED_VALIDATED"
+
+    provenance_steps.append(
+        f"Overlap ratio={overlap_ratio:.4f}; resampling={resampling_method or 'none_applied'}; state={state}"
+    )
+    return {
+        "product_a_id": product_a_id,
+        "product_b_id": product_b_id,
+        "registration_state": state,
+        "crs_compatible": not any("crs" in b.lower() or "radius" in b.lower() or "convention" in b.lower() for b in blockers),
+        "projection_compatible": proj_compatible,
+        "overlap_ratio": round(overlap_ratio, 4),
+        "resolution_ratio": round(res_ratio, 2) if res_ratio is not None else None,
+        "registration_method": registration_method,
+        "registration_error_m": declared_registration_error_m,
+        "registration_error_status": (
+            "QUANTIFIED" if declared_registration_error_m is not None else "UNQUANTIFIED_NO_TIEPOINT_RESIDUAL"
+        ),
+        "resampling_method": resampling_method,
+        "warnings": warnings,
+        "blockers": blockers,
+        "transformation_provenance": provenance_steps,
+    }

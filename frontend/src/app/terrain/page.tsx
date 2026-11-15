@@ -50,6 +50,7 @@ export default function TerrainIntelligencePage() {
   const [error, setError] = useState<string | null>(null);
 
   // Coverage Intelligence state
+  const [selectedCoverageDatasetId, setSelectedCoverageDatasetId] = useState<string>("");
   const [covBounds, setCovBounds] = useState({
     min_lat: "-5.5",
     max_lat: "-4.3",
@@ -83,22 +84,41 @@ export default function TerrainIntelligencePage() {
     if (showSpinner) setLoading(true);
     setError(null);
     try {
-      const [sRes, lRes, mRes, scRes, cRes] = await Promise.all([
+      const [sRes, lRes, mRes, scRes] = await Promise.all([
         fetch(`${API_BASE_URL}/terrain/summary`, { cache: "no-store" }),
         fetch(`${API_BASE_URL}/terrain/layers`, { cache: "no-store" }),
         fetch(`${API_BASE_URL}/mobility/status`, { cache: "no-store" }),
         fetch(`${API_BASE_URL}/mobility/scenarios`, { cache: "no-store" }),
-        fetch(
-          `${API_BASE_URL}/mobility/coverage?min_lat=-5.5&max_lat=-4.3&min_lon=137.2&max_lon=138.0`,
-          { cache: "no-store" }
-        ),
       ]);
       if (!sRes.ok) throw new Error(`HTTP ${sRes.status} loading terrain summary`);
       setSummaryResp(await sRes.json());
       if (lRes.ok) setLayers(await lRes.json());
-      if (mRes.ok) setMobilityStatus(await mRes.json());
+      let resolvedId = selectedCoverageDatasetId;
+      if (mRes.ok) {
+        const mobData: MobilityStatusResponse = await mRes.json();
+        setMobilityStatus(mobData);
+        if (!resolvedId) {
+          resolvedId =
+            mobData.active_dem_dataset_id ||
+            mobData.terrain_inventory.find((d) => d.locally_processed)?.dataset_id ||
+            "";
+          if (resolvedId) setSelectedCoverageDatasetId(resolvedId);
+        }
+      }
       if (scRes.ok) setScenarios(await scRes.json());
-      if (cRes.ok) setCoverageResp(await cRes.json());
+      if (resolvedId) {
+        const cRes = await fetch(
+          `${API_BASE_URL}/mobility/coverage?dataset_id=${encodeURIComponent(
+            resolvedId
+          )}&min_lat=${encodeURIComponent(covBounds.min_lat)}&max_lat=${encodeURIComponent(
+            covBounds.max_lat
+          )}&min_lon=${encodeURIComponent(covBounds.min_lon)}&max_lon=${encodeURIComponent(covBounds.max_lon)}`,
+          { cache: "no-store" }
+        );
+        if (cRes.ok) setCoverageResp(await cRes.json());
+      } else {
+        setCoverageResp(null);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to fetch terrain & mobility intelligence");
     } finally {
@@ -110,23 +130,36 @@ export default function TerrainIntelligencePage() {
     let active = true;
     async function init() {
       try {
-        const [sRes, lRes, mRes, scRes, cRes] = await Promise.all([
+        const [sRes, lRes, mRes, scRes] = await Promise.all([
           fetch(`${API_BASE_URL}/terrain/summary`, { cache: "no-store" }),
           fetch(`${API_BASE_URL}/terrain/layers`, { cache: "no-store" }),
           fetch(`${API_BASE_URL}/mobility/status`, { cache: "no-store" }),
           fetch(`${API_BASE_URL}/mobility/scenarios`, { cache: "no-store" }),
-          fetch(
-            `${API_BASE_URL}/mobility/coverage?min_lat=-5.5&max_lat=-4.3&min_lon=137.2&max_lon=138.0`,
-            { cache: "no-store" }
-          ),
         ]);
         if (!active) return;
         if (!sRes.ok) throw new Error(`HTTP ${sRes.status} loading terrain summary`);
         setSummaryResp(await sRes.json());
         if (lRes.ok) setLayers(await lRes.json());
-        if (mRes.ok) setMobilityStatus(await mRes.json());
+        let resolvedId = "";
+        if (mRes.ok) {
+          const mobData: MobilityStatusResponse = await mRes.json();
+          setMobilityStatus(mobData);
+          resolvedId =
+            mobData.active_dem_dataset_id ||
+            mobData.terrain_inventory.find((d) => d.locally_processed)?.dataset_id ||
+            "";
+          if (resolvedId) setSelectedCoverageDatasetId(resolvedId);
+        }
         if (scRes.ok) setScenarios(await scRes.json());
-        if (cRes.ok) setCoverageResp(await cRes.json());
+        if (resolvedId) {
+          const cRes = await fetch(
+            `${API_BASE_URL}/mobility/coverage?dataset_id=${encodeURIComponent(
+              resolvedId
+            )}&min_lat=-5.5&max_lat=-4.3&min_lon=137.2&max_lon=138.0`,
+            { cache: "no-store" }
+          );
+          if (active && cRes.ok) setCoverageResp(await cRes.json());
+        }
       } catch (err) {
         if (active) {
           setError(err instanceof Error ? err.message : "Failed to fetch terrain & mobility intelligence");
@@ -149,9 +182,19 @@ export default function TerrainIntelligencePage() {
   }) {
     const b = customBounds || covBounds;
     if (customBounds) setCovBounds(customBounds);
+    const targetId =
+      selectedCoverageDatasetId ||
+      mobilityStatus?.active_dem_dataset_id ||
+      mobilityStatus?.terrain_inventory.find((d) => d.locally_processed)?.dataset_id ||
+      "";
+    if (!targetId) {
+      setError("Select a locally processed DEM dataset before querying spatial coverage.");
+      return;
+    }
     setCovLoading(true);
     try {
       const q = new URLSearchParams({
+        dataset_id: targetId,
         min_lat: b.min_lat,
         max_lat: b.max_lat,
         min_lon: b.min_lon,
@@ -505,7 +548,20 @@ export default function TerrainIntelligencePage() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-xs">
+              <select
+                value={selectedCoverageDatasetId}
+                onChange={(e) => setSelectedCoverageDatasetId(e.target.value)}
+                aria-label="DEM Dataset for Coverage Query"
+                className="px-2.5 py-1.5 rounded bg-[#0d111a] border border-[#252f44] font-mono text-slate-100"
+              >
+                <option value="">Select Processed DEM...</option>
+                {(mobilityStatus?.terrain_inventory || []).map((d) => (
+                  <option key={d.dataset_id} value={d.dataset_id}>
+                    {d.dataset_id} ({d.locally_processed ? "processed" : d.status})
+                  </option>
+                ))}
+              </select>
               <input
                 type="text"
                 value={covBounds.min_lat}

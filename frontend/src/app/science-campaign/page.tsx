@@ -89,6 +89,8 @@ export default function ScienceCampaignPage() {
     loadingFreshness,
     loadingObservations,
     loadingComparison,
+    loadingProductInspect,
+    inspectedProduct,
     error,
     clearError,
     setActiveQuestionId,
@@ -100,12 +102,14 @@ export default function ScienceCampaignPage() {
     createCustomQuestion,
     deleteCustomQuestion,
     discoverEvidence,
+    inspectProductDetail,
     evaluateTargets,
     buildCampaign,
     fetchCampaigns,
     loadCampaign,
     checkFreshness,
     recomputeCampaign,
+    exportCampaignDossier,
     recordObservation,
     fetchObservations,
     compareObservation,
@@ -176,11 +180,13 @@ export default function ScienceCampaignPage() {
 
   // Keep Work Area D start anchored safely near selected stop 0 when inside HiRISE DEM
   const handleRunTargetEval = async () => {
+    const parsedLat = startLat.trim() !== "" ? Number(startLat) : NaN;
+    const parsedLon = startLon.trim() !== "" ? Number(startLon) : NaN;
     const batch = await evaluateTargets({
       question_id: activeQuestionId,
       include_discovered_candidates: true,
-      astronaut_latitude: Number(startLat) || -4.733,
-      astronaut_longitude: Number(startLon) || 137.4025,
+      astronaut_latitude: Number.isFinite(parsedLat) ? parsedLat : null,
+      astronaut_longitude: Number.isFinite(parsedLon) ? parsedLon : null,
       search_radius_m: searchRadiusM,
       max_candidates: maxCandidates,
       study_bounds: restrictToHiriseDem
@@ -201,7 +207,16 @@ export default function ScienceCampaignPage() {
     }
   };
 
+  const [uiValidationError, setUiValidationError] = useState<string | null>(null);
+
   const handleBuildCampaign = async () => {
+    setUiValidationError(null);
+    const parsedStartLat = Number(startLat);
+    const parsedStartLon = Number(startLon);
+    if (!startLat.trim() || !startLon.trim() || !Number.isFinite(parsedStartLat) || !Number.isFinite(parsedStartLon)) {
+      setUiValidationError("EVA Start Latitude and Longitude (°E) must be valid numbers before building a campaign.");
+      return;
+    }
     const selectedObjects = (evaluatedBatch?.targets ?? []).filter((t) =>
       selectedStopTargetIds.includes(t.target_id)
     );
@@ -210,8 +225,8 @@ export default function ScienceCampaignPage() {
       question_id: activeQuestionId,
       dataset_id: datasetId,
       start: {
-        lat: Number(startLat) || -4.733,
-        lon_east: Number(startLon) || 137.4025,
+        lat: parsedStartLat,
+        lon_east: parsedStartLon,
         label: "EVA Start",
       },
       destination:
@@ -242,6 +257,13 @@ export default function ScienceCampaignPage() {
   };
 
   const handleRecordObservation = async () => {
+    setUiValidationError(null);
+    const parsedObsLat = Number(obsLat);
+    const parsedObsLon = Number(obsLon);
+    if (!obsLat.trim() || !obsLon.trim() || !Number.isFinite(parsedObsLat) || !Number.isFinite(parsedObsLon)) {
+      setUiValidationError("Observation Latitude and Longitude (°E) must be valid numbers before recording.");
+      return;
+    }
     const parsedNum = Number(obsValue);
     const measuredValue = Number.isFinite(parsedNum) && obsValue.trim() !== "" ? parsedNum : obsValue;
     await recordObservation({
@@ -252,10 +274,22 @@ export default function ScienceCampaignPage() {
       species_or_feature: obsSpecies.trim() || "SO3",
       measured_value: measuredValue,
       units: obsUnits,
-      latitude: Number(obsLat) || -4.73429,
-      longitude_east: Number(obsLon) || 137.41166,
+      latitude: parsedObsLat,
+      longitude_east: parsedObsLon,
       notes: obsNotes || null,
     });
+  };
+
+  const handleExportDossier = async (campId: string) => {
+    const dossier = await exportCampaignDossier(campId);
+    if (!dossier || typeof window === "undefined") return;
+    const blob = new Blob([JSON.stringify(dossier, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${campId}-dossier-p18.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const viewerPins: InvestigationPinMarker[] = useMemo(() => {
@@ -332,6 +366,18 @@ export default function ScienceCampaignPage() {
             {error}
           </span>
           <button onClick={clearError} className="text-[11px] font-mono underline">
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {uiValidationError && (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-950/30 p-3 flex items-center justify-between text-xs text-amber-200">
+          <span className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            {uiValidationError}
+          </span>
+          <button onClick={() => setUiValidationError(null)} className="text-[11px] font-mono underline">
             Dismiss
           </button>
         </div>
@@ -415,7 +461,9 @@ export default function ScienceCampaignPage() {
                 <div className="flex items-center justify-between gap-1">
                   <span className="font-mono font-bold text-white">{inst.instrument_id}</span>
                   <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
-                    ~{inst.typical_spatial_scale_m} m
+                    {inst.typical_spatial_scale_m != null
+                      ? `~${inst.typical_spatial_scale_m} m`
+                      : "Product-specific"} · {inst.verification_status ?? "VERIFIED"}
                   </span>
                 </div>
                 <div className="text-[10px] text-slate-400">
@@ -575,6 +623,40 @@ export default function ScienceCampaignPage() {
                 <div className="rounded border border-amber-500/30 bg-amber-950/20 p-2 text-[11px] text-amber-200">
                   <strong>Minimum Evidence Standard:</strong> {activeQuestion.minimum_evidence_note}
                 </div>
+                {(activeQuestion.competing_hypotheses?.length ||
+                  activeQuestion.alternative_explanations?.length ||
+                  activeQuestion.contradicting_evidence_criteria?.length ||
+                  activeQuestion.unresolved_assumptions?.length) ? (
+                  <div className="rounded border border-[#1e2638] bg-[#121622] p-2.5 grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px]">
+                    {activeQuestion.competing_hypotheses && activeQuestion.competing_hypotheses.length > 0 && (
+                      <div>
+                        <span className="font-semibold text-amber-200">Competing Hypotheses: </span>
+                        <span className="text-slate-300">{activeQuestion.competing_hypotheses.join(" · ")}</span>
+                      </div>
+                    )}
+                    {activeQuestion.alternative_explanations && activeQuestion.alternative_explanations.length > 0 && (
+                      <div>
+                        <span className="font-semibold text-cyan-200">Alternative Explanations: </span>
+                        <span className="text-slate-300">{activeQuestion.alternative_explanations.join(" · ")}</span>
+                      </div>
+                    )}
+                    {activeQuestion.contradicting_evidence_criteria &&
+                      activeQuestion.contradicting_evidence_criteria.length > 0 && (
+                        <div>
+                          <span className="font-semibold text-rose-200">Contradicting Criteria: </span>
+                          <span className="text-slate-300">
+                            {activeQuestion.contradicting_evidence_criteria.join(" · ")}
+                          </span>
+                        </div>
+                      )}
+                    {activeQuestion.unresolved_assumptions && activeQuestion.unresolved_assumptions.length > 0 && (
+                      <div>
+                        <span className="font-semibold text-slate-200">Unresolved Assumptions: </span>
+                        <span className="text-slate-400">{activeQuestion.unresolved_assumptions.join(" · ")}</span>
+                      </div>
+                    )}
+                  </div>
+                ) : null}
               </>
             ) : (
               <div className="text-slate-400">Select a scientific question to inspect requirements.</div>
@@ -694,6 +776,48 @@ export default function ScienceCampaignPage() {
             </span>
           </div>
 
+          {discovery.evidence_synthesis && (
+            <div className="grid grid-cols-2 md:grid-cols-6 gap-2 text-[11px] font-mono">
+              <div className="rounded border border-[#1e2638] bg-[#0d111a] p-2">
+                <div className="text-[9px] text-slate-400">DIRECT ELIGIBLE</div>
+                <div className="text-sm font-bold text-emerald-300">
+                  {discovery.evidence_synthesis.eligible_direct_count}
+                </div>
+              </div>
+              <div className="rounded border border-[#1e2638] bg-[#0d111a] p-2">
+                <div className="text-[9px] text-slate-400">SUPPORTING</div>
+                <div className="text-sm font-bold text-cyan-300">
+                  {discovery.evidence_synthesis.eligible_supporting_count}
+                </div>
+              </div>
+              <div className="rounded border border-[#1e2638] bg-[#0d111a] p-2">
+                <div className="text-[9px] text-slate-400">LIMITED / INDIRECT</div>
+                <div className="text-sm font-bold text-amber-200">
+                  {discovery.evidence_synthesis.limited_or_indirect_count}
+                </div>
+              </div>
+              <div className="rounded border border-[#1e2638] bg-[#0d111a] p-2">
+                <div className="text-[9px] text-slate-400">CONTRADICTING</div>
+                <div className="text-sm font-bold text-rose-300">
+                  {discovery.evidence_synthesis.contradicting_count}
+                </div>
+              </div>
+              <div className="rounded border border-[#1e2638] bg-[#0d111a] p-2">
+                <div className="text-[9px] text-slate-400">INDEP / DUPES</div>
+                <div className="text-sm font-bold text-slate-200">
+                  {discovery.evidence_synthesis.independent_record_count} /{" "}
+                  {discovery.evidence_synthesis.duplicate_count}
+                </div>
+              </div>
+              <div className="rounded border border-[#1e2638] bg-[#0d111a] p-2">
+                <div className="text-[9px] text-slate-400">REJECTED / INELIG</div>
+                <div className="text-sm font-bold text-slate-300">
+                  {discovery.evidence_synthesis.ineligible_or_rejected_count}
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="overflow-x-auto">
             <table className="w-full text-left text-[11px] border-collapse">
               <thead>
@@ -701,37 +825,149 @@ export default function ScienceCampaignPage() {
                   <th className="py-2 pr-3">Requirement</th>
                   <th className="py-2 pr-3">Class</th>
                   <th className="py-2 pr-3">Essential</th>
-                  <th className="py-2 pr-3">State</th>
+                  <th className="py-2 pr-3">State / Canonical</th>
                   <th className="py-2 pr-3">Instruments</th>
-                  <th className="py-2">Limitations &amp; Prohibited Substitutions</th>
+                  <th className="py-2">Limitations, Threshold Class &amp; Resolution Path</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#1e2638]">
                 {discovery.requirements_evaluation.map((req) => (
-                  <tr key={req.requirement_id} className="text-slate-300">
-                    <td className="py-2 pr-3 font-semibold text-white">{req.label}</td>
+                  <tr key={req.requirement_id} className="text-slate-300 align-top">
+                    <td className="py-2 pr-3 font-semibold text-white">
+                      {req.label}
+                      {req.required_spatial_scale_m != null && (
+                        <div className="text-[10px] font-mono text-slate-400">
+                          Req scale: &le;{req.required_spatial_scale_m} m
+                        </div>
+                      )}
+                    </td>
                     <td className="py-2 pr-3 font-mono text-cyan-300">{req.measurement_class}</td>
                     <td className="py-2 pr-3 font-mono">{req.essential ? "YES" : "OPTIONAL"}</td>
-                    <td className="py-2 pr-3">
+                    <td className="py-2 pr-3 space-y-1">
                       <span
-                        className={`px-2 py-0.5 rounded border font-mono text-[10px] ${stateBadgeClass(
+                        className={`inline-block px-2 py-0.5 rounded border font-mono text-[10px] ${stateBadgeClass(
                           req.fulfillment_state
                         )}`}
                       >
                         {req.fulfillment_state}
                       </span>
+                      {req.canonical_state && (
+                        <div className="text-[10px] font-mono text-slate-400">
+                          Canonical: {req.canonical_state}
+                        </div>
+                      )}
                     </td>
                     <td className="py-2 pr-3 font-mono">
                       {req.satisfying_instruments.length > 0 ? req.satisfying_instruments.join(", ") : "None"}
                     </td>
-                    <td className="py-2 text-slate-400">
-                      {req.limitations_and_gaps[0] || req.prohibited_substitutions[0] || "—"}
+                    <td className="py-2 text-slate-400 space-y-0.5">
+                      <div>{req.limitations_and_gaps[0] || req.prohibited_substitutions[0] || "—"}</div>
+                      {(req.threshold_rule_classification || req.coverage_status || req.quality_status) && (
+                        <div className="text-[10px] font-mono text-slate-500">
+                          {req.threshold_rule_classification ? `Threshold: ${req.threshold_rule_classification} · ` : ""}
+                          {req.coverage_status ? `Cov: ${req.coverage_status} · ` : ""}
+                          {req.quality_status ? `Qual: ${req.quality_status}` : ""}
+                        </div>
+                      )}
+                      {req.resolution_path && req.resolution_path.length > 0 && (
+                        <div className="text-[10px] text-cyan-300">Next: {req.resolution_path[0]}</div>
+                      )}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+
+          {discovery.matched_records.length > 0 && (
+            <div className="space-y-2">
+              <div className="text-xs font-bold text-slate-200">
+                Evaluated Evidence Products &amp; 17-Dimension Eligibility ({discovery.matched_records.length})
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-64 overflow-y-auto pr-1 text-[11px]">
+                {discovery.matched_records.map((rec) => (
+                  <div
+                    key={rec.match_id}
+                    className="rounded-lg border border-[#1e2638] bg-[#0d111a] p-2.5 space-y-1"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-mono font-bold text-white truncate">
+                        {rec.instrument_id} · {rec.product_id || rec.source_id}
+                      </span>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {rec.eligibility_state && (
+                          <span
+                            className={`px-1.5 py-0.5 rounded border font-mono text-[9px] uppercase ${stateBadgeClass(
+                              rec.eligibility_state
+                            )}`}
+                          >
+                            {rec.eligibility_state}
+                          </span>
+                        )}
+                        {rec.source_type === "dataset" && (
+                          <button
+                            type="button"
+                            onClick={() => void inspectProductDetail(rec.source_id, activeQuestionId)}
+                            disabled={loadingProductInspect}
+                            className="px-2 py-0.5 rounded border border-cyan-500/40 bg-cyan-500/10 text-[9px] font-mono text-cyan-200 hover:bg-cyan-500/20"
+                          >
+                            Inspect Product
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="text-[10px] font-mono text-slate-400">
+                      Role: {rec.evidence_role || "supporting"} · Reg:{" "}
+                      {rec.spatial_registration_state || "unknown"} · Res:{" "}
+                      {rec.product_spatial_resolution_m != null
+                        ? `${rec.product_spatial_resolution_m} m`
+                        : rec.spatial_scale_m != null
+                        ? `${rec.spatial_scale_m} m`
+                        : "Unstated"}
+                      {rec.duplication_or_correlation?.is_duplicate ? " · DUPLICATE NON-INDEPENDENT" : ""}
+                    </div>
+                    {rec.product_limitations && rec.product_limitations[0] && (
+                      <div className="text-[10px] text-amber-200/90 truncate" title={rec.product_limitations[0]}>
+                        Limit: {rec.product_limitations[0]}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {inspectedProduct && (
+            <div className="rounded-lg border border-cyan-500/40 bg-[#0d111a] p-3.5 space-y-2 text-[11px]">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="font-bold text-cyan-200">
+                  Product Integrity &amp; 17-Dimension Audit: {inspectedProduct.dataset.product_id} (
+                  {inspectedProduct.dataset.id})
+                </div>
+                <span className="font-mono text-[10px] text-slate-300">
+                  Acq: {inspectedProduct.dataset.acquisition_state || inspectedProduct.dataset.status} · Eligibility:{" "}
+                  {inspectedProduct.eligibility_state} · Reg: {inspectedProduct.spatial_registration_state}
+                </span>
+              </div>
+              <div className="text-[10px] font-mono text-slate-400">
+                CRS: {inspectedProduct.dataset.coordinate_reference_system || "Unknown"} · Units:{" "}
+                {inspectedProduct.dataset.units} · Level: {inspectedProduct.dataset.processing_level} · Calibration:{" "}
+                {inspectedProduct.dataset.calibration_status} · SHA-256:{" "}
+                {inspectedProduct.dataset.sha256_checksum || "None"}
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-1.5 max-h-48 overflow-y-auto">
+                {inspectedProduct.eligibility_dimensions.map((d) => (
+                  <div key={d.dimension} className="rounded border border-[#1e2638] bg-[#121622] px-2 py-1 text-[10px]">
+                    <div className="flex items-center justify-between font-mono">
+                      <span className="text-slate-200 font-semibold">{d.dimension}</span>
+                      <span className="text-cyan-300">{d.status}</span>
+                    </div>
+                    <div className="text-slate-400">{d.detail}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div className="rounded-lg border border-amber-500/30 bg-[#0d111a] p-3 space-y-1.5">
@@ -866,12 +1102,31 @@ export default function ScienceCampaignPage() {
 
                     <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono">
                       <span className="px-1.5 py-0.5 rounded bg-slate-800 text-amber-200">
-                        Heuristic Priority: {tgt.heuristic_priority_score.toFixed(3)} (is_heuristic=
+                        Heuristic Priority:{" "}
+                        {tgt.heuristic_priority_score != null
+                          ? tgt.heuristic_priority_score.toFixed(3)
+                          : "Unprioritized"}{" "}
+                        (is_heuristic=
                         {String(tgt.prioritization_is_heuristic)})
                       </span>
                       <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
                         Sampling: {tgt.eligibility_for_sampling}
                       </span>
+                      {tgt.eligibility_decision && (
+                        <span className="px-1.5 py-0.5 rounded bg-cyan-950/50 border border-cyan-500/30 text-cyan-200">
+                          {tgt.eligibility_decision}
+                        </span>
+                      )}
+                      {tgt.scientific_confidence_state && (
+                        <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300">
+                          {tgt.scientific_confidence_state}
+                        </span>
+                      )}
+                      {tgt.spatial_registration_state && (
+                        <span className="px-1.5 py-0.5 rounded bg-slate-900 text-slate-400">
+                          Reg: {tgt.spatial_registration_state}
+                        </span>
+                      )}
                     </div>
 
                     {tgt.known_facts[0] && (
@@ -893,6 +1148,20 @@ export default function ScienceCampaignPage() {
                 );
               })}
             </div>
+
+            {evaluatedBatch.rejected_targets && evaluatedBatch.rejected_targets.length > 0 && (
+              <div className="rounded-lg border border-rose-500/30 bg-rose-950/15 p-3 space-y-1.5 text-[11px]">
+                <div className="font-bold text-rose-200">
+                  Rejected / Ineligible Targets ({evaluatedBatch.rejected_targets.length})
+                </div>
+                {evaluatedBatch.rejected_targets.map((rt) => (
+                  <div key={rt.target_id} className="text-rose-200/90 font-mono">
+                    {rt.name}: {rt.eligibility_decision || "REJECTED"} —{" "}
+                    {rt.eligibility_decision_rationale || rt.unknowns_and_gaps[0] || "Missing eligible evidence"}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </section>
@@ -1094,12 +1363,21 @@ export default function ScienceCampaignPage() {
                 >
                   {activeCampaign.freshness_state}
                 </span>
+                {activeCampaign.feasibility_state && (
+                  <span
+                    className={`px-2 py-0.5 rounded border font-mono text-[10px] uppercase ${stateBadgeClass(
+                      activeCampaign.feasibility_state
+                    )}`}
+                  >
+                    Feasibility: {activeCampaign.feasibility_state}
+                  </span>
+                )}
                 <span className="px-2 py-0.5 rounded border border-rose-500/30 bg-rose-950/20 font-mono text-[10px] text-rose-200">
                   NOT SAFETY CERTIFIED ({activeCampaign.data_classification})
                 </span>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   onClick={() => setShow3DPreview((v) => !v)}
                   className="px-2.5 py-1 rounded border border-cyan-500/40 bg-cyan-500/10 text-xs font-mono text-cyan-200 flex items-center gap-1"
@@ -1122,8 +1400,20 @@ export default function ScienceCampaignPage() {
                 >
                   Recompute Plan
                 </button>
+                <button
+                  onClick={() => void handleExportDossier(activeCampaign.campaign_id)}
+                  className="px-2.5 py-1 rounded border border-emerald-500/40 bg-emerald-500/15 text-xs font-mono text-emerald-200"
+                >
+                  Export Dossier (JSON)
+                </button>
               </div>
             </div>
+
+            {activeCampaign.survivability_disclaimer && (
+              <div className="rounded-lg border border-rose-500/30 bg-rose-950/20 px-3 py-2 text-[11px] text-rose-200">
+                {activeCampaign.survivability_disclaimer}
+              </div>
+            )}
 
             {activeCampaign.freshness_state === "stale_upstream_dependency_changed" && (
               <div className="rounded-lg border border-amber-500/40 bg-amber-950/25 p-3 text-xs text-amber-200">
@@ -1191,6 +1481,39 @@ export default function ScienceCampaignPage() {
                 </div>
               </div>
             </div>
+
+            {(activeCampaign.evaluated_inputs_and_constraints || activeCampaign.epistemic_classification) && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 text-[11px]">
+                {activeCampaign.evaluated_inputs_and_constraints && (
+                  <div className="rounded-lg border border-[#1e2638] bg-[#0d111a] p-3 space-y-1.5">
+                    <div className="font-bold text-slate-200 flex items-center justify-between">
+                      <span>Evaluated Inputs vs User-Assumed Constraints</span>
+                      <span className="font-mono text-[10px] text-slate-400">
+                        Complete: {String(Boolean(activeCampaign.constraint_evaluation_complete))}
+                      </span>
+                    </div>
+                    <pre className="text-[10px] font-mono text-slate-300 whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
+                      {JSON.stringify(activeCampaign.evaluated_inputs_and_constraints, null, 2)}
+                    </pre>
+                  </div>
+                )}
+                {activeCampaign.epistemic_classification && (
+                  <div className="rounded-lg border border-[#1e2638] bg-[#0d111a] p-3 space-y-1.5">
+                    <div className="font-bold text-slate-200">
+                      Epistemic Classification (Measured vs Modeled vs Inferred vs Unknown)
+                    </div>
+                    <div className="space-y-1 text-[10px] font-mono">
+                      {Object.entries(activeCampaign.epistemic_classification).map(([bucket, items]) => (
+                        <div key={bucket} className="text-slate-300">
+                          <span className="text-cyan-300">{bucket}:</span>{" "}
+                          {Array.isArray(items) && items.length > 0 ? items.join("; ") : "None"}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Route Alternatives */}
             {activeCampaign.alternatives.length > 0 && (
@@ -1276,6 +1599,12 @@ export default function ScienceCampaignPage() {
                       </div>
                       <div className="text-slate-300">
                         Measurements: {sp.observation_plan.measurements_to_collect.slice(0, 3).join("; ")}
+                      </div>
+                      <div className="text-slate-400 font-mono text-[10px]">
+                        Data Vol:{" "}
+                        {sp.observation_plan.estimated_data_volume_mb != null
+                          ? `${sp.observation_plan.estimated_data_volume_mb} MB`
+                          : sp.observation_plan.data_volume_status || "UNAVAILABLE (no bitrate configured)"}
                       </div>
                       <div className="text-amber-300/90">
                         Guard: {sp.observation_plan.prohibited_shortcut_notes[0] ?? "Separate visual morphology from spectroscopy."}

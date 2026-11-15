@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     HOST: str = "127.0.0.1"
     PORT: int = 8000
     TRACKING_INGEST_TOKEN: Optional[str] = None
+    OPERATOR_ACTION_TOKEN: Optional[str] = None
     
     # CORS Configuration
     CORS_ORIGINS: List[str] = [

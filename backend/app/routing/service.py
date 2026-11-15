@@ -273,26 +273,36 @@ class ScienceAwareRoutingService:
                     "target_id": tgt.id,
                     "name": tgt.name,
                     "geology_type": tgt.geology_type,
-                    "scientific_value": tgt.scientific_value,
+                    "exploration_priority_score": tgt.exploration_priority_score,
+                    "route_utility_role": "registered_science_target_stop",
                     "matched_species": tgt.matched_species,
                     "instrument_source": tgt.instrument_source,
                 }
                 stops.append(("target", tgt.latitude, tgt.longitude, tgt.name, meta))
-                science_corridor.append((tgt.latitude, tgt.longitude, max(0.5, tgt.scientific_value)))
+                if tgt.exploration_priority_score is not None:
+                    science_corridor.append(
+                        (tgt.latitude, tgt.longitude, max(0.0, float(tgt.exploration_priority_score)))
+                    )
                 nearby_lookup.append((tgt.name, tgt.latitude, tgt.longitude))
 
             # Include other registered targets near corridor for Science-Priority context
             for tgt in self.target_registry.list_targets()[:80]:
-                science_corridor.append((tgt.latitude, tgt.longitude, max(0.25, tgt.scientific_value * 0.85)))
+                if tgt.exploration_priority_score is not None:
+                    science_corridor.append(
+                        (tgt.latitude, tgt.longitude, max(0.0, float(tgt.exploration_priority_score) * 0.85))
+                    )
                 nearby_lookup.append((tgt.name, tgt.latitude, tgt.longitude))
 
         # Explicit user waypoint stops
         for idx, wp in enumerate(req.waypoints):
             label = wp.label or f"Waypoint {idx + 1}"
-            meta = {"target_id": wp.target_id, "name": label, "scientific_value": 0.7 if wp.target_id else 0.5}
+            meta = {
+                "target_id": wp.target_id,
+                "name": label,
+                "exploration_priority_score": None,
+                "route_utility_role": "explicit_waypoint_with_target" if wp.target_id else "explicit_waypoint",
+            }
             stops.append(("waypoint", wp.lat, wp.lon_east, label, meta))
-            if wp.target_id:
-                science_corridor.append((wp.lat, wp.lon_east, 0.75))
             nearby_lookup.append((label, wp.lat, wp.lon_east))
 
         # Query CompositionSearchService around start/destination corridor if index available
@@ -775,7 +785,8 @@ class ScienceAwareRoutingService:
                     lat=round(s_info[1], 7),
                     lon_east=round(s_info[2], 7),
                     geology_type=meta.get("geology_type"),
-                    scientific_value=meta.get("scientific_value"),
+                    exploration_priority_score=meta.get("exploration_priority_score"),
+                    route_utility_role=meta.get("route_utility_role"),
                     matched_species=meta.get("matched_species"),
                     instrument_source=meta.get("instrument_source"),
                     visit_order_index=idx + 1,
@@ -1087,8 +1098,8 @@ class ScienceAwareRoutingService:
                 "name": s.name,
                 "matched_species": s.matched_species,
                 "instrument_source": s.instrument_source,
-                "scientific_value": s.scientific_value,
-                "role": "verified_science_target_or_composition_stop",
+                "exploration_priority_score": s.exploration_priority_score,
+                "role": s.route_utility_role or "verified_science_target_or_composition_stop",
             }
             for s in sci_reached
         ]

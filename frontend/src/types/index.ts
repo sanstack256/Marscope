@@ -77,12 +77,17 @@ export interface Dataset {
   file_size_bytes?: number | null;
   sha256_checksum?: string | null;
   status: string;
+  acquisition_state?: string | null;
   verification: MetadataVerification;
   failure_reason?: string | null;
+  validation_report?: Record<string, unknown> | null;
+  raw_product_immutable?: boolean;
+  processing_provenance?: Record<string, unknown> | null;
   quality_flags: string[];
   known_limitations: string[];
   processing_history: string[];
   local_file_path?: string | null;
+  local_label_path?: string | null;
   processed_file_path?: string | null;
 }
 
@@ -821,8 +826,12 @@ export interface ScienceTarget {
   elevation_m?: number | null;
   crs?: string;
   geology_type: string;
-  scientific_value: number;
+  scientific_value?: number | null;
   exploration_priority_score?: number | null;
+  scientific_confidence_state?: string | null;
+  scientific_confidence_score?: number | null;
+  scientific_evidence_summary?: string | null;
+  route_utility?: Record<string, unknown> | null;
   prioritization_is_heuristic?: boolean;
   prioritization_label?: string;
   prioritization_breakdown?: Record<string, unknown>;
@@ -2446,7 +2455,15 @@ export interface InstrumentCapabilityRecord {
   study_region_scope: string;
   platform_kind: InstrumentPlatformKind;
   measurement_class: MeasurementClass;
-  typical_spatial_scale_m: number;
+  typical_spatial_scale_m?: number | null;
+  registry_entry_id?: string;
+  registry_version?: string;
+  verification_status?: string;
+  measurement_modality?: string;
+  physical_quantity_measured?: string;
+  measurement_method?: string;
+  unresolved_fields?: string[];
+  source_references?: Array<Record<string, string>>;
   measured_observables: string[];
   allowed_inferences: string[];
   prohibited_inferences: string[];
@@ -2491,6 +2508,11 @@ export interface ScienceQuestionDefinition {
   required_measurement_specs: MeasurementRequirementSpec[];
   preferred_stop_count: number;
   minimum_evidence_note: string;
+  competing_hypotheses?: string[];
+  alternative_explanations?: string[];
+  contradicting_evidence_criteria?: string[];
+  unresolved_assumptions?: string[];
+  current_evidence_state?: string;
   created_at_utc: string;
 }
 
@@ -2510,6 +2532,17 @@ export interface RequirementEvaluationRecord {
   measurement_class: MeasurementClass;
   essential: boolean;
   fulfillment_state: RequirementFulfillmentState;
+  canonical_state?: string;
+  required_measurement?: string[];
+  required_spatial_scale_m?: number | null;
+  threshold_rule_classification?: string | null;
+  threshold_rationale?: string | null;
+  evidence_eligibility_summary?: Record<string, number>;
+  coverage_status?: string;
+  quality_status?: string;
+  missing_information?: string[];
+  failure_reason?: string | null;
+  resolution_path?: string[];
   satisfying_source_ids: string[];
   satisfying_instruments: string[];
   matched_evidence_count: number;
@@ -2521,12 +2554,30 @@ export interface EvidenceMatchRecord {
   match_id: string;
   source_type: string;
   source_id: string;
+  product_id?: string | null;
   instrument_id: string;
   mission_host: string;
   study_region: string;
   dataset_status: string;
+  eligibility_state?: string;
+  eligibility_dimensions?: EvidenceEligibilityDimensionRecord[];
+  evidence_role?: string;
+  evidence_role_rationale?: string | null;
+  scientific_relevance?: string;
   evidence_strength: EvidenceMatchStrength;
   spatial_scale_m?: number | null;
+  product_spatial_resolution_m?: number | null;
+  product_footprint_bounds?: Record<string, number> | null;
+  processing_level?: string | null;
+  coordinate_reference?: string | null;
+  units?: string | null;
+  calibration_status?: string | null;
+  integrity_status?: string | null;
+  spatial_registration_state?: string;
+  product_limitations?: string[];
+  uncertainty_summary?: Record<string, unknown>;
+  duplication_or_correlation?: Record<string, unknown> | null;
+  provenance_chain?: string[];
   matched_observables: string[];
   scale_mismatch_warning?: string | null;
   prohibited_inference_guard?: string | null;
@@ -2541,6 +2592,9 @@ export interface QuestionEvidenceDiscoveryResponse {
   requirements_evaluation: RequirementEvaluationRecord[];
   overall_evidence_readiness: string;
   critical_data_gaps: string[];
+  evidence_synthesis?: EvidenceSynthesisSummary | null;
+  spatial_registrations?: Array<Record<string, unknown>>;
+  provenance_graph?: ScienceProvenanceGraph | null;
   discovered_at_utc: string;
 }
 
@@ -2573,7 +2627,18 @@ export interface CandidateTargetEvaluation {
   inferred_context: string[];
   unknowns_and_gaps: string[];
   conflicting_records: string[];
-  heuristic_priority_score: number;
+  heuristic_priority_score: number | null;
+  exploration_priority?: number | null;
+  scientific_evidence_summary?: Record<string, unknown> | null;
+  scientific_relevance?: string;
+  route_utility?: Record<string, unknown> | null;
+  scientific_confidence_state?: string;
+  scientific_confidence_score?: number | null;
+  evidence_eligibility_states?: string[];
+  spatial_registration_state?: string;
+  uncertainty_notes?: string[];
+  eligibility_decision?: string;
+  eligibility_decision_rationale?: string;
   prioritization_is_heuristic: boolean;
   prioritization_breakdown: Record<string, unknown>;
   eligibility_for_sampling: string;
@@ -2585,6 +2650,7 @@ export interface TargetEvaluationBatchResponse {
   question_id: string;
   evaluated_at_utc: string;
   targets: CandidateTargetEvaluation[];
+  rejected_targets?: CandidateTargetEvaluation[];
   state_counts: Record<string, number>;
   prioritization_disclaimer: string;
 }
@@ -2598,7 +2664,8 @@ export interface ObservationActionPlan {
   context_imaging_checks: string[];
   calibration_or_reference_checks: string[];
   expected_dwell_s: number;
-  estimated_data_volume_mb: number;
+  estimated_data_volume_mb: number | null;
+  data_volume_status?: string;
   explicit_uncertainty_notes: string[];
   prohibited_shortcut_notes: string[];
 }
@@ -2624,7 +2691,7 @@ export interface CampaignStopPlan {
   longitude_east: number;
   evidence_state: InvestigationTargetEvidenceState;
   dwell_s: number;
-  heuristic_priority_score: number;
+  heuristic_priority_score: number | null;
   known_summary: string[];
   unknown_summary: string[];
   observation_plan: ObservationActionPlan;
@@ -2685,6 +2752,7 @@ export interface CampaignSummary {
   question_id: string;
   dataset_id: string;
   plan_status: CampaignPlanStatus;
+  feasibility_state?: string;
   freshness_state: CampaignFreshnessState;
   stop_count: number;
   total_distance_m?: number | null;
@@ -2708,6 +2776,11 @@ export interface ScienceCampaignPlan {
   dataset_id: string;
   study_region: string;
   plan_status: CampaignPlanStatus;
+  feasibility_state?: string;
+  evaluated_inputs_and_constraints?: Record<string, unknown>;
+  epistemic_classification?: Record<string, string[]>;
+  constraint_evaluation_complete?: boolean;
+  survivability_disclaimer?: string;
   freshness_state: CampaignFreshnessState;
   staleness_reasons: string[];
   dependency_signature: string;
@@ -2790,4 +2863,76 @@ export interface ObservationArchiveComparison {
 export interface IngestionLedgerResponse {
   acquisition_ledger: Array<Record<string, unknown>>;
   query_provenance: Array<Record<string, unknown>>;
+}
+
+export interface EvidenceEligibilityDimensionRecord {
+  dimension: string;
+  status: string;
+  detail: string;
+  source_reference?: string | null;
+}
+
+export interface EvidenceSynthesisSummary {
+  total_records_inspected: number;
+  eligible_direct_count: number;
+  eligible_supporting_count: number;
+  limited_or_indirect_count: number;
+  contradicting_count: number;
+  inconclusive_count: number;
+  ineligible_or_rejected_count: number;
+  duplicate_count: number;
+  independent_record_count: number;
+  has_contradictions: boolean;
+  unresolved_gaps: string[];
+  synthesis_notes: string[];
+}
+
+export interface ProvenanceGraphNode {
+  node_id: string;
+  node_type: string;
+  label: string;
+  status?: string | null;
+  checksum_sha256?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ProvenanceGraphEdge {
+  source_id: string;
+  target_id: string;
+  relationship: string;
+  notes?: string | null;
+}
+
+export interface ScienceProvenanceGraph {
+  graph_version?: string;
+  root_entity_id?: string | null;
+  nodes: ProvenanceGraphNode[];
+  edges: ProvenanceGraphEdge[];
+  generated_at_utc?: string;
+}
+
+export interface ProductDetailInspectionResponse {
+  dataset: Dataset;
+  classified_instrument: string;
+  question_id: string;
+  eligibility_state: string;
+  evidence_role: string;
+  evidence_role_rationale: string;
+  scientific_relevance: string;
+  eligibility_dimensions: EvidenceEligibilityDimensionRecord[];
+  spatial_registration_state: string;
+  spatial_registration_report: Record<string, unknown>;
+  uncertainty_summary: Record<string, unknown>;
+  provenance_chain: string[];
+}
+
+export interface CampaignDossierExport {
+  dossier_version: string;
+  exported_at_utc: string;
+  operational_safety_certified: boolean;
+  campaign: Record<string, unknown>;
+  freshness: Record<string, unknown>;
+  evidence_discovery: Record<string, unknown>;
+  recorded_field_observations: Array<Record<string, unknown>>;
+  archive_comparisons: Array<Record<string, unknown>>;
 }

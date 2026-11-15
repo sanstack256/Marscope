@@ -11,6 +11,7 @@ import hashlib
 import json
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.eva_operations.constraints import evaluate_eva_constraints
@@ -34,6 +35,7 @@ from app.science.investigation.requirements import evaluate_question_requirement
 from app.science.investigation.sampling_plan import build_sampling_protocol
 from app.science.investigation.schemas import (
     CampaignBuildRequest,
+    CampaignFeasibilityModelState,
     CampaignFreshnessReport,
     CampaignFreshnessState,
     CampaignPlanStatus,
@@ -53,6 +55,30 @@ from app.science.provenance_graph import (
 )
 
 
+def _artifact_fingerprint(path_str: Optional[str], catalog_service: Any = None) -> Optional[Dict[str, Any]]:
+    if not path_str:
+        return None
+    p: Optional[Path] = None
+    if catalog_service is not None and hasattr(catalog_service, "_resolve_path"):
+        p = catalog_service._resolve_path(path_str)
+    else:
+        p = Path(path_str)
+    if p is None or not p.exists() or not p.is_file():
+        return {"path": str(path_str), "exists": False}
+    st = p.stat()
+    info: Dict[str, Any] = {"path": str(p.name), "exists": True, "size_bytes": st.st_size}
+    # Full SHA-256 directly for companion labels / manifests / format files <= 10 MB
+    if st.st_size <= 10 * 1024 * 1024:
+        h = hashlib.sha256()
+        with open(p, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        info["sha256"] = h.hexdigest()
+    else:
+        info["mtime_ns"] = st.st_mtime_ns
+    return info
+
+
 def compute_dependency_snapshot_and_hash(
     *,
     req: CampaignBuildRequest,
@@ -60,19 +86,62 @@ def compute_dependency_snapshot_and_hash(
     selected_targets: List[CandidateTargetEvaluation],
     catalog_service: Any,
     composition_index: Any,
+    recorded_observations: Optional[List[Any]] = None,
 ) -> Tuple[str, Dict[str, Any]]:
-    """Compute a reproducible snapshot + SHA-256 signature of all upstream inputs."""
+    """
+    Compute a reproducible snapshot + SHA-256 signature tracking raw PDS artifacts,
+    companion labels/manifests, processed DEM + .processing.json, composition index
+    generation & manifest digest, science question, targets, field observations,
+    and transformation algorithm version.
+    """
     ds = catalog_service.get_dataset(req.dataset_id) if catalog_service else None
     comp_st = composition_index.get_status() if composition_index else None
+
+    proc_manifest_fp: Optional[Dict[str, Any]] = None
+    if ds and ds.processed_file_path and catalog_service and hasattr(catalog_service, "_resolve_path"):
+        proc_p = catalog_service._resolve_path(ds.processed_file_path)
+        if proc_p is not None:
+            cand_json = proc_p.with_name(f"{req.dataset_id}.processing.json")
+            if cand_json.exists():
+                proc_manifest_fp = _artifact_fingerprint(str(cand_json), None)
+
+    target_ids_set = {t.target_id for t in selected_targets}
+    relevant_obs = []
+    for obs in (recorded_observations or []):
+        tid = getattr(obs, "target_id", None)
+        cid = getattr(obs, "campaign_id", None)
+        near = False
+        if selected_targets and getattr(obs, "latitude", None) is not None and getattr(obs, "longitude_east", None) is not None:
+            for t in selected_targets:
+                if mars_great_circle_distance_meters(t.latitude, t.longitude_east, float(obs.latitude), float(obs.longitude_east)) <= 500.0:
+                    near = True
+                    break
+        if (tid and tid in target_ids_set) or (req.campaign_id and cid == req.campaign_id) or near:
+            relevant_obs.append(
+                {
+                    "observation_id": getattr(obs, "observation_id", ""),
+                    "species": getattr(obs, "species_or_feature", ""),
+                    "measured_value": str(getattr(obs, "measured_value", "")),
+                    "quality_flag": getattr(obs, "quality_flag", ""),
+                }
+            )
+    relevant_obs.sort(key=lambda o: o["observation_id"])
+
     snapshot: Dict[str, Any] = {
+        "schema_version": "2.0.0-p18",
         "dataset": {
             "dataset_id": req.dataset_id,
             "status": ds.status.value if ds else "missing",
             "sha256": ds.sha256_checksum if ds else None,
-            "processed_file": ds.processed_file_path if ds else None,
+            "raw_file": _artifact_fingerprint(ds.local_file_path, catalog_service) if ds else None,
+            "label_file": _artifact_fingerprint(ds.local_label_path, catalog_service) if ds else None,
+            "processed_file": _artifact_fingerprint(ds.processed_file_path, catalog_service) if ds else None,
+            "processing_manifest": proc_manifest_fp,
         },
         "composition_index": {
             "active_generation_id": getattr(comp_st, "active_generation_id", None) if comp_st else None,
+            "source_artifact_digest": getattr(comp_st, "source_artifact_digest", None) if comp_st else None,
+            "complete_manifest_digest": getattr(comp_st, "complete_manifest_digest", None) if comp_st else None,
             "checksum_valid": getattr(comp_st, "checksum_valid", None) if comp_st else None,
             "crism_status": getattr(comp_st, "crism_status", None) if comp_st else None,
         },
@@ -94,6 +163,7 @@ def compute_dependency_snapshot_and_hash(
             }
             for t in sorted(selected_targets, key=lambda item: item.target_id)
         ],
+        "recorded_observations": relevant_obs,
         "mission_params": {
             "start": req.start.model_dump(mode="json"),
             "destination": req.destination.model_dump(mode="json") if req.destination else None,
@@ -126,7 +196,7 @@ def evaluate_campaign_freshness(
     composition_index: Any,
     recorded_observations: List[Any],
 ) -> CampaignFreshnessReport:
-    """Re-evaluate upstream dataset, index, question, and target dependencies against stored snapshot."""
+    """Re-evaluate upstream dataset, index, question, observations, and target dependencies."""
     reasons: List[str] = []
     if question is None:
         reasons.append(f"Science question '{plan.question.question_id}' was deleted or modified.")
@@ -138,7 +208,6 @@ def evaluate_campaign_freshness(
             staleness_reasons=reasons,
         )
 
-    # Re-evaluate the target coordinates currently associated with the stored stop plans
     stored_target_ids = [sp.target_id for sp in plan.stop_plans]
     current_evals: List[CandidateTargetEvaluation] = []
     if stored_target_ids:
@@ -163,28 +232,29 @@ def evaluate_campaign_freshness(
             if sp.target_id in by_id:
                 current_evals.append(by_id[sp.target_id])
             else:
-                # Reconstruct prior target shape from stored snapshot if discovery wasn't cached
                 current_evals = list(plan.request.candidate_targets)
                 break
 
-    # Normalize against snapshot structure
     current_hash, current_snap = compute_dependency_snapshot_and_hash(
         req=plan.request.model_copy(update={"candidate_targets": current_evals or plan.request.candidate_targets}),
         question=question,
         selected_targets=current_evals or plan.request.candidate_targets,
         catalog_service=catalog_service,
         composition_index=composition_index,
+        recorded_observations=recorded_observations,
     )
 
     old_snap = plan.dependency_snapshot or {}
     if old_snap.get("dataset") != current_snap.get("dataset"):
-        reasons.append("Upstream terrain dataset status, SHA-256, or processed artifact changed.")
+        reasons.append("Upstream terrain dataset status, raw/label SHA-256, or processed DEM artifact changed.")
     if old_snap.get("composition_index") != current_snap.get("composition_index"):
-        reasons.append("Composition spatial index generation, checksum, or CRISM availability changed.")
+        reasons.append("Composition spatial index generation, manifest digest, checksum, or CRISM status changed.")
     if old_snap.get("question") != current_snap.get("question"):
         reasons.append("Science question definition or required measurement specs changed.")
     if old_snap.get("targets") != current_snap.get("targets"):
         reasons.append("Target observation counts, evidence state, or coordinates changed since plan creation.")
+    if old_snap.get("recorded_observations") != current_snap.get("recorded_observations"):
+        reasons.append("New or modified field observations affect planned targets or campaign provenance.")
 
     stale = bool(reasons) or (current_hash != plan.dependency_signature)
     return CampaignFreshnessReport(
@@ -480,8 +550,8 @@ def _run_route_and_eva_for_stops(
             input_datasets=[req.dataset_id],
             input_product_ids=[route.source_product_id],
             input_variables=["multi_stop_route", "return_route", "eva_constraints"],
-            method="campaign_eva_envelope_v1",
-            algorithm_version="prompt17_campaign_v1",
+            method="campaign_eva_envelope_v2",
+            algorithm_version="2.0.0-p18",
             validation_state="analytical_planning_envelope_not_safety_certified",
         ),
         created_at_utc=datetime.now(timezone.utc).isoformat(),
@@ -590,6 +660,7 @@ def build_science_campaign_plan(
         selected_targets=selected_evals,
         catalog_service=catalog_service,
         composition_index=composition_index,
+        recorded_observations=recorded_observations,
     )
     campaign_id = req.campaign_id or ("camp_" + dep_sig[:12])
 
@@ -602,9 +673,30 @@ def build_science_campaign_plan(
             dataset_id=req.dataset_id,
             study_region=question.study_region,
             plan_status=CampaignPlanStatus.DATA_INSUFFICIENT,
+            feasibility_state=CampaignFeasibilityModelState.BLOCKED_BY_UNKNOWN_INPUTS,
             freshness_state=CampaignFreshnessState.CURRENT,
             dependency_signature=dep_sig,
             dependency_snapshot=dep_snap,
+            constraint_evaluation_complete=False,
+            evaluated_inputs_and_constraints={
+                "max_slope_deg": req.constraints.max_slope_deg,
+                "walking_speed_mps": req.walking_speed_mps,
+                "mission_duration_limit_s": req.mission_duration_limit_s,
+                "return_reserve_fraction": req.return_reserve_fraction,
+                "resources_count": len(req.resources),
+                "targets_selected": 0,
+                "explicit_destination_supplied": False,
+            },
+            epistemic_classification={
+                "computed": [],
+                "modelled": [],
+                "user_assumed": [
+                    f"max_slope_deg={req.constraints.max_slope_deg}",
+                ],
+                "unavailable": ["target_stops", "destination_coordinate"],
+                "unverified": [],
+                "constraint_excluded": [],
+            },
             request=req,
             requirements_evaluation=req_evals,
             missing_inputs=["No verified targets or explicit destination coordinates selected."],
@@ -615,8 +707,8 @@ def build_science_campaign_plan(
                 output_id=campaign_id,
                 classification=ScientificDataClassification.UNAVAILABLE,
                 input_datasets=[req.dataset_id],
-                method="campaign_build_v1",
-                algorithm_version="prompt17_campaign_v1",
+                method="campaign_build_v2",
+                algorithm_version="2.0.0-p18",
                 validation_state="data_insufficient_no_targets",
             ),
             compute_time_ms=round((time.perf_counter() - t0) * 1000.0, 2),
@@ -684,7 +776,7 @@ def build_science_campaign_plan(
                 ("Conservative Hazard-Averse Corridor", "Minimize slope/uncertainty exposure across all stops", RoutingMode.CONSERVATIVE, ordered_stops)
             )
         if len(ordered_stops) >= 2:
-            subset = sorted(ordered_stops, key=lambda s: -s.heuristic_priority_score)[: max(1, len(ordered_stops) - 1)]
+            subset = sorted(ordered_stops, key=lambda s: -(s.heuristic_priority_score or 0.0))[: max(1, len(ordered_stops) - 1)]
             subset_nn = _greedy_nn_order(req.start, subset)
             alt_specs.append(
                 ("Time-Saving High-Priority Subset", "Reduced stop count focusing on highest-priority stop(s) if budget is tight", RoutingMode.SCIENCE_PRIORITY, subset_nn)
@@ -713,17 +805,67 @@ def build_science_campaign_plan(
         }
         for r in req_evals
     )
+    missing_list = eva_env.missing_inputs if eva_env else ["walking_speed_mps", "mission_duration_limit_s"]
     if (
         primary_route is None
         or return_plan is None
         or not return_plan.return_route_computed
         or (eva_env and eva_env.envelope_status == EnvelopeFeasibilityStatus.EXCEEDS_CONFIGURED_CONSTRAINTS)
     ):
-        plan_status = CampaignPlanStatus.INFEASIBLE_UNDER_CONSTRAINTS
-    elif essential_missing or primary_cand.feasible_within_constraints is None:
+        plan_status = CampaignPlanStatus.INFEASIBLE_UNDER_CONFIGURED_CONSTRAINTS if False else CampaignPlanStatus.INFEASIBLE_UNDER_CONSTRAINTS
+        feasibility_state = CampaignFeasibilityModelState.INFEASIBLE_UNDER_CONFIGURED_MODEL
+        constraint_complete = eva_env is not None and not missing_list
+    elif missing_list or (eva_env and eva_env.envelope_status == EnvelopeFeasibilityStatus.INCOMPLETE_USER_CONSTRAINTS):
+        plan_status = CampaignPlanStatus.PARTIAL_MISSING_OBSERVATIONS if essential_missing or primary_cand.feasible_within_constraints is None else CampaignPlanStatus.COMPLETE_CONSTRAINED_PLAN
+        feasibility_state = CampaignFeasibilityModelState.INCOMPLETE_CONSTRAINT_EVALUATION
+        constraint_complete = False
+    elif essential_missing:
         plan_status = CampaignPlanStatus.PARTIAL_MISSING_OBSERVATIONS
+        feasibility_state = CampaignFeasibilityModelState.FEASIBLE_UNDER_CONFIGURED_MODEL
+        constraint_complete = True
     else:
         plan_status = CampaignPlanStatus.COMPLETE_CONSTRAINED_PLAN
+        feasibility_state = CampaignFeasibilityModelState.FEASIBLE_UNDER_CONFIGURED_MODEL
+        constraint_complete = True
+
+    evaluated_inputs = {
+        "max_slope_deg": req.constraints.max_slope_deg,
+        "routing_mode": req.routing_mode.value,
+        "walking_speed_mps": req.walking_speed_mps,
+        "use_tobler_grade_approximation": req.use_tobler_grade_approximation,
+        "mission_duration_limit_s": req.mission_duration_limit_s,
+        "return_reserve_fraction": req.return_reserve_fraction,
+        "astronaut_suit_mass_kg": req.astronaut_suit_mass_kg,
+        "payload_mass_kg": req.payload_mass_kg,
+        "resources_configured": [r.resource_name for r in req.resources],
+        "independent_return_route_computed": bool(return_plan and return_plan.return_route_computed),
+    }
+    unverified_targets = [
+        s.name for s in ordered_stops
+        if s.evidence_state.value in {"optical_morphology_candidate_unverified", "manual_waypoint_unverified", "conflicting_evidence"}
+    ]
+    epistemic_cls = {
+        "computed": [
+            "outbound_surface_distance_and_elevation_gain" if primary_route else "route_computation_failed",
+            "independent_reverse_dijkstra_return_path" if (return_plan and return_plan.return_route_computed) else "return_path_unavailable",
+        ],
+        "modelled": [
+            "tobler_grade_duration" if req.use_tobler_grade_approximation else "constant_walking_speed_duration",
+            "mechanical_climb_work_energy_budget" if (eva_env and eva_env.energy_budget.available) else "energy_budget_uncomputed",
+        ],
+        "user_assumed": [
+            f"max_slope_deg={req.constraints.max_slope_deg}",
+            f"default_stop_dwell_s={req.default_stop_dwell_s}",
+            *( [f"walking_speed_mps={req.walking_speed_mps}"] if req.walking_speed_mps is not None else [] ),
+            *( [f"mission_duration_limit_s={req.mission_duration_limit_s}"] if req.mission_duration_limit_s is not None else [] ),
+            *( [f"return_reserve_fraction={req.return_reserve_fraction}"] if req.return_reserve_fraction is not None else [] ),
+        ],
+        "unavailable": list(dict.fromkeys(missing_list + ["stop_data_volume_mb (no telemetry bitrate configured)"])),
+        "unverified": unverified_targets,
+        "constraint_excluded": [
+            a.label for a in alternatives if a.feasible_within_constraints is False
+        ],
+    }
 
     uncertainty_and_gaps: List[str] = []
     for r in req_evals:
@@ -774,9 +916,13 @@ def build_science_campaign_plan(
         dataset_id=req.dataset_id,
         study_region=question.study_region,
         plan_status=plan_status,
+        feasibility_state=feasibility_state,
         freshness_state=CampaignFreshnessState.CURRENT,
         dependency_signature=dep_sig,
         dependency_snapshot=dep_snap,
+        evaluated_inputs_and_constraints=evaluated_inputs,
+        epistemic_classification=epistemic_cls,
+        constraint_evaluation_complete=constraint_complete,
         operational_safety_certified=False,
         request=req,
         requirements_evaluation=req_evals,
@@ -796,8 +942,8 @@ def build_science_campaign_plan(
             input_datasets=[req.dataset_id],
             input_product_ids=[primary_route.source_product_id] if primary_route else [],
             input_variables=["science_question", "target_evaluations", "dem_corridor", "eva_constraints"],
-            method="executable_science_campaign_planner_v1",
-            algorithm_version="prompt17_campaign_v1",
+            method="executable_science_campaign_planner_v2",
+            algorithm_version="2.0.0-p18",
             parameters={
                 "question_id": question.question_id,
                 "routing_mode": req.routing_mode.value,
@@ -812,7 +958,7 @@ def build_science_campaign_plan(
                     classification=ScientificDataClassification.ARCHIVE_DERIVED,
                     input_ids=[question.question_id],
                     method="target_registry_plus_composition_index_audit",
-                    algorithm_version="prompt17_eval_v1",
+                    algorithm_version="2.0.0-p18",
                     output_variable="evaluated_stops",
                 ),
                 ProvenanceStep(
@@ -821,7 +967,7 @@ def build_science_campaign_plan(
                     classification=ScientificDataClassification.MARSCOPE_DERIVED,
                     input_ids=[req.dataset_id, *(s.target_id for s in stop_plans)],
                     method="terrain_astar_plus_reverse_dijkstra_eva",
-                    algorithm_version="routing_v2_plus_eva_v2",
+                    algorithm_version="2.0.0-p18",
                     output_variable="campaign_plan",
                     output_units="m_and_s",
                 ),

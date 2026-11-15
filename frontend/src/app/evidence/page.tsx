@@ -22,6 +22,9 @@ export default function EvidenceProvenancePage() {
   const [manifest, setManifest] = useState<ReproducibilityManifest | null>(null);
   const [rejectedRecords, setRejectedRecords] = useState<RejectionRecord[]>([]);
   const [rebuildingIndex, setRebuildingIndex] = useState<boolean>(false);
+  const [operatorToken, setOperatorToken] = useState<string>(() =>
+    typeof window !== "undefined" ? window.sessionStorage.getItem("marscope_operator_token") || "" : ""
+  );
   const [loading, setLoading] = useState<boolean>(true);
   const [busyDatasetId, setBusyDatasetId] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
@@ -89,14 +92,29 @@ export default function EvidenceProvenancePage() {
     };
   }, []);
 
+  function operatorHeaders(): Record<string, string> {
+    return operatorToken.trim() ? { "X-Mars-Operator-Token": operatorToken.trim() } : {};
+  }
+
   async function handleRebuildCompositionIndex() {
     setRebuildingIndex(true);
     setActionMessage(null);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE_URL}/composition/index/rebuild`, { method: "POST" });
-      if (!res.ok) throw new Error(`HTTP ${res.status} rebuilding composition index`);
-      const st: CompositionIndexStatus = await res.json();
+      const res = await fetch(`${API_BASE_URL}/composition/index/rebuild`, {
+        method: "POST",
+        headers: operatorHeaders(),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          data.detail ||
+            `HTTP ${res.status} rebuilding composition index${
+              res.status === 401 || res.status === 403 ? " (enter Operator Token)" : ""
+            }`
+        );
+      }
+      const st: CompositionIndexStatus = data;
       setIndexStatus(st);
       setActionMessage(
         `Rebuilt SQLite R*Tree composition index (${st.active_generation_id}): ${st.located_evidence_count} located, ${st.unlocated_evidence_count} unlocated, ${st.rejected_record_count} rejected.`
@@ -118,7 +136,7 @@ export default function EvidenceProvenancePage() {
         action === "process"
           ? `${API_BASE_URL}/datasets/${encodeURIComponent(datasetId)}/process`
           : `${API_BASE_URL}/datasets/${encodeURIComponent(datasetId)}/${action}`;
-      const res = await fetch(url, { method: "POST" });
+      const res = await fetch(url, { method: "POST", headers: operatorHeaders() });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         throw new Error(data.detail || `HTTP ${res.status} running ${action} on ${datasetId}`);
@@ -136,10 +154,13 @@ export default function EvidenceProvenancePage() {
     setLoading(true);
     setActionMessage(null);
     try {
-      const res = await fetch(`${API_BASE_URL}/datasets/discover`, { method: "POST" });
-      if (!res.ok) throw new Error(`HTTP ${res.status} discovering sources`);
-      const discovered = await res.json();
-      setActionMessage(`Refreshed catalog from NASA source adapters (${discovered.length} records).`);
+      const res = await fetch(`${API_BASE_URL}/datasets/discover`, {
+        method: "POST",
+        headers: operatorHeaders(),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status} discovering sources`);
+      setActionMessage(`Refreshed catalog from NASA source adapters (${data.length} records).`);
       await refreshAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Source discovery failed");
@@ -242,9 +263,12 @@ export default function EvidenceProvenancePage() {
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm font-bold text-slate-100">{ds.product_title}</span>
                       <StatusBadge status={ds.status === "processed" || ds.status === "validated" ? "verified" : ds.status} label={ds.status} />
+                      {ds.acquisition_state && (
+                        <StatusBadge status={ds.acquisition_state} label={`Acq: ${ds.acquisition_state}`} />
+                      )}
                     </div>
                     <div className="text-[11px] font-mono text-slate-400">
-                      ID: {ds.id} · Product: {ds.product_id} · {ds.data_format} · {ds.license} · Units: {ds.units}
+                      ID: {ds.id} · Product: {ds.product_id} · {ds.data_format} · {ds.license} · Units: {ds.units} · Level: {ds.processing_level} · Calibration: {ds.calibration_status}
                     </div>
                     <div className="text-[11px] text-slate-400">
                       Coverage: Lat [{ds.coverage.min_latitude}°, {ds.coverage.max_latitude}°], Lon [{ds.coverage.min_longitude}°, {ds.coverage.max_longitude}°] ({ds.coverage.longitude_range}) · CRS: {ds.coordinate_reference_system || "Unknown"}
@@ -331,15 +355,29 @@ export default function EvidenceProvenancePage() {
             <Database className="w-4 h-4 text-emerald-400" />
             <span>Composition Spatial Index (SQLite R*Tree) &amp; Validation Audit</span>
           </div>
-          <button
-            type="button"
-            onClick={handleRebuildCompositionIndex}
-            disabled={rebuildingIndex}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#161c2b] hover:bg-[#1e263b] border border-[#252f44] text-xs font-medium text-slate-200 disabled:opacity-50"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${rebuildingIndex ? "animate-spin" : ""}`} />
-            <span>{rebuildingIndex ? "Rebuilding Index..." : "Rebuild Composition Index"}</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              type="password"
+              value={operatorToken}
+              onChange={(e) => {
+                setOperatorToken(e.target.value);
+                if (typeof window !== "undefined") {
+                  window.sessionStorage.setItem("marscope_operator_token", e.target.value);
+                }
+              }}
+              placeholder="Operator Token (for rebuild/ingest)"
+              className="px-2.5 py-1.5 rounded-lg bg-[#0d111a] border border-[#252f44] text-xs font-mono text-slate-200 w-56"
+            />
+            <button
+              type="button"
+              onClick={handleRebuildCompositionIndex}
+              disabled={rebuildingIndex}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#161c2b] hover:bg-[#1e263b] border border-[#252f44] text-xs font-medium text-slate-200 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${rebuildingIndex ? "animate-spin" : ""}`} />
+              <span>{rebuildingIndex ? "Rebuilding Index..." : "Rebuild Composition Index"}</span>
+            </button>
+          </div>
         </div>
 
         {indexStatus && (

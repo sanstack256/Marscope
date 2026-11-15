@@ -9,6 +9,7 @@ explicit traversal cost surfaces.
 
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query, status
+from app.core.security import validate_identifier
 
 from app.mobility.schemas import (
     CostSurfaceSummary,
@@ -29,26 +30,31 @@ router = APIRouter(prefix="/mobility", tags=["Human Mobility Intelligence Engine
 
 
 def _validate_bounds_query(
-    min_lat: float,
-    max_lat: float,
-    min_lon: float,
-    max_lon: float,
+    min_lat: Optional[float],
+    max_lat: Optional[float],
+    min_lon: Optional[float],
+    max_lon: Optional[float],
 ) -> dict:
-    if min_lat >= max_lat:
+    if any(v is None for v in (min_lat, max_lat, min_lon, max_lon)):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Explicit min_lat, max_lat, min_lon, and max_lon parameters are required (hardcoded region defaults are prohibited).",
+        )
+    if float(min_lat) >= float(max_lat):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"min_lat ({min_lat}) must be strictly less than max_lat ({max_lat}).",
         )
-    if min_lon == max_lon:
+    if float(min_lon) == float(max_lon):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"min_lon ({min_lon}) and max_lon ({max_lon}) must not be equal.",
         )
     return {
-        "min_lat": min_lat,
-        "max_lat": max_lat,
-        "min_lon": min_lon,
-        "max_lon": max_lon,
+        "min_lat": float(min_lat),
+        "max_lat": float(max_lat),
+        "min_lon": float(min_lon),
+        "max_lon": float(max_lon),
     }
 
 
@@ -63,11 +69,11 @@ async def get_mobility_status() -> MobilityEngineStatusResponse:
 
 @router.get("/terrain/features", response_model=TerrainFeaturesWindowResponse)
 async def get_windowed_terrain_features(
-    dataset_id: str = Query("mola_megt90n000cb", description="Source DEM dataset ID"),
-    min_lat: float = Query(-5.5, ge=-90.0, le=90.0, description="Minimum latitude (deg)"),
-    max_lat: float = Query(-4.3, ge=-90.0, le=90.0, description="Maximum latitude (deg)"),
-    min_lon: float = Query(137.2, ge=-180.0, le=360.0, description="Minimum longitude (deg)"),
-    max_lon: float = Query(138.0, ge=-180.0, le=360.0, description="Maximum longitude (deg)"),
+    dataset_id: str = Query(..., description="Source DEM dataset ID (explicitly required)"),
+    min_lat: Optional[float] = Query(None, ge=-90.0, le=90.0, description="Explicit minimum latitude (deg)"),
+    max_lat: Optional[float] = Query(None, ge=-90.0, le=90.0, description="Explicit maximum latitude (deg)"),
+    min_lon: Optional[float] = Query(None, ge=-180.0, le=360.0, description="Explicit minimum longitude (deg)"),
+    max_lon: Optional[float] = Query(None, ge=-180.0, le=360.0, description="Explicit maximum longitude (deg)"),
     roughness_radius_meters: Optional[float] = Query(
         None,
         gt=0.0,
@@ -77,8 +83,9 @@ async def get_windowed_terrain_features(
     """
     Extract windowed physical terrain features (elevation, Horn 3x3 slope,
     compass aspect, and metric TRI roughness) without silently expanding
-    the requested bounding box.
+    the requested bounding box or substituting default regions.
     """
+    validate_identifier(dataset_id, field_name="dataset_id")
     bounds = _validate_bounds_query(min_lat, max_lat, min_lon, max_lon)
     try:
         return mobility_service.get_terrain_features(
@@ -101,11 +108,11 @@ async def get_windowed_terrain_features(
 
 @router.get("/coverage", response_model=CoverageIntelligenceResponse)
 async def get_region_coverage_intelligence(
-    dataset_id: str = Query("mola_megt90n000cb", description="Source DEM dataset ID"),
-    min_lat: float = Query(-5.5, ge=-90.0, le=90.0, description="Minimum latitude (deg)"),
-    max_lat: float = Query(-4.3, ge=-90.0, le=90.0, description="Maximum latitude (deg)"),
-    min_lon: float = Query(137.2, ge=-180.0, le=360.0, description="Minimum longitude (deg)"),
-    max_lon: float = Query(138.0, ge=-180.0, le=360.0, description="Maximum longitude (deg)"),
+    dataset_id: str = Query(..., description="Source DEM dataset ID (explicitly required)"),
+    min_lat: Optional[float] = Query(None, ge=-90.0, le=90.0, description="Explicit minimum latitude (deg)"),
+    max_lat: Optional[float] = Query(None, ge=-90.0, le=90.0, description="Explicit maximum latitude (deg)"),
+    min_lon: Optional[float] = Query(None, ge=-180.0, le=360.0, description="Explicit minimum longitude (deg)"),
+    max_lon: Optional[float] = Query(None, ge=-180.0, le=360.0, description="Explicit maximum longitude (deg)"),
     roughness_radius_meters: Optional[float] = Query(
         None,
         gt=0.0,
@@ -114,8 +121,9 @@ async def get_region_coverage_intelligence(
 ) -> CoverageIntelligenceResponse:
     """
     Evaluate 5-state spatial coverage and unknown-data intelligence for a
-    study region without expanding requested bounds.
+    study region without expanding requested bounds or substituting defaults.
     """
+    validate_identifier(dataset_id, field_name="dataset_id")
     bounds = _validate_bounds_query(min_lat, max_lat, min_lon, max_lon)
     try:
         return mobility_service.get_coverage_intelligence(
@@ -196,11 +204,11 @@ async def evaluate_mobility_endpoint(req: MobilityEvaluationRequest) -> Mobility
 
 @router.get("/cost-surface/metadata", response_model=CostSurfaceSummary)
 async def get_cost_surface_metadata(
-    dataset_id: str = Query("mola_megt90n000cb", description="Source DEM dataset ID"),
-    min_lat: float = Query(-5.5, ge=-90.0, le=90.0, description="Minimum latitude (deg)"),
-    max_lat: float = Query(-4.3, ge=-90.0, le=90.0, description="Maximum latitude (deg)"),
-    min_lon: float = Query(137.2, ge=-180.0, le=360.0, description="Minimum longitude (deg)"),
-    max_lon: float = Query(138.0, ge=-180.0, le=360.0, description="Maximum longitude (deg)"),
+    dataset_id: str = Query(..., description="Source DEM dataset ID (explicitly required)"),
+    min_lat: Optional[float] = Query(None, ge=-90.0, le=90.0, description="Explicit minimum latitude (deg)"),
+    max_lat: Optional[float] = Query(None, ge=-90.0, le=90.0, description="Explicit maximum latitude (deg)"),
+    min_lon: Optional[float] = Query(None, ge=-180.0, le=360.0, description="Explicit minimum longitude (deg)"),
+    max_lon: Optional[float] = Query(None, ge=-180.0, le=360.0, description="Explicit maximum longitude (deg)"),
     scenario_id: Optional[str] = Query(None, description="Optional registered MobilityScenario ID"),
     reference_walking_speed_m_per_s: Optional[float] = Query(
         None,
@@ -224,6 +232,7 @@ async def get_cost_surface_metadata(
     Generate and inspect a spatially explicit TraversalCostSurface over a study region.
     Preserves null traversal cost on unknown/no-data cells and never emits safe/unsafe labels.
     """
+    validate_identifier(dataset_id, field_name="dataset_id")
     bounds = _validate_bounds_query(min_lat, max_lat, min_lon, max_lon)
     try:
         return mobility_service.get_cost_surface_metadata(

@@ -203,7 +203,14 @@ class ScienceStopSummary(BaseModel):
     lat: float
     lon_east: float
     geology_type: Optional[str] = None
-    scientific_value: Optional[float] = None
+    exploration_priority_score: Optional[float] = None
+    route_utility_role: Optional[str] = None
+    scientific_relevance_note: Optional[str] = None
+    scientific_value: Optional[float] = Field(
+        default=None,
+        deprecated=True,
+        description="Deprecated legacy field; never populated from exploration_priority_score.",
+    )
     matched_species: Optional[str] = None
     instrument_source: Optional[str] = None
     visit_order_index: int

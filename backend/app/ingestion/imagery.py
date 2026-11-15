@@ -18,6 +18,7 @@ import httpx
 import hashlib
 import xml.etree.ElementTree as ET
 
+from app.ingestion.acquisition import safe_write_downloaded_bytes
 from app.ingestion.http_client import create_async_http_client
 from app.schemas.imagery import ImageryProduct, PanoramaEligibility, ProductStage
 from app.ingestion.pds_label import parse_pds3_label
@@ -315,9 +316,17 @@ class ImageryArchiveService:
         if not content or len(content) > 20_000_000:
             raise ArchiveError("Label is empty or exceeds the 20 MB metadata safety limit")
         label_path = self.raw_dir / "imagery_labels" / f"{hashlib.sha256(product_id.encode()).hexdigest()[:24]}{Path(product.label_url).suffix}"
-        label_path.parent.mkdir(parents=True, exist_ok=True)
         if not label_path.exists():
-            label_path.write_bytes(content)
+            safe_write_downloaded_bytes(
+                label_path,
+                content,
+                source_url=product.label_url,
+                content_type=response.headers.get("content-type"),
+                http_status=response.status_code,
+                write_retrieval_sidecar=True,
+                max_bytes=20_000_000,
+                overwrite=False,
+            )
         result = parse_label_content(content)
         product.label_parse_status = result["status"]
         product.local_label_path = str(label_path)
@@ -394,9 +403,17 @@ class ImageryArchiveService:
             return {"status": product.label_parse_status}
         label_bytes = prefix[:match.end()]
         label_path = self.raw_dir / "imagery_labels" / f"{hashlib.sha256(product_id.encode()).hexdigest()[:24]}.lbl"
-        label_path.parent.mkdir(parents=True, exist_ok=True)
         if not label_path.exists():
-            label_path.write_bytes(label_bytes)
+            safe_write_downloaded_bytes(
+                label_path,
+                label_bytes,
+                source_url=product.original_product_url or str(data_path),
+                content_type="text/plain",
+                http_status=200,
+                write_retrieval_sidecar=False,
+                max_bytes=20_000_000,
+                overwrite=False,
+            )
         parsed = parse_label_content(label_bytes)
         product.label_parse_status = parsed["status"]
         product.local_label_path = str(label_path)

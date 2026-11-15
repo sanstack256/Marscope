@@ -84,17 +84,111 @@ class ArchiveComparisonOutcome(str, Enum):
     NO_CO_LOCATED_ARCHIVE_FOR_COMPARISON = "no_co_located_archive_for_comparison"
 
 
+class RegistryVerificationStatus(str, Enum):
+    VERIFIED = "VERIFIED"
+    PARTIALLY_VERIFIED = "PARTIALLY_VERIFIED"
+    UNVERIFIED = "UNVERIFIED"
+
+
+class ThresholdRuleClassification(str, Enum):
+    SCIENTIFIC_REQUIREMENT = "scientific_requirement"
+    INSTRUMENT_LIMITATION = "instrument_limitation"
+    PRODUCT_SELECTION_PREFERENCE = "product_selection_preference"
+    ENGINEERING_POLICY = "engineering_policy"
+    USER_ASSUMED = "USER_ASSUMED"
+
+
+class CanonicalRequirementState(str, Enum):
+    SATISFIED = "SATISFIED"
+    PARTIALLY_SATISFIED = "PARTIALLY_SATISFIED"
+    UNSATISFIED = "UNSATISFIED"
+    NOT_EVALUATED = "NOT_EVALUATED"
+    UNAVAILABLE = "UNAVAILABLE"
+    UNVERIFIED = "UNVERIFIED"
+    BLOCKED_BY_DATA_GAP = "BLOCKED_BY_DATA_GAP"
+
+
+class EvidenceEligibilityState(str, Enum):
+    ELIGIBLE = "ELIGIBLE"
+    ELIGIBLE_WITH_LIMITATIONS = "ELIGIBLE_WITH_LIMITATIONS"
+    SPATIALLY_UNVERIFIED = "SPATIALLY_UNVERIFIED"
+    CALIBRATION_UNVERIFIED = "CALIBRATION_UNVERIFIED"
+    PRODUCT_UNVERIFIED = "PRODUCT_UNVERIFIED"
+    MEASUREMENT_SEMANTICS_UNVERIFIED = "MEASUREMENT_SEMANTICS_UNVERIFIED"
+    SCALE_INCOMPATIBLE = "SCALE_INCOMPATIBLE"
+    MISSION_INCOMPATIBLE = "MISSION_INCOMPATIBLE"
+    TEMPORALLY_INCOMPATIBLE = "TEMPORALLY_INCOMPATIBLE"
+    SCIENTIFICALLY_IRRELEVANT = "SCIENTIFICALLY_IRRELEVANT"
+    DUPLICATE_OR_CORRELATED = "DUPLICATE_OR_CORRELATED"
+    REJECTED = "REJECTED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class EvidenceRole(str, Enum):
+    SUPPORTING = "SUPPORTING"
+    CONTRADICTING = "CONTRADICTING"
+    CONTEXTUAL = "CONTEXTUAL"
+    INCONCLUSIVE = "INCONCLUSIVE"
+    NOT_RELEVANT = "NOT_RELEVANT"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class SpatialRegistrationState(str, Enum):
+    REGISTERED_VALIDATED = "REGISTERED_VALIDATED"
+    REGISTERED_WITH_LIMITATIONS = "REGISTERED_WITH_LIMITATIONS"
+    PARTIALLY_OVERLAPPING = "PARTIALLY_OVERLAPPING"
+    NOT_REGISTERED = "NOT_REGISTERED"
+    REGISTRATION_UNVERIFIED = "REGISTRATION_UNVERIFIED"
+    INCOMPATIBLE_REFERENCE_SYSTEM = "INCOMPATIBLE_REFERENCE_SYSTEM"
+    INSUFFICIENT_METADATA = "INSUFFICIENT_METADATA"
+
+
+class CampaignFeasibilityModelState(str, Enum):
+    FEASIBLE_UNDER_CONFIGURED_MODEL = "FEASIBLE_UNDER_CONFIGURED_MODEL"
+    INFEASIBLE_UNDER_CONFIGURED_MODEL = "INFEASIBLE_UNDER_CONFIGURED_MODEL"
+    INCOMPLETE_CONSTRAINT_EVALUATION = "INCOMPLETE_CONSTRAINT_EVALUATION"
+    BLOCKED_BY_UNKNOWN_INPUTS = "BLOCKED_BY_UNKNOWN_INPUTS"
+    NOT_EVALUATED = "NOT_EVALUATED"
+
+
+class EvidenceEligibilityDimensionResult(BaseModel):
+    dimension: str
+    status: str  # PASS | PASS_WITH_LIMITATION | FAIL | UNVERIFIED | UNAVAILABLE | NOT_EVALUATED
+    detail: str
+    source_reference: Optional[str] = None
+
+
 class InstrumentCapabilityRecord(BaseModel):
+    registry_entry_id: str = ""
+    registry_version: str = "2.0.0-p18"
+    verification_status: RegistryVerificationStatus = RegistryVerificationStatus.UNVERIFIED
+    last_verified_utc: Optional[str] = None
+    source_references: List[Dict[str, str]] = Field(default_factory=list)
+    unresolved_fields: List[str] = Field(default_factory=list)
     instrument_id: str
     instrument_name: str
     mission_host: str
     study_region_scope: str
     platform_kind: InstrumentPlatformKind
     measurement_class: MeasurementClass
-    typical_spatial_scale_m: float
+    measurement_modality: str = "unspecified"
+    physical_quantity_measured: str = "unspecified"
+    measurement_method: str = "unspecified"
+    supported_measurement_types: List[str] = Field(default_factory=list)
+    applicable_product_types: List[str] = Field(default_factory=list)
+    calibration_requirements: List[str] = Field(default_factory=list)
+    processing_requirements: List[str] = Field(default_factory=list)
+    spatial_applicability: str = "unspecified"
+    temporal_applicability: str = "unspecified"
+    validity_conditions: List[str] = Field(default_factory=list)
+    typical_spatial_scale_m: Optional[float] = Field(
+        default=None,
+        description="Nominal instrument capability scale ONLY; product-specific spatial resolution always takes precedence.",
+    )
     measured_observables: List[str] = Field(default_factory=list)
     allowed_inferences: List[str] = Field(default_factory=list)
     prohibited_inferences: List[str] = Field(default_factory=list)
+    known_limitations: List[str] = Field(default_factory=list)
     mission_isolated_from_gale: bool = False
     mission_isolation_note: Optional[str] = None
 
@@ -111,6 +205,12 @@ class InferenceValidationResponse(BaseModel):
     classification: str
     rationale: str
     prohibited_inferences: List[str] = Field(default_factory=list)
+    required_evidence_types: List[str] = Field(default_factory=list)
+    required_processing_or_calibration: List[str] = Field(default_factory=list)
+    applicable_spatial_scale: Optional[str] = None
+    required_contextual_evidence: List[str] = Field(default_factory=list)
+    known_limitations: List[str] = Field(default_factory=list)
+    prohibited_conclusions: List[str] = Field(default_factory=list)
 
 
 class MeasurementRequirementSpec(BaseModel):
@@ -122,6 +222,13 @@ class MeasurementRequirementSpec(BaseModel):
     prohibited_substitutions: List[str] = Field(default_factory=list)
     essential: bool = True
     minimum_spatial_resolution_m: Optional[float] = None
+    required_calibration_state: str = "calibrated_with_verified_metadata"
+    required_product_characteristics: List[str] = Field(default_factory=list)
+    threshold_rule_classification: ThresholdRuleClassification = ThresholdRuleClassification.PRODUCT_SELECTION_PREFERENCE
+    threshold_source_reference: Optional[str] = None
+    threshold_rationale: Optional[str] = None
+    user_configurable_threshold: bool = True
+    user_assumed: bool = False
     justification: str
 
 
@@ -130,6 +237,11 @@ class ScienceQuestionDefinition(BaseModel):
     title: str
     study_region: str = "Gale Crater / Mount Sharp"
     hypothesis: str
+    competing_hypotheses: List[str] = Field(default_factory=list)
+    alternative_explanations: List[str] = Field(default_factory=list)
+    contradicting_evidence_criteria: List[str] = Field(default_factory=list)
+    unresolved_assumptions: List[str] = Field(default_factory=list)
+    current_evidence_state: str = "UNRESOLVED_REQUIRES_MULTI_INSTRUMENT_EVIDENCE"
     geological_setting: str
     is_user_defined: bool = False
     target_phenomena: List[str] = Field(default_factory=list)
@@ -143,6 +255,9 @@ class CustomScienceQuestionCreateRequest(BaseModel):
     title: str = Field(..., min_length=4, max_length=180)
     study_region: str = Field(default="Gale Crater / Mount Sharp")
     hypothesis: str = Field(..., min_length=8, max_length=1000)
+    competing_hypotheses: List[str] = Field(default_factory=list)
+    alternative_explanations: List[str] = Field(default_factory=list)
+    unresolved_assumptions: List[str] = Field(default_factory=list)
     geological_setting: str = Field(default="Mount Sharp / Boxwork-Bearing Strata")
     target_phenomena: List[str] = Field(default_factory=list)
     required_measurement_classes: List[MeasurementClass] = Field(
@@ -161,10 +276,23 @@ class RequirementEvaluationRecord(BaseModel):
     measurement_class: MeasurementClass
     essential: bool
     fulfillment_state: RequirementFulfillmentState
+    canonical_state: CanonicalRequirementState = CanonicalRequirementState.NOT_EVALUATED
+    required_measurement: List[str] = Field(default_factory=list)
+    required_spatial_scale_m: Optional[float] = None
+    threshold_rule_classification: Optional[ThresholdRuleClassification] = None
+    threshold_rationale: Optional[str] = None
+    required_calibration_state: str = "calibrated_with_verified_metadata"
+    required_product_characteristics: List[str] = Field(default_factory=list)
     satisfying_source_ids: List[str] = Field(default_factory=list)
     satisfying_instruments: List[str] = Field(default_factory=list)
+    evidence_eligibility_summary: Dict[str, int] = Field(default_factory=dict)
+    coverage_status: str = "UNVERIFIED"
+    quality_status: str = "UNVERIFIED"
     matched_evidence_count: int = 0
     limitations_and_gaps: List[str] = Field(default_factory=list)
+    missing_information: List[str] = Field(default_factory=list)
+    failure_reason: Optional[str] = None
+    resolution_path: List[str] = Field(default_factory=list)
     prohibited_substitutions: List[str] = Field(default_factory=list)
 
 
@@ -172,17 +300,60 @@ class EvidenceMatchRecord(BaseModel):
     match_id: str
     source_type: str  # dataset_catalog | composition_index | imagery_catalog | absent_archive_slot
     source_id: str
+    product_id: Optional[str] = None
     instrument_id: str
     mission_host: str
     study_region: str
     dataset_status: str
     evidence_strength: EvidenceMatchStrength
+    eligibility_state: EvidenceEligibilityState = EvidenceEligibilityState.PRODUCT_UNVERIFIED
+    eligibility_dimensions: List[EvidenceEligibilityDimensionResult] = Field(default_factory=list)
+    evidence_role: EvidenceRole = EvidenceRole.INCONCLUSIVE
+    evidence_role_rationale: Optional[str] = None
+    scientific_relevance: str = "UNVERIFIED"
     spatial_scale_m: Optional[float] = None
+    product_spatial_resolution_m: Optional[float] = None
+    product_footprint_bounds: Optional[Dict[str, float]] = None
+    acquisition_time_utc: Optional[str] = None
+    processing_level: Optional[str] = None
+    coordinate_reference: Optional[str] = None
+    units: Optional[str] = None
+    calibration_status: Optional[str] = None
+    integrity_status: Optional[str] = None
+    spatial_registration_state: SpatialRegistrationState = SpatialRegistrationState.INSUFFICIENT_METADATA
+    data_quality_flags: List[str] = Field(default_factory=list)
+    product_limitations: List[str] = Field(default_factory=list)
+    uncertainty_summary: Dict[str, Any] = Field(default_factory=dict)
+    duplication_or_correlation: Optional[Dict[str, Any]] = None
     matched_observables: List[str] = Field(default_factory=list)
     scale_mismatch_warning: Optional[str] = None
     prohibited_inference_guard: Optional[str] = None
     rejected_for_gale_reason: Optional[str] = None
+    provenance_chain: List[str] = Field(default_factory=list)
     citation: Optional[str] = None
+
+
+class EvidenceSynthesisSummary(BaseModel):
+    qualitative_evidence_state: str
+    statistical_confidence_state: str = "UNAVAILABLE_NO_VALIDATED_STATISTICAL_MODEL"
+    statistical_confidence_score: Optional[float] = None
+    supporting_count: int = 0
+    contradicting_count: int = 0
+    contextual_count: int = 0
+    inconclusive_count: int = 0
+    not_relevant_count: int = 0
+    unavailable_count: int = 0
+    duplicate_or_correlated_count: int = 0
+    independent_evidence_count: int = 0
+    supporting_observations: List[str] = Field(default_factory=list)
+    contradicting_observations: List[str] = Field(default_factory=list)
+    inconclusive_observations: List[str] = Field(default_factory=list)
+    missing_evidence: List[str] = Field(default_factory=list)
+    competing_hypotheses: List[str] = Field(default_factory=list)
+    alternative_explanations: List[str] = Field(default_factory=list)
+    unresolved_contradictions: List[str] = Field(default_factory=list)
+    duplication_notes: List[str] = Field(default_factory=list)
+    synthesis_rationale: str = ""
 
 
 class QuestionEvidenceDiscoveryResponse(BaseModel):
@@ -190,8 +361,11 @@ class QuestionEvidenceDiscoveryResponse(BaseModel):
     matched_records: List[EvidenceMatchRecord] = Field(default_factory=list)
     isolated_or_rejected_records: List[EvidenceMatchRecord] = Field(default_factory=list)
     requirements_evaluation: List[RequirementEvaluationRecord] = Field(default_factory=list)
+    evidence_synthesis: Optional[EvidenceSynthesisSummary] = None
+    spatial_registrations: List[Dict[str, Any]] = Field(default_factory=list)
     overall_evidence_readiness: str
     critical_data_gaps: List[str] = Field(default_factory=list)
+    provenance_graph: Optional[ProvenanceDependencyGraph] = None
     discovered_at_utc: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
@@ -224,7 +398,21 @@ class CandidateTargetEvaluation(BaseModel):
     inferred_context: List[str] = Field(default_factory=list)
     unknowns_and_gaps: List[str] = Field(default_factory=list)
     conflicting_records: List[str] = Field(default_factory=list)
-    heuristic_priority_score: float = Field(ge=0.0, le=1.0)
+    heuristic_priority_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    exploration_priority: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Alias of optional heuristic priority score for mission ordering; NEVER intrinsic scientific truth.",
+    )
+    scientific_evidence_summary: Optional[Dict[str, Any]] = None
+    scientific_relevance: str = "UNVERIFIED"
+    route_utility: Optional[Dict[str, Any]] = None
+    scientific_confidence_state: str = "QUALITATIVE_ONLY_NO_STATISTICAL_CONFIDENCE"
+    scientific_confidence_score: Optional[float] = None
+    evidence_eligibility_states: List[EvidenceEligibilityState] = Field(default_factory=list)
+    spatial_registration_state: SpatialRegistrationState = SpatialRegistrationState.INSUFFICIENT_METADATA
+    uncertainty_notes: List[str] = Field(default_factory=list)
+    eligibility_decision: str = "CANDIDATE_WITH_LIMITATIONS"
+    eligibility_decision_rationale: str = ""
     prioritization_is_heuristic: bool = True
     prioritization_breakdown: Dict[str, Any] = Field(default_factory=dict)
     eligibility_for_sampling: str
@@ -236,10 +424,11 @@ class TargetEvaluationBatchResponse(BaseModel):
     question_id: str
     evaluated_at_utc: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     targets: List[CandidateTargetEvaluation] = Field(default_factory=list)
+    rejected_targets: List[CandidateTargetEvaluation] = Field(default_factory=list)
     state_counts: Dict[str, int] = Field(default_factory=dict)
     prioritization_disclaimer: str = (
-        "Target ordering uses an explicit engineering exploration-priority heuristic for planning only; "
-        "heuristic scores NEVER establish mineral confirmation or scientific truth."
+        "Target ordering uses an optional engineering exploration-priority heuristic for planning only; "
+        "heuristic scores NEVER establish mineral confirmation, scientific confidence, or safety."
     )
 
 
@@ -252,7 +441,11 @@ class ObservationActionPlan(BaseModel):
     context_imaging_checks: List[str] = Field(default_factory=list)
     calibration_or_reference_checks: List[str] = Field(default_factory=list)
     expected_dwell_s: float
-    estimated_data_volume_mb: float
+    estimated_data_volume_mb: Optional[float] = Field(
+        default=None,
+        description="Explicit None/UNAVAILABLE unless telemetry bit-rate/frame spec is supplied.",
+    )
+    data_volume_status: str = "UNAVAILABLE_NO_TELEMETRY_BITRATE_CONFIGURED"
     explicit_uncertainty_notes: List[str] = Field(default_factory=list)
     prohibited_shortcut_notes: List[str] = Field(default_factory=list)
 
@@ -278,7 +471,7 @@ class CampaignStopPlan(BaseModel):
     longitude_east: float
     evidence_state: InvestigationTargetEvidenceState
     dwell_s: float
-    heuristic_priority_score: float
+    heuristic_priority_score: Optional[float] = None
     known_summary: List[str] = Field(default_factory=list)
     unknown_summary: List[str] = Field(default_factory=list)
     observation_plan: ObservationActionPlan
@@ -339,6 +532,7 @@ class CampaignSummary(BaseModel):
     question_id: str
     dataset_id: str
     plan_status: CampaignPlanStatus
+    feasibility_state: CampaignFeasibilityModelState = CampaignFeasibilityModelState.NOT_EVALUATED
     freshness_state: CampaignFreshnessState
     stop_count: int
     total_distance_m: Optional[float] = None
@@ -362,10 +556,18 @@ class ScienceCampaignPlan(BaseModel):
     dataset_id: str
     study_region: str
     plan_status: CampaignPlanStatus
+    feasibility_state: CampaignFeasibilityModelState = CampaignFeasibilityModelState.NOT_EVALUATED
     freshness_state: CampaignFreshnessState = CampaignFreshnessState.CURRENT
     staleness_reasons: List[str] = Field(default_factory=list)
     dependency_signature: str
     dependency_snapshot: Dict[str, Any] = Field(default_factory=dict)
+    evaluated_inputs_and_constraints: Dict[str, Any] = Field(default_factory=dict)
+    epistemic_classification: Dict[str, List[str]] = Field(default_factory=dict)
+    constraint_evaluation_complete: bool = False
+    survivability_disclaimer: str = (
+        "MARSCOPE evaluates traverse geometry and user-configured engineering resource budgets ONLY; "
+        "a computed route or return path NEVER certifies astronaut survivability or operational safety."
+    )
     operational_safety_certified: bool = False
     request: CampaignBuildRequest
     requirements_evaluation: List[RequirementEvaluationRecord] = Field(default_factory=list)

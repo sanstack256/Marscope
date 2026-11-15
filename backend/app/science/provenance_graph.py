@@ -27,6 +27,21 @@ class ScientificDataClassification(str, Enum):
     UNVERIFIED = "UNVERIFIED"
 
 
+class ProvenanceNode(BaseModel):
+    node_id: str
+    node_type: str  # source_mission | instrument | source_product | product_label | raw_file | processed_file | calibration_operation | coordinate_transformation | spatial_registration | derived_measurement | evidence_record | scientific_requirement | investigation_question | target | campaign_stop | final_report
+    label: str
+    classification: ScientificDataClassification = ScientificDataClassification.MARSCOPE_DERIVED
+    sha256_checksum: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ProvenanceEdge(BaseModel):
+    source_id: str
+    target_id: str
+    relationship: str
+
+
 class ProvenanceStep(BaseModel):
     step_id: str
     label: str
@@ -56,6 +71,8 @@ class ProvenanceDependencyGraph(BaseModel):
     parameters: Dict[str, Any] = Field(default_factory=dict)
     assumptions: List[str] = Field(default_factory=list)
     intermediate_steps: List[ProvenanceStep] = Field(default_factory=list)
+    nodes: List[ProvenanceNode] = Field(default_factory=list)
+    edges: List[ProvenanceEdge] = Field(default_factory=list)
     output_units: Optional[str] = None
     output_resolution_m: Optional[float] = None
     uncertainty_method: str = "unpropagated_or_bounded_by_source"

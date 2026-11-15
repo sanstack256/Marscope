@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { API_BASE_URL } from "../lib/constants";
 import type {
   CampaignBuildRequest,
+  CampaignDossierExport,
   CampaignFreshnessReport,
   CampaignSummary,
   CustomScienceQuestionCreateRequest,
@@ -10,6 +11,7 @@ import type {
   IngestionLedgerResponse,
   InstrumentCapabilityRecord,
   ObservationArchiveComparison,
+  ProductDetailInspectionResponse,
   QuestionEvidenceDiscoveryResponse,
   RecordedFieldObservation,
   RecordObservationRequest,
@@ -42,6 +44,8 @@ interface InvestigationState {
   loadingFreshness: boolean;
   loadingObservations: boolean;
   loadingComparison: boolean;
+  loadingProductInspect: boolean;
+  inspectedProduct: ProductDetailInspectionResponse | null;
   error: string | null;
 
   clearError: () => void;
@@ -55,6 +59,11 @@ interface InvestigationState {
   createCustomQuestion: (req: CustomScienceQuestionCreateRequest) => Promise<ScienceQuestionDefinition | null>;
   deleteCustomQuestion: (questionId: string) => Promise<boolean>;
   discoverEvidence: (questionId: string) => Promise<QuestionEvidenceDiscoveryResponse | null>;
+  inspectProductDetail: (
+    datasetId: string,
+    questionId?: string
+  ) => Promise<ProductDetailInspectionResponse | null>;
+  exportCampaignDossier: (campaignId: string) => Promise<CampaignDossierExport | null>;
   evaluateTargets: (req?: Partial<TargetEvaluationRequest>) => Promise<TargetEvaluationBatchResponse | null>;
   buildCampaign: (req: CampaignBuildRequest) => Promise<ScienceCampaignPlan | null>;
   fetchCampaigns: () => Promise<void>;
@@ -101,6 +110,8 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
   loadingFreshness: false,
   loadingObservations: false,
   loadingComparison: false,
+  loadingProductInspect: false,
+  inspectedProduct: null,
   error: null,
 
   clearError: () => set({ error: null }),
@@ -457,6 +468,46 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
       set({ ledger: data });
     } catch {
       // handled upstream
+    }
+  },
+
+  inspectProductDetail: async (datasetId, questionId = "gale_boxwork_origin") => {
+    set({ loadingProductInspect: true, error: null });
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/science-investigation/products/${encodeURIComponent(
+          datasetId
+        )}/inspect?question_id=${encodeURIComponent(questionId)}`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) throw new Error(await _parseError(res, "Product inspection failed"));
+      const data: ProductDetailInspectionResponse = await res.json();
+      set({ inspectedProduct: data, loadingProductInspect: false });
+      return data;
+    } catch (e: unknown) {
+      set({
+        loadingProductInspect: false,
+        error: e instanceof Error ? e.message : "Product inspection failed",
+      });
+      return null;
+    }
+  },
+
+  exportCampaignDossier: async (campaignId) => {
+    set({ error: null });
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/science-investigation/campaigns/${encodeURIComponent(campaignId)}/export`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) throw new Error(await _parseError(res, "Campaign dossier export failed"));
+      const data: CampaignDossierExport = await res.json();
+      return data;
+    } catch (e: unknown) {
+      set({
+        error: e instanceof Error ? e.message : "Campaign dossier export failed",
+      });
+      return null;
     }
   },
 }));

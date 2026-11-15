@@ -4,7 +4,8 @@ Martian Surface Intelligence & Exploration System
 """
 
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
+from app.core.security import validate_identifier, verify_operator_auth
 from app.schemas.dataset import Dataset, DatasetLifecycleStatus, DatasetManifest
 from app.schemas.terrain import PlanningSlopeThreshold
 from app.services.container import PROCESSED_DIR, RAW_DIR, acquisition_service, catalog_service
@@ -30,14 +31,16 @@ async def list_datasets(
 
 
 @router.post("/discover", response_model=List[Dataset])
-async def discover_datasets() -> List[Dataset]:
+async def discover_datasets(request: Request) -> List[Dataset]:
     """Poll official NASA/ESA source adapters to discover planetary products."""
+    verify_operator_auth(request, fail_closed_when_unconfigured=False, operation_name="dataset_discover")
     return catalog_service.discover_all_sources()
 
 
 @router.get("/{dataset_id}", response_model=Dataset)
 async def get_dataset(dataset_id: str) -> Dataset:
     """Retrieve full metadata, verification evidence, and processing history for a dataset."""
+    validate_identifier(dataset_id, field_name="dataset_id")
     dataset = catalog_service.get_dataset(dataset_id)
     if not dataset:
         raise HTTPException(
@@ -48,8 +51,10 @@ async def get_dataset(dataset_id: str) -> Dataset:
 
 
 @router.post("/{dataset_id}/verify-remote", response_model=Dataset)
-async def verify_dataset_remote(dataset_id: str) -> Dataset:
+async def verify_dataset_remote(dataset_id: str, request: Request) -> Dataset:
     """Verify remote archive availability and label/WMTS capabilities live."""
+    validate_identifier(dataset_id, field_name="dataset_id")
+    verify_operator_auth(request, fail_closed_when_unconfigured=False, operation_name="dataset_verify_remote")
     try:
         return await catalog_service.verify_remote_capabilities(dataset_id)
     except KeyError as ke:
@@ -59,14 +64,23 @@ async def verify_dataset_remote(dataset_id: str) -> Dataset:
 
 
 @router.post("/{dataset_id}/download", response_model=DatasetManifest)
-async def download_dataset(dataset_id: str) -> DatasetManifest:
+async def download_dataset(dataset_id: str, request: Request) -> DatasetManifest:
     """
     Download a verified scientific product from its official archive URL, verifying SHA-256 hash
-    and fetching companion PDS3 label when present.
+    and fetching companion PDS3/PDS4 label when present.
     """
+    validate_identifier(dataset_id, field_name="dataset_id")
+    verify_operator_auth(request, fail_closed_when_unconfigured=False, operation_name="dataset_download")
     dataset = catalog_service.get_dataset(dataset_id)
     if not dataset:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Dataset '{dataset_id}' not found.")
+
+    url_l = (dataset.original_product_url or "").strip().lower()
+    if not (url_l.startswith("https://") or url_l.startswith("http://")):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Dataset '{dataset_id}' lacks a valid HTTP/HTTPS archive download URL.",
+        )
 
     try:
         manifest = await acquisition_service.download_product(dataset)
@@ -86,29 +100,71 @@ async def download_dataset(dataset_id: str) -> DatasetManifest:
         )
 
 
+def _resolve_explicit_or_dataset_bounds(
+    dataset: Dataset,
+    min_lat: Optional[float],
+    max_lat: Optional[float],
+    min_lon: Optional[float],
+    max_lon: Optional[float],
+) -> Dict[str, float]:
+    explicit = [min_lat, max_lat, min_lon, max_lon]
+    if any(v is not None for v in explicit):
+        if not all(v is not None for v in explicit):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="When specifying study bounds, all four of min_lat, max_lat, min_lon, and max_lon are required.",
+            )
+        bounds = {
+            "min_lat": float(min_lat),
+            "max_lat": float(max_lat),
+            "min_lon": float(min_lon),
+            "max_lon": float(max_lon),
+        }
+    elif dataset.coverage is not None and dataset.coverage.min_latitude < dataset.coverage.max_latitude:
+        bounds = {
+            "min_lat": float(dataset.coverage.min_latitude),
+            "max_lat": float(dataset.coverage.max_latitude),
+            "min_lon": float(dataset.coverage.min_longitude),
+            "max_lon": float(dataset.coverage.max_longitude),
+        }
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Explicit study bounds are required for '{dataset.id}' because no valid coverage extent exists.",
+        )
+    if bounds["min_lat"] >= bounds["max_lat"]:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid latitude bounds: min_lat ({bounds['min_lat']}) must be < max_lat ({bounds['max_lat']}).",
+        )
+    return bounds
+
+
 @router.post("/{dataset_id}/validate")
-async def validate_dataset(dataset_id: str) -> Dict[str, Any]:
-    """Validate dataset CRS, study-area overlap, and local integrity honestly."""
+async def validate_dataset(
+    dataset_id: str,
+    min_lat: Optional[float] = Query(None, ge=-90.0, le=90.0),
+    max_lat: Optional[float] = Query(None, ge=-90.0, le=90.0),
+    min_lon: Optional[float] = Query(None, ge=-180.0, le=360.0),
+    max_lon: Optional[float] = Query(None, ge=-180.0, le=360.0),
+) -> Dict[str, Any]:
+    """Validate dataset CRS, study-area overlap, and local integrity honestly without hardcoded fallbacks."""
+    validate_identifier(dataset_id, field_name="dataset_id")
     dataset = catalog_service.get_dataset(dataset_id)
     if not dataset:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Dataset '{dataset_id}' not found.")
-
-    gale_bounds = {
-        "min_lat": -5.5,
-        "max_lat": -4.3,
-        "min_lon": 137.2,
-        "max_lon": 138.0,
-    }
-    return catalog_service.validate_dataset_integrity(dataset_id, gale_bounds)
+    study_bounds = _resolve_explicit_or_dataset_bounds(dataset, min_lat, max_lat, min_lon, max_lon)
+    return catalog_service.validate_dataset_integrity(dataset_id, study_bounds)
 
 
 @router.post("/{dataset_id}/process")
 async def process_dataset(
     dataset_id: str,
-    min_lat: Optional[float] = Query(None, ge=-90.0, le=90.0, description="Optional explicit minimum latitude (deg)"),
-    max_lat: Optional[float] = Query(None, ge=-90.0, le=90.0, description="Optional explicit maximum latitude (deg)"),
-    min_lon: Optional[float] = Query(None, ge=-180.0, le=360.0, description="Optional explicit minimum longitude (deg)"),
-    max_lon: Optional[float] = Query(None, ge=-180.0, le=360.0, description="Optional explicit maximum longitude (deg)"),
+    request: Request,
+    min_lat: Optional[float] = Query(None, ge=-90.0, le=90.0, description="Explicit minimum latitude (deg)"),
+    max_lat: Optional[float] = Query(None, ge=-90.0, le=90.0, description="Explicit maximum latitude (deg)"),
+    min_lon: Optional[float] = Query(None, ge=-180.0, le=360.0, description="Explicit minimum longitude (deg)"),
+    max_lon: Optional[float] = Query(None, ge=-180.0, le=360.0, description="Explicit maximum longitude (deg)"),
     roughness_radius_meters: Optional[float] = Query(None, gt=0.0, description="Physical TRI neighborhood radius in meters"),
     planning_slope_threshold_deg: Optional[float] = Query(
         None,
@@ -129,8 +185,10 @@ async def process_dataset(
     """
     Process a locally downloaded DEM dataset into clipped GeoTIFF and terrain derivatives
     (slope, aspect, metric TRI) with a verifiable processing manifest.
-    Never silently expands requested study bounds; returns structured InsufficientCoverageReport on HTTP 422.
+    Never silently expands requested study bounds or injects hardcoded defaults.
     """
+    validate_identifier(dataset_id, field_name="dataset_id")
+    verify_operator_auth(request, fail_closed_when_unconfigured=False, operation_name="dataset_process")
     dataset = catalog_service.get_dataset(dataset_id)
     if not dataset:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Dataset '{dataset_id}' not found.")
@@ -140,28 +198,7 @@ async def process_dataset(
             detail=f"Dataset '{dataset_id}' (type '{dataset.product_type}') is not a DEM raster product.",
         )
 
-    explicit_coords = [min_lat, max_lat, min_lon, max_lon]
-    if any(v is not None for v in explicit_coords) and not all(v is not None for v in explicit_coords):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="When specifying custom study_bounds, all four of min_lat, max_lat, min_lon, and max_lon must be provided.",
-        )
-
-    study_bounds = (
-        {
-            "min_lat": float(min_lat),
-            "max_lat": float(max_lat),
-            "min_lon": float(min_lon),
-            "max_lon": float(max_lon),
-        }
-        if all(v is not None for v in explicit_coords)
-        else {
-            "min_lat": -5.5,
-            "max_lat": -4.3,
-            "min_lon": 137.2,
-            "max_lon": 138.0,
-        }
-    )
+    study_bounds = _resolve_explicit_or_dataset_bounds(dataset, min_lat, max_lat, min_lon, max_lon)
 
     planning_threshold = (
         PlanningSlopeThreshold(

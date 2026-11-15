@@ -94,22 +94,61 @@ class RasterInspectionService:
             width = src.width
             height = src.height
             count = src.count
+            if width <= 0 or height <= 0 or count <= 0:
+                raise RasterMetadataError(f"Invalid raster dimensions ({width}x{height}, bands={count}).")
             dtypes = [src.dtypes[i] for i in range(count)]
             bounds = src.bounds
             transform = list(src.transform)
             pixel_spacing = {"dx": abs(float(src.transform.a)), "dy": abs(float(src.transform.e))}
             nodata = src.nodatavals[band_index - 1]
-            scale = float(src.scales[band_index - 1]) if src.scales and len(src.scales) >= band_index else 1.0
-            offset = float(src.offsets[band_index - 1]) if src.offsets and len(src.offsets) >= band_index else 0.0
-
-            # CRS extraction — never fabricate a CRS for unreferenced files
-            raw_crs_str = src.crs.to_string() if src.crs else None
-            crs_verified = validate_mars_crs(raw_crs_str)
 
             # Physical unit extraction — never infer from filename
             units, units_verified, unit_source = RasterInspectionService._extract_units_from_metadata(
                 src, file_path, band_index, explicit_units=explicit_units
             )
+
+            # Scaling/offset metadata: never invent 1.0/0.0 when integer raster lacks label/TIFF calibration tags
+            raw_scale = float(src.scales[band_index - 1]) if src.scales and len(src.scales) >= band_index else None
+            raw_offset = float(src.offsets[band_index - 1]) if src.offsets and len(src.offsets) >= band_index else None
+            pds_scale: Optional[float] = None
+            pds_offset: Optional[float] = None
+            for ext in (".lbl", ".LBL"):
+                lbl_path = file_path.with_suffix(ext)
+                if lbl_path.exists():
+                    try:
+                        pds_meta = extract_pds3_metadata(lbl_path)
+                        if pds_meta.get("scaling_factor") is not None:
+                            pds_scale = float(pds_meta["scaling_factor"])
+                        if pds_meta.get("offset") is not None:
+                            pds_offset = float(pds_meta["offset"])
+                        break
+                    except Exception:
+                        pass
+
+            band_dtype = str(dtypes[band_index - 1]).lower()
+            is_float_raster = "float" in band_dtype
+            tags_all = {**(src.tags() or {}), **(src.tags(band_index) or {})}
+            has_tiff_scale_tag = any(k in tags_all for k in ("SCALING_FACTOR", "OFFSET", "SCALE", "UNIT"))
+            if pds_scale is not None:
+                scale: Optional[float] = pds_scale
+                offset: Optional[float] = pds_offset if pds_offset is not None else 0.0
+                scaling_verified = True
+            elif is_float_raster and units_verified:
+                scale = raw_scale if raw_scale is not None else 1.0
+                offset = raw_offset if raw_offset is not None else 0.0
+                scaling_verified = True
+            elif has_tiff_scale_tag and raw_scale is not None:
+                scale = raw_scale
+                offset = raw_offset if raw_offset is not None else 0.0
+                scaling_verified = True
+            else:
+                scale = None
+                offset = None
+                scaling_verified = False
+
+            # CRS extraction — never fabricate a CRS for unreferenced files
+            raw_crs_str = src.crs.to_string() if src.crs else None
+            crs_verified = validate_mars_crs(raw_crs_str)
 
             # Read raw band (bounded memory via nearest-neighbor decimation on huge rasters)
             total_pixels = width * height
@@ -135,7 +174,11 @@ class RasterInspectionService:
             if nodata is not None and np.isfinite(nodata):
                 invalid_mask = invalid_mask | (raw_data == float(nodata))
 
-            scaled_data = np.where(invalid_mask, np.nan, raw_data * scale + offset)
+            if scale is not None and offset is not None:
+                scaled_data = np.where(invalid_mask, np.nan, raw_data * scale + offset)
+            else:
+                # Scaling metadata missing on raw integer DN/untagged raster — do not fabricate 1.0/0.0 scaling
+                scaled_data = np.full(raw_data.shape, np.nan, dtype=np.float64)
             valid_pixels = scaled_data[~np.isnan(scaled_data)]
             sampled_total = int(raw_data.size)
             valid_count = int(valid_pixels.size)
@@ -181,6 +224,7 @@ class RasterInspectionService:
                 "pixel_spacing": pixel_spacing,
                 "scale": scale,
                 "offset": offset,
+                "scaling_verified": scaling_verified,
                 "nodata_value": nodata,
                 "units": units,
                 "units_verified": units_verified,

@@ -1,29 +1,46 @@
 """
 MARSCOPE Multi-Instrument Target Evidence Evaluator
-Prompt 17: Evaluates registered ScienceTargets and spatially bounded candidate
+Prompt 17 & 18: Evaluates registered ScienceTargets and spatially bounded candidate
 locations against a ScienceQuestionDefinition, computing the 7-state epistemic
-InvestigationTargetEvidenceState, explicit Known/Inferred/Unknown/Conflict lists,
-and transparent engineering prioritization heuristics.
+InvestigationTargetEvidenceState, separated evidence/relevance/priority/utility/confidence,
+spatial registration status, explicit Known/Inferred/Unknown/Conflict lists, and strict
+candidate eligibility gating (ELIGIBLE_CANDIDATE | CANDIDATE_WITH_LIMITATIONS | REJECTED_FOR_CAMPAIGN).
 """
 
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from app.geospatial.crs import evaluate_spatial_registration, validate_mars_crs
 from app.mobility.terrain_features import mars_great_circle_distance_meters
+from app.schemas.dataset import DatasetLifecycleStatus
 from app.schemas.target import InvestigationTargetEvidenceState, ScienceTarget
 from app.science.composition.search import StructuredCompositionQuery
 from app.science.composition.species import list_all_species
+from app.science.investigation.requirements import _classify_dataset_instrument
 from app.science.investigation.schemas import (
     CandidateTargetEvaluation,
+    EvidenceEligibilityState,
     ScienceQuestionDefinition,
+    SpatialRegistrationState,
     TargetEvaluationBatchResponse,
     TargetEvaluationRequest,
 )
 
 
-_IN_SITU_INSTRUMENTS = {"CHEMCAM", "CHEMCAM_LIBS", "APXS", "CHEMIN", "CHEMIN_XRD", "SAM", "SAM_EGA_GCMS", "MASTCAM", "MAHLI", "REMS"}
+_IN_SITU_INSTRUMENTS = {
+    "CHEMCAM",
+    "CHEMCAM_LIBS",
+    "APXS",
+    "CHEMIN",
+    "CHEMIN_XRD",
+    "SAM",
+    "SAM_EGA_GCMS",
+    "MASTCAM",
+    "MAHLI",
+    "REMS",
+}
 _ORBITAL_SPECTRAL = {"CRISM", "THEMIS", "OMEGA"}
 
 
@@ -53,17 +70,17 @@ def _compute_heuristic_priority(
     nearest_distance_m: Optional[float],
     distinct_instrument_count: int,
     has_highres_dtm_coverage: bool,
-) -> tuple[float, Dict[str, Any]]:
+) -> Tuple[float, Dict[str, Any]]:
     state_scores = {
         InvestigationTargetEvidenceState.CONFIRMED_LOCAL_OBSERVATION: 0.90,
-        InvestigationTargetEvidenceState.CONFLICTING_EVIDENCE: 0.85,  # High investigation urgency to resolve divergence
+        InvestigationTargetEvidenceState.CONFLICTING_EVIDENCE: 0.85,
         InvestigationTargetEvidenceState.ORBITAL_DETECTION_ONLY: 0.65,
         InvestigationTargetEvidenceState.INFERRED_REGIONAL_CONTEXT_ONLY: 0.40,
         InvestigationTargetEvidenceState.OPTICAL_MORPHOLOGY_CANDIDATE_UNVERIFIED: 0.30,
         InvestigationTargetEvidenceState.DATA_GAP_UNASSESSED: 0.25,
         InvestigationTargetEvidenceState.MANUAL_WAYPOINT_UNVERIFIED: 0.15,
     }
-    weights = {
+    base_weights = {
         "evidence_directness": 0.40,
         "phenomena_alignment": 0.25,
         "instrument_diversity": 0.15,
@@ -73,29 +90,44 @@ def _compute_heuristic_priority(
     direct_comp = state_scores[evidence_state]
     phenom_comp = min(1.0, aligned_phenomena_count / 3.0) if aligned_phenomena_count > 0 else 0.0
     inst_comp = min(1.0, distinct_instrument_count / 3.0)
-    if nearest_distance_m is None:
-        prox_comp = 0.5
-    else:
-        prox_comp = max(0.0, min(1.0, 1.0 - (nearest_distance_m / 5000.0)))
     dtm_comp = 1.0 if has_highres_dtm_coverage else 0.0
 
-    score = (
-        weights["evidence_directness"] * direct_comp
-        + weights["phenomena_alignment"] * phenom_comp
-        + weights["instrument_diversity"] * inst_comp
-        + weights["astronaut_proximity"] * prox_comp
-        + weights["terrain_dtm_coverage"] * dtm_comp
-    )
+    # Prompt 18 honesty: NEVER fabricate 0.5 proximity when astronaut coordinate is missing!
+    active_weights = dict(base_weights)
+    omitted_components: List[str] = []
+    if nearest_distance_m is None:
+        prox_comp: Optional[float] = None
+        w_omit = active_weights.pop("astronaut_proximity")
+        omitted_components.append("astronaut_proximity (unavailable: no astronaut coordinate supplied)")
+        denom = sum(active_weights.values()) or 1.0
+        active_weights = {k: round(v / denom, 4) for k, v in active_weights.items()}
+        score = (
+            active_weights["evidence_directness"] * direct_comp
+            + active_weights["phenomena_alignment"] * phenom_comp
+            + active_weights["instrument_diversity"] * inst_comp
+            + active_weights["terrain_dtm_coverage"] * dtm_comp
+        )
+    else:
+        prox_comp = max(0.0, min(1.0, 1.0 - (nearest_distance_m / 5000.0)))
+        score = (
+            active_weights["evidence_directness"] * direct_comp
+            + active_weights["phenomena_alignment"] * phenom_comp
+            + active_weights["instrument_diversity"] * inst_comp
+            + active_weights["astronaut_proximity"] * prox_comp
+            + active_weights["terrain_dtm_coverage"] * dtm_comp
+        )
+
     score = round(min(1.0, max(0.0, score)), 4)
     breakdown = {
         "is_heuristic": True,
         "label": "engineering_exploration_priority_heuristic",
-        "weights": weights,
+        "weights": active_weights,
+        "omitted_components": omitted_components,
         "components": {
             "evidence_directness": round(direct_comp, 4),
             "phenomena_alignment": round(phenom_comp, 4),
             "instrument_diversity": round(inst_comp, 4),
-            "astronaut_proximity": round(prox_comp, 4),
+            "astronaut_proximity": round(prox_comp, 4) if prox_comp is not None else None,
             "terrain_dtm_coverage": round(dtm_comp, 4),
         },
         "composite_priority_score": score,
@@ -130,33 +162,100 @@ def _evaluate_single_location(
     unknowns_gaps: List[str] = []
     conflicts: List[str] = []
     prohibited_flags: List[str] = []
+    uncertainty_notes: List[str] = []
+    eligibility_states: List[EvidenceEligibilityState] = []
+
+    mission_isolated = any(
+        k in f"{name} {geology_type} {' '.join(initial_instruments)}".upper()
+        for k in ("PERSEVERANCE", "JEZERO", "MARS 2020", "PIXL", "SHERLOC", "SUPERCAM", "MASTCAMZ")
+    )
+    crs_valid = validate_mars_crs(crs)
+    coords_valid = -90.0 <= float(latitude) <= 90.0 and -180.0 <= float(longitude_east) <= 360.0
 
     datasets = list(catalog_service.list_datasets()) if catalog_service else []
     covering_ds: List[str] = []
+    covering_dtms: List[Any] = []
     has_highres_dtm = False
     for ds in datasets:
-        if is_gale_q and ("perseverance" in ds.mission.lower() or "jezero" in ds.id.lower()):
+        inst_cls = _classify_dataset_instrument(ds)
+        if is_gale_q and (inst_cls == "PERSEVERANCE_JEZERO_ISOLATED" or "perseverance" in ds.mission.lower() or "jezero" in ds.id.lower()):
             continue
-        if _covers_point(ds, latitude, longitude_east):
-            if ds.local_file_path or ds.processed_file_path or "{" in ds.original_product_url:
-                covering_ds.append(ds.id)
-                if "hirise" in ds.id.lower() and (ds.product_type == "DTM" or "dteec" in ds.id.lower()):
-                    has_highres_dtm = True
-                    known_facts.append(
-                        f"Co-registered local DEM coverage via '{ds.id}' (~{ds.horizontal_resolution_meters or 1.0} m/px)."
-                    )
-                elif "mola" in ds.id.lower() or "usgs" in ds.id.lower():
-                    inferred_context.append(
-                        f"Regional context frame from '{ds.id}' (~{ds.horizontal_resolution_meters or 'continental'} scale; not valid for local hazard or mineral confirmation)."
-                    )
+        is_wmts = "{" in (ds.original_product_url or "")
+        # Never treat failed datasets or WMTS streaming mosaics as verified covering terrain!
+        if ds.failure_reason or ds.status in {
+            DatasetLifecycleStatus.FAILED_VALIDATION,
+            DatasetLifecycleStatus.FAILED_DOWNLOAD,
+            DatasetLifecycleStatus.FAILED_PROCESSING,
+        }:
+            continue
+        if is_wmts:
+            if _covers_point(ds, latitude, longitude_east):
+                inferred_context.append(
+                    f"WMTS visual mosaic '{ds.id}' overlaps coordinate (unverified visual basemap only; excluded from terrain/mineral verification)."
+                )
+                eligibility_states.append(EvidenceEligibilityState.PRODUCT_UNVERIFIED)
+            continue
+        if _covers_point(ds, latitude, longitude_east) and (ds.local_file_path or ds.processed_file_path):
+            covering_ds.append(ds.id)
+            if inst_cls == "HIRISE_DTM":
+                has_highres_dtm = True
+                covering_dtms.append(ds)
+                eligibility_states.append(EvidenceEligibilityState.ELIGIBLE_WITH_LIMITATIONS)
+                known_facts.append(
+                    f"Co-registered local DEM coverage via '{ds.id}' ({ds.horizontal_resolution_meters or '1.0'} m/px)."
+                )
+            elif inst_cls in {"MOLA", "USGS_SIM3292_CONTEXT", "THEMIS", "CTX"}:
+                eligibility_states.append(EvidenceEligibilityState.SCALE_INCOMPATIBLE)
+                inferred_context.append(
+                    f"Regional context frame from '{ds.id}' (~{ds.horizontal_resolution_meters or 'regional'} m/px scale; not valid for local hazard or mineral confirmation)."
+                )
+
+    # Spatial registration assessment against primary HiRISE DTM or Gale reference IAU2000 frame
+    if not crs_valid:
+        reg_state = SpatialRegistrationState.INCOMPATIBLE_REFERENCE_SYSTEM
+        eligibility_states.append(EvidenceEligibilityState.SPATIALLY_UNVERIFIED)
+        uncertainty_notes.append(f"Target CRS '{crs}' is incompatible with Mars IAU2000 reference datum.")
+    elif covering_dtms:
+        ref_dtm = covering_dtms[0]
+        reg_rep = evaluate_spatial_registration(
+            product_a_id=target_id,
+            product_b_id=ref_dtm.id,
+            crs_a=crs,
+            crs_b=ref_dtm.coordinate_reference_system,
+            bounds_a={
+                "min_latitude": latitude - 1e-5,
+                "max_latitude": latitude + 1e-5,
+                "min_longitude": (longitude_east % 360.0) - 1e-5,
+                "max_longitude": (longitude_east % 360.0) + 1e-5,
+            },
+            bounds_b=ref_dtm.coverage.model_dump(),
+            resolution_a_m=ref_dtm.horizontal_resolution_meters,
+            resolution_b_m=ref_dtm.horizontal_resolution_meters,
+        )
+        try:
+            reg_state = SpatialRegistrationState(reg_rep["registration_state"])
+        except Exception:
+            reg_state = SpatialRegistrationState.REGISTERED_WITH_LIMITATIONS
+        uncertainty_notes.append(reg_rep["registration_error_status"])
+    elif _is_gale_coordinate(latitude, longitude_east):
+        reg_state = SpatialRegistrationState.INSUFFICIENT_METADATA
+        uncertainty_notes.append("Target lies inside Gale Crater bounds without a covering verified <=2 m local DTM.")
+    else:
+        reg_state = SpatialRegistrationState.NOT_REGISTERED
+        uncertainty_notes.append("No verified local Mars raster covers this coordinate.")
 
     # Query nearby verified composition index evidence within search_radius_m
     nearby_ev: List[Any] = []
     nearest_obs_m: Optional[float] = None
     distinct_insts = list(dict.fromkeys([i for i in initial_instruments if i and i.lower() != "manual"]))
 
-    if composition_index and composition_index.get_status().index_available:
-        # Approximate bounding box for fast R-tree prefilter
+    comp_status = composition_index.get_status() if composition_index else None
+    comp_integrity_ok = bool(
+        comp_status
+        and getattr(comp_status, "index_available", False)
+        and getattr(comp_status, "checksum_valid", False)
+    )
+    if comp_integrity_ok:
         deg_pad = max(0.01, search_radius_m / 59200.0 + 0.005)
         all_species_ids = [s.canonical_id for s in list_all_species()]
         bbox_hits = composition_index.query_evidence(
@@ -181,12 +280,16 @@ def _evaluate_single_location(
         nearby_ev.sort(key=lambda pair: pair[0])
         if nearby_ev:
             nearest_obs_m = round(nearby_ev[0][0], 2)
+            eligibility_states.append(EvidenceEligibilityState.ELIGIBLE_WITH_LIMITATIONS)
             for _d, ev in nearby_ev:
                 inst_val = str(getattr(ev, "instrument_id", None) or getattr(ev, "instrument", "")).strip()
                 if inst_val and inst_val not in distinct_insts:
                     distinct_insts.append(inst_val)
+    elif comp_status and getattr(comp_status, "index_available", False) and not comp_integrity_ok:
+        eligibility_states.append(EvidenceEligibilityState.REJECTED)
+        unknowns_gaps.append("Composition spatial index failed checksum/integrity validation; local chemical records withheld.")
 
-    # Check any field recorded observations within search_radius_m
+    # Check any crew-recorded field observations within search_radius_m
     local_obs_hits = []
     for obs in recorded_observations:
         d_m = mars_great_circle_distance_meters(
@@ -199,12 +302,11 @@ def _evaluate_single_location(
 
     evidence_ids = list(dict.fromkeys([*initial_evidence_ids, *(ev.evidence_id for _, ev in nearby_ev[:10])]))
 
-    # Summarize direct facts cleanly + detect conflicts
     species_values_by_name: Dict[str, List[float]] = {}
     has_direct_mineral_local = False
     has_elemental_local = False
     has_orbital_spectral = False
-    for d_m, ev in nearby_ev[:30]:
+    for _d_m, ev in nearby_ev[:30]:
         ev_type_val = getattr(ev.evidence_type, "value", str(ev.evidence_type)).lower()
         inst_u = str(getattr(ev, "instrument_id", None) or getattr(ev, "instrument", "")).upper()
         sp = getattr(ev, "canonical_species_id", None) or getattr(ev, "canonical_species_name", None) or getattr(ev, "raw_species_name", "")
@@ -241,7 +343,7 @@ def _evaluate_single_location(
             )
             prohibited_flags.append("do_not_claim_crystalline_mineral_from_elemental_proxy_alone")
 
-    # Detect material divergence across co-located records (e.g. >3x spread on same oxide within 25 m -> heterogeneous/conflicting)
+    # Material divergence across co-located records
     for sp, vals in species_values_by_name.items():
         if len(vals) >= 2:
             v_min, v_max = min(vals), max(vals)
@@ -254,7 +356,6 @@ def _evaluate_single_location(
         known_facts.append(
             f"Crew-recorded observation '{obs.observation_id}' ({obs.instrument_id}: {obs.species_or_feature}={obs.measured_value} {obs.units}) at {d_m:.1f} m ({obs.quality_flag})."
         )
-        # Check conflict against archive same species
         sp_vals = species_values_by_name.get(obs.species_or_feature)
         if sp_vals and isinstance(obs.measured_value, (int, float)):
             mean_arch = sum(sp_vals) / len(sp_vals)
@@ -263,17 +364,14 @@ def _evaluate_single_location(
                     f"Crew measurement {obs.species_or_feature}={obs.measured_value} differs substantially from co-located archive mean (~{mean_arch:.2f})."
                 )
 
-    # Check if question CRISM requirement is missing
-    if composition_index and composition_index.get_status().crism_status != "available":
+    if comp_status and getattr(comp_status, "crism_status", "") != "available":
         unknowns_gaps.append("Validated CRISM orbital spectral cube absent over corridor (mineral spectroscopy unverified regionally).")
-
     if not has_highres_dtm:
         unknowns_gaps.append("No verified <=2 m HiRISE DTM coverage verified over this coordinate.")
-
     if not nearby_ev and not local_obs_hits:
         unknowns_gaps.append(f"No verified in-situ geochemical or mineral observations within {search_radius_m:.0f} m.")
 
-    # Resolve 7-state InvestigationTargetEvidenceState honestly
+    # Resolve 7-state InvestigationTargetEvidenceState honestly (NEVER upgrade optical candidates)
     geol_l = geology_type.lower()
     if conflicts:
         ev_state = InvestigationTargetEvidenceState.CONFLICTING_EVIDENCE
@@ -282,12 +380,14 @@ def _evaluate_single_location(
     ):
         ev_state = InvestigationTargetEvidenceState.OPTICAL_MORPHOLOGY_CANDIDATE_UNVERIFIED
         prohibited_flags.append("optical_candidate_cannot_receive_mineral_or_routing_science_bonus")
+        eligibility_states.append(EvidenceEligibilityState.PRODUCT_UNVERIFIED)
     elif has_direct_mineral_local or has_elemental_local or local_obs_hits:
         ev_state = InvestigationTargetEvidenceState.CONFIRMED_LOCAL_OBSERVATION
     elif has_orbital_spectral:
         ev_state = InvestigationTargetEvidenceState.ORBITAL_DETECTION_ONLY
     elif initial_evidence_state == InvestigationTargetEvidenceState.INFERRED_REGIONAL_CONTEXT_ONLY or (
-        covering_ds and any("mola" in d.lower() or "usgs" in d.lower() or "themis" in d.lower() for d in covering_ds)
+        covering_ds
+        and any("mola" in d.lower() or "usgs" in d.lower() or "themis" in d.lower() for d in covering_ds)
         and "manual" not in geol_l
         and initial_evidence_state != InvestigationTargetEvidenceState.MANUAL_WAYPOINT_UNVERIFIED
     ):
@@ -296,13 +396,12 @@ def _evaluate_single_location(
         ev_state = InvestigationTargetEvidenceState.MANUAL_WAYPOINT_UNVERIFIED
     elif not nearby_ev and not has_highres_dtm:
         ev_state = InvestigationTargetEvidenceState.DATA_GAP_UNASSESSED
+        eligibility_states.append(EvidenceEligibilityState.UNAVAILABLE)
     else:
-        ev_state = (
-            initial_evidence_state
-            or InvestigationTargetEvidenceState.DATA_GAP_UNASSESSED
-        )
+        ev_state = initial_evidence_state or InvestigationTargetEvidenceState.DATA_GAP_UNASSESSED
 
-    if not _is_gale_coordinate(latitude, longitude_east) and is_gale_q:
+    out_of_gale = is_gale_q and not _is_gale_coordinate(latitude, longitude_east)
+    if out_of_gale:
         unknowns_gaps.append(
             f"Target coordinate ({latitude:.3f}, {longitude_east:.3f}) lies outside standard Gale Crater study bounds."
         )
@@ -329,22 +428,72 @@ def _evaluate_single_location(
         else None
     )
 
-    priority_score, breakdown = _compute_heuristic_priority(
-        evidence_state=ev_state,
-        aligned_phenomena_count=aligned,
-        nearest_distance_m=dist_astronaut,
-        distinct_instrument_count=len(distinct_insts),
-        has_highres_dtm_coverage=has_highres_dtm,
-    )
+    # Candidate eligibility gate (ELIGIBLE_CANDIDATE | CANDIDATE_WITH_LIMITATIONS | REJECTED_FOR_CAMPAIGN)
+    if not coords_valid or not crs_valid or (is_gale_q and mission_isolated) or out_of_gale:
+        elig_decision = "REJECTED_FOR_CAMPAIGN"
+        reasons = []
+        if not coords_valid or not crs_valid:
+            reasons.append(f"invalid coordinates/CRS ({crs})")
+        if is_gale_q and mission_isolated:
+            reasons.append("mission-isolated Jezero/Mars 2020 record")
+        if out_of_gale:
+            reasons.append("outside Gale Crater study bounds")
+        elig_rationale = "Rejected for campaign: " + "; ".join(reasons) + "."
+        if is_gale_q and mission_isolated:
+            eligibility_states.append(EvidenceEligibilityState.MISSION_INCOMPATIBLE)
+        priority_score: Optional[float] = None
+        breakdown: Dict[str, Any] = {
+            "is_heuristic": True,
+            "status": "UNCOMPUTED_TARGET_REJECTED",
+            "reason": elig_rationale,
+        }
+    else:
+        priority_score, breakdown = _compute_heuristic_priority(
+            evidence_state=ev_state,
+            aligned_phenomena_count=aligned,
+            nearest_distance_m=dist_astronaut,
+            distinct_instrument_count=len(distinct_insts),
+            has_highres_dtm_coverage=has_highres_dtm,
+        )
+        if ev_state == InvestigationTargetEvidenceState.CONFIRMED_LOCAL_OBSERVATION and not conflicts and has_highres_dtm:
+            elig_decision = "ELIGIBLE_CANDIDATE"
+            elig_rationale = "Confirmed in-situ observation co-registered with verified HiRISE DTM within Gale study bounds."
+        else:
+            elig_decision = "CANDIDATE_WITH_LIMITATIONS"
+            elig_rationale = (
+                f"Retained with explicit limitations ({ev_state.value}): "
+                + (conflicts[0] if conflicts else (unknowns_gaps[0] if unknowns_gaps else "partial archive coverage."))
+            )
 
     if ev_state == InvestigationTargetEvidenceState.CONFIRMED_LOCAL_OBSERVATION:
         sampling_elig = "ELIGIBLE_AFTER_PRE_SCREENING"
     elif ev_state == InvestigationTargetEvidenceState.CONFLICTING_EVIDENCE:
         sampling_elig = "PRIORITY_VERIFICATION_SCREENING_BEFORE_SAMPLING"
-    elif ev_state == InvestigationTargetEvidenceState.OPTICAL_MORPHOLOGY_CANDIDATE_UNVERIFIED:
-        sampling_elig = "DEFERRED_PENDING_IN_SITU_SCREENING"
     else:
         sampling_elig = "DEFERRED_PENDING_IN_SITU_SCREENING"
+
+    if elig_decision == "REJECTED_FOR_CAMPAIGN":
+        sci_rel = "NOT_ELIGIBLE: " + elig_rationale
+        route_role = "rejected_excluded"
+    elif ev_state == InvestigationTargetEvidenceState.CONFIRMED_LOCAL_OBSERVATION:
+        sci_rel = f"Directly addresses {aligned} question phenomena via verified local measurements."
+        route_role = "confirmed_science_corridor_anchor"
+    elif ev_state == InvestigationTargetEvidenceState.OPTICAL_MORPHOLOGY_CANDIDATE_UNVERIFIED:
+        sci_rel = "Unverified optical morphology candidate only — no mineral or elemental confirmation."
+        route_role = "non_prioritized_optical_screening_stop"
+    else:
+        sci_rel = f"Partial/contextual alignment ({aligned} phenomena terms); requires in-situ verification."
+        route_role = "exploratory_verification_stop"
+
+    if conflicts:
+        sci_conf_state = "CONFLICTING_UNRESOLVED"
+    elif nearby_ev:
+        sci_conf_state = "QUALITATIVE_ONLY_NO_STATISTICAL_CONFIDENCE"
+    else:
+        sci_conf_state = "UNVERIFIED_NO_LOCAL_GEOCHEMICAL_DATA"
+
+    if not eligibility_states:
+        eligibility_states = [EvidenceEligibilityState.UNAVAILABLE]
 
     return CandidateTargetEvaluation(
         target_id=target_id,
@@ -365,6 +514,28 @@ def _evaluate_single_location(
         unknowns_and_gaps=list(dict.fromkeys(unknowns_gaps)),
         conflicting_records=list(dict.fromkeys(conflicts)),
         heuristic_priority_score=priority_score,
+        exploration_priority=priority_score,
+        scientific_evidence_summary={
+            "local_pds_observations": len(nearby_ev),
+            "crew_field_observations": len(local_obs_hits),
+            "distinct_instruments": distinct_insts,
+            "covering_local_datasets": covering_ds,
+            "conflicts_detected": len(conflicts),
+        },
+        scientific_relevance=sci_rel,
+        route_utility={
+            "routing_role": route_role,
+            "heuristic_priority": priority_score,
+            "astronaut_distance_m": dist_astronaut,
+            "has_highres_dtm_coverage": has_highres_dtm,
+        },
+        scientific_confidence_state=sci_conf_state,
+        scientific_confidence_score=None,
+        evidence_eligibility_states=list(dict.fromkeys(eligibility_states)),
+        spatial_registration_state=reg_state,
+        uncertainty_notes=list(dict.fromkeys(uncertainty_notes + unknowns_gaps[:2])),
+        eligibility_decision=elig_decision,
+        eligibility_decision_rationale=elig_rationale,
         prioritization_is_heuristic=True,
         prioritization_breakdown=breakdown,
         eligibility_for_sampling=sampling_elig,
@@ -384,8 +555,8 @@ def evaluate_targets_for_question(
     recorded_observations: List[Any],
 ) -> TargetEvaluationBatchResponse:
     evaluated_map: Dict[str, CandidateTargetEvaluation] = {}
+    rejected_map: Dict[str, CandidateTargetEvaluation] = {}
 
-    # 1. Evaluate explicitly requested targets + currently registered targets in registry
     registry_targets: List[ScienceTarget] = []
     if req.target_ids:
         for tid in req.target_ids:
@@ -416,16 +587,21 @@ def evaluate_targets_for_question(
             astronaut_lon=req.astronaut_longitude,
             search_radius_m=req.search_radius_m,
         )
-        evaluated_map[ev.target_id] = ev
+        if ev.eligibility_decision == "REJECTED_FOR_CAMPAIGN" and not (req.target_ids and ev.target_id in req.target_ids):
+            rejected_map[ev.target_id] = ev
+        else:
+            evaluated_map[ev.target_id] = ev
 
-    # 2. Discover genuine evidence-backed candidate locations from CompositionSearchService matching question phenomena
+    # Discover genuine evidence-backed candidate locations across ALL question.target_phenomena
+    comp_status = composition_index.get_status() if composition_index else None
     if (
         req.include_discovered_candidates
         and composition_search_service
-        and composition_index
-        and composition_index.get_status().index_available
+        and comp_status
+        and getattr(comp_status, "index_available", False)
+        and getattr(comp_status, "checksum_valid", False)
     ):
-        for term in question.target_phenomena[:5]:
+        for term in question.target_phenomena:
             t_clean = term.strip()
             if not t_clean or t_clean.lower() in {"boxwork", "bedrock", "vein"}:
                 continue
@@ -454,7 +630,7 @@ def evaluate_targets_for_question(
                 tid = "tgt_" + hashlib.sha256(f"{spec_label}|{cand.candidate_id}".encode("utf-8")).hexdigest()[:12]
                 if target_id_set and tid not in target_id_set:
                     continue
-                if tid in evaluated_map:
+                if tid in evaluated_map or tid in rejected_map:
                     continue
                 ev = _evaluate_single_location(
                     target_id=tid,
@@ -476,11 +652,14 @@ def evaluate_targets_for_question(
                     astronaut_lon=req.astronaut_longitude,
                     search_radius_m=req.search_radius_m,
                 )
-                evaluated_map[tid] = ev
+                if ev.eligibility_decision == "REJECTED_FOR_CAMPAIGN" and not (target_id_set and tid in target_id_set):
+                    rejected_map[tid] = ev
+                else:
+                    evaluated_map[tid] = ev
 
     ordered = sorted(
         evaluated_map.values(),
-        key=lambda x: (-x.heuristic_priority_score, x.target_id),
+        key=lambda x: (-(x.heuristic_priority_score or 0.0), x.target_id),
     )[: req.max_candidates]
 
     counts: Dict[str, int] = {}
@@ -491,5 +670,6 @@ def evaluate_targets_for_question(
     return TargetEvaluationBatchResponse(
         question_id=question.question_id,
         targets=ordered,
+        rejected_targets=list(rejected_map.values()),
         state_counts=counts,
     )

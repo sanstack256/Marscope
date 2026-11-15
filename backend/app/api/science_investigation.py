@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, status
+from app.core.security import validate_identifier
 
 from app.science.investigation.schemas import (
     CampaignBuildRequest,
@@ -53,6 +54,7 @@ async def list_registered_instruments(
 # 2
 @router.get("/instruments/{instrument_id}", response_model=InstrumentCapabilityRecord)
 async def get_registered_instrument(instrument_id: str) -> InstrumentCapabilityRecord:
+    validate_identifier(instrument_id, field_name="instrument_id")
     inst = science_investigation_service.get_instrument(instrument_id)
     if inst is None:
         raise HTTPException(
@@ -241,3 +243,29 @@ async def get_ingestion_audit_ledger(
         "acquisition_ledger": acquisition_service.get_acquisition_ledger(limit=limit),
         "query_provenance": acquisition_service.get_query_provenance(limit=limit),
     }
+
+
+# 21
+@router.get("/products/{dataset_id}/inspect")
+async def inspect_product_detail(
+    dataset_id: str,
+    question_id: str = Query("gale_boxwork_origin"),
+) -> Dict[str, Any]:
+    """Return full Prompt 18 product verification, scaling, registration, and 17-dimension eligibility."""
+    validate_identifier(dataset_id, field_name="dataset_id")
+    validate_identifier(question_id, field_name="question_id")
+    try:
+        return science_investigation_service.inspect_product_detail(dataset_id, question_id=question_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+# 22
+@router.get("/campaigns/{campaign_id}/export")
+async def export_science_campaign_dossier(campaign_id: str) -> Dict[str, Any]:
+    """Export a self-contained reproducible JSON scientific & operational dossier for a campaign."""
+    validate_identifier(campaign_id, field_name="campaign_id")
+    try:
+        return science_investigation_service.export_campaign_dossier(campaign_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

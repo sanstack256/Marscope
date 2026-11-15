@@ -41,13 +41,44 @@ class ScienceTarget(BaseModel):
         default=None,
         ge=0.0,
         le=1.0,
-        description="Backward-compatible engineering exploration priority heuristic (not intrinsic scientific truth).",
+        deprecated=True,
+        description="DEPRECATED legacy field preserved read-only for historical records; never populated from exploration_priority_score and never defaulted to 0.0.",
     )
     exploration_priority_score: Optional[float] = Field(
         default=None,
         ge=0.0,
         le=1.0,
-        description="Explicit transparent engineering exploration priority heuristic (never a scientific truth or safety score).",
+        description="Optional decision-support ordering heuristic (never intrinsic scientific truth, statistical confidence, or safety score; None when uncomputed).",
+    )
+    scientific_evidence_summary: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Original measured/observed scientific evidence semantics retained separately from priority or route utility.",
+    )
+    scientific_relevance_by_question: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Question-scoped scientific relevance classifications (a target can be relevant to one investigation and irrelevant to another).",
+    )
+    route_utility: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Operational contribution to a specific mission traverse plan, evaluated separately from scientific relevance.",
+    )
+    scientific_confidence_state: str = Field(
+        default="QUALITATIVE_ONLY_NOT_STATISTICALLY_QUANTIFIED",
+        description="Qualitative epistemic state; numerical scientific confidence is never derived from heuristic counts.",
+    )
+    scientific_confidence_score: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Withheld (None) unless supported by a validated statistical methodology and sufficient independent evidence.",
+    )
+    legacy_semantic_status: str = Field(
+        default="NONE",
+        description="Historical compatibility audit tag preventing silent reinterpretation of legacy scientific_value records.",
+    )
+    legacy_semantic_warning: Optional[str] = Field(
+        default=None,
+        description="Warning emitted if legacy scientific_value metadata is present on a persisted record.",
     )
     prioritization_is_heuristic: bool = Field(
         default=True,
@@ -82,14 +113,15 @@ class ScienceTarget(BaseModel):
     created_at_utc: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @model_validator(mode="after")
-    def _sync_priority_fields(self) -> "ScienceTarget":
-        if self.exploration_priority_score is None and self.scientific_value is not None:
-            self.exploration_priority_score = float(self.scientific_value)
-        elif self.scientific_value is None and self.exploration_priority_score is not None:
-            self.scientific_value = float(self.exploration_priority_score)
-        elif self.exploration_priority_score is None and self.scientific_value is None:
-            self.exploration_priority_score = 0.0
-            self.scientific_value = 0.0
+    def _enforce_separated_target_semantics(self) -> "ScienceTarget":
+        # Prompt 18 Section 4: Never copy exploration_priority_score into scientific_value,
+        # never invent 0.0 for missing fields, and never silently reinterpret legacy records.
+        if self.scientific_value is not None and self.legacy_semantic_status == "NONE":
+            self.legacy_semantic_status = "LEGACY_SCIENTIFIC_VALUE_PRESERVED_UNINTERPRETED"
+            self.legacy_semantic_warning = (
+                "Legacy 'scientific_value' record retained without reinterpreting it as "
+                "intrinsic scientific truth, exploration priority, or statistical confidence."
+            )
         return self
 
 

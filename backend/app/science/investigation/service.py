@@ -22,6 +22,8 @@ from app.science.investigation.campaign import (
     evaluate_campaign_freshness,
 )
 from app.science.investigation.evidence_matching import discover_evidence_for_question
+from app.science.investigation.eligibility import evaluate_dataset_eligibility
+from app.science.investigation.requirements import _classify_dataset_instrument, _select_reference_dtm
 from app.science.investigation.measurement_registry import (
     check_inference_validity,
     get_instrument,
@@ -213,6 +215,7 @@ class ScienceInvestigationService:
                         question_id=plan.question.question_id,
                         dataset_id=plan.dataset_id,
                         plan_status=plan.plan_status,
+                        feasibility_state=plan.feasibility_state,
                         freshness_state=fresh.freshness_state,
                         stop_count=len(plan.stop_plans),
                         total_distance_m=tot_dist,
@@ -306,8 +309,7 @@ class ScienceInvestigationService:
         if not inf_check.allowed:
             prohib_warn = inf_check.rationale
 
-        inst = get_instrument(req.instrument_id)
-        scale_m = req.measurement_scale_m or (inst.typical_spatial_scale_m if inst else None)
+        scale_m = req.measurement_scale_m
 
         obs = RecordedFieldObservation(
             observation_id=obs_id,
@@ -435,11 +437,12 @@ class ScienceInvestigationService:
             for r in same_scale_records
             if r["species"].strip().lower() == sp_norm or sp_norm in r["species"].strip().lower()
         ]
-        obs_scale = obs.measurement_scale_m or 0.02
+        obs_scale = obs.measurement_scale_m
+        scale_label = f"~{obs_scale:g} m in-situ spot" if obs_scale is not None else "unspecified spot scale (None)"
 
         if orbital_context:
             scale_notes.append(
-                f"Observation scale (~{obs_scale:g} m in-situ spot) compared separately from coarse orbital holdings "
+                f"Observation scale ({scale_label}) compared separately from coarse orbital holdings "
                 f"({len(orbital_context)} dataset/orbital record(s) at 1 m–463 m scale) to prevent false contradiction."
             )
 
@@ -495,9 +498,10 @@ class ScienceInvestigationService:
                 next_steps.append("Collect paired micro-texture (MAHLI) and adjacent matrix baseline measurements to isolate vein vs host rock.")
             else:
                 outcome = ArchiveComparisonOutcome.DIFFERS_FROM_PRIOR_LOCAL_MEASUREMENT
+                scale_desc = f"~{obs_scale:g} m" if obs_scale is not None else "unspecified"
                 explanation = (
                     f"Recorded value ({obs.species_or_feature}={numeric_obs:g}) differs from co-located archive mean "
-                    f"({mean_val:.2f}) at the same ~{obs_scale:g} m rover measurement scale (delta {delta:+.2f})."
+                    f"({mean_val:.2f}) at {scale_desc} rover measurement scale (delta {delta:+.2f})."
                 )
                 next_steps.append("Run replicate spot measurement and verify LIBS/APXS calibration target offset.")
         elif matching_same_species:
@@ -555,3 +559,63 @@ class ScienceInvestigationService:
             items = [c for c in items if c.observation_id == observation_id]
         items.sort(key=lambda c: c.compared_at_utc, reverse=True)
         return items
+
+    def export_campaign_dossier(self, campaign_id: str) -> Dict[str, Any]:
+        """Export a self-contained reproducible JSON scientific & engineering dossier."""
+        plan = self.get_campaign(campaign_id)
+        if plan is None:
+            raise KeyError(f"Science campaign '{campaign_id}' not found.")
+        freshness = self.check_campaign_freshness(campaign_id, plan=plan)
+        discovery = self.discover_evidence_for_question(plan.question.question_id)
+        observations = self.list_observations(campaign_id=campaign_id)
+        obs_ids = {o.observation_id for o in observations}
+        comparisons = [c for c in self.list_comparisons() if c.observation_id in obs_ids]
+        return {
+            "dossier_version": "2.0.0-p18",
+            "exported_at_utc": datetime.now(timezone.utc).isoformat(),
+            "operational_safety_certified": False,
+            "campaign": plan.model_dump(mode="json"),
+            "freshness": freshness.model_dump(mode="json"),
+            "evidence_discovery": discovery.model_dump(mode="json"),
+            "recorded_field_observations": [o.model_dump(mode="json") for o in observations],
+            "archive_comparisons": [c.model_dump(mode="json") for c in comparisons],
+        }
+
+    def inspect_product_detail(self, dataset_id: str, *, question_id: str = "gale_boxwork_origin") -> Dict[str, Any]:
+        """Return full Prompt 18 product verification, scaling, CRS/registration, and 17-dim eligibility."""
+        ds = self.catalog_service.get_dataset(dataset_id) if self.catalog_service else None
+        if ds is None:
+            raise KeyError(f"Dataset '{dataset_id}' not found.")
+        q = self.questions_repo.get_question(question_id)
+        if q is None:
+            questions = self.questions_repo.list_questions()
+            if not questions:
+                raise KeyError(f"Science question '{question_id}' not found.")
+            q = questions[0]
+        is_gale = "gale" in q.study_region.lower() or "sharp" in q.study_region.lower()
+        datasets = list(self.catalog_service.list_datasets())
+        ref_dtm = _select_reference_dtm(datasets, is_gale)
+        inst_cls = _classify_dataset_instrument(ds)
+        ev = evaluate_dataset_eligibility(
+            ds=ds,
+            inst_cls=inst_cls,
+            question=q,
+            is_gale=is_gale,
+            seen_sha256=set(),
+            seen_product_ids=set(),
+            reference_dtm=ref_dtm,
+        )
+        return {
+            "dataset": ds.model_dump(mode="json"),
+            "classified_instrument": inst_cls,
+            "question_id": q.question_id,
+            "eligibility_state": ev["eligibility_state"].value,
+            "evidence_role": ev["evidence_role"].value,
+            "evidence_role_rationale": ev["role_reason"],
+            "scientific_relevance": ev["scientific_relevance"],
+            "eligibility_dimensions": [d.model_dump(mode="json") for d in ev["dimensions"]],
+            "spatial_registration_state": ev["registration_state"].value,
+            "spatial_registration_report": ev["registration_report"],
+            "uncertainty_summary": ev["uncertainty_summary"],
+            "provenance_chain": ev["provenance_chain"],
+        }

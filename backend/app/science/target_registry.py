@@ -108,10 +108,10 @@ class TargetRegistryService:
                 or "Manually registered administrative coordinate; not verified by indexed NASA PDS composition evidence."
             )
 
-        priority_val = float(
-            target.exploration_priority_score
+        priority_val: Optional[float] = (
+            float(target.exploration_priority_score)
             if target.exploration_priority_score is not None
-            else (target.scientific_value if target.scientific_value is not None else 0.0)
+            else None
         )
         breakdown = dict(target.prioritization_breakdown or {})
         if not breakdown:
@@ -120,7 +120,19 @@ class TargetRegistryService:
                 "classification": "engineering_exploration_priority_heuristic",
                 "evidence_state": evidence_state.value,
                 "verified_evidence_count": len(verified_records),
-                "configured_or_derived_priority": round(priority_val, 4),
+                "configured_or_derived_priority": round(priority_val, 4) if priority_val is not None else None,
+                "status": "COMPUTED" if priority_val is not None else "UNAVAILABLE",
+            }
+
+        evidence_summary = dict(target.scientific_evidence_summary or {})
+        if not evidence_summary:
+            evidence_summary = {
+                "instrument_source": target.instrument_source,
+                "geology_type": target.geology_type,
+                "matched_species": target.matched_species,
+                "evidence_ids": list(verified_ids if resolved_status == TargetProvenanceStatus.EVIDENCE_BACKED else target.evidence_ids),
+                "verified_evidence_count": len(verified_records),
+                "preserves_original_measurement_semantics": True,
             }
 
         clean_target = target.model_copy(
@@ -128,7 +140,9 @@ class TargetRegistryService:
                 "target_status": resolved_status,
                 "evidence_state": evidence_state,
                 "exploration_priority_score": priority_val,
-                "scientific_value": priority_val,
+                "scientific_evidence_summary": evidence_summary,
+                "scientific_confidence_state": "QUALITATIVE_ONLY_NOT_STATISTICALLY_QUANTIFIED",
+                "scientific_confidence_score": None,
                 "prioritization_is_heuristic": True,
                 "prioritization_breakdown": breakdown,
                 "explanation": explanation,
@@ -182,18 +196,21 @@ class TargetRegistryService:
             else:
                 ev_state = InvestigationTargetEvidenceState.INFERRED_REGIONAL_CONTEXT_ONLY
 
-            priority_score = min(1.0, max(0.0, float(cand.ranking.composite_rank_score or 0.0)))
+            raw_rank = getattr(cand.ranking, "composite_rank_score", None)
+            priority_score: Optional[float] = (
+                min(1.0, max(0.0, float(raw_rank))) if raw_rank is not None else None
+            )
             breakdown = {
                 "is_heuristic": True,
                 "classification": "engineering_exploration_priority_heuristic",
                 "evidence_state": ev_state.value,
                 "measurement_directness_score": round(float(cand.ranking.directness_score), 4)
-                if hasattr(cand.ranking, "directness_score")
-                else round(priority_score, 4),
+                if hasattr(cand.ranking, "directness_score") and cand.ranking.directness_score is not None
+                else (round(priority_score, 4) if priority_score is not None else None),
                 "evidence_support_count": len(cand.evidence_ids),
                 "distinct_instruments": list(cand.distinct_instruments),
                 "distance_from_astronaut_m": cand.distance_from_astronaut_m,
-                "composite_priority_score": round(priority_score, 4),
+                "composite_priority_score": round(priority_score, 4) if priority_score is not None else None,
             }
 
             tgt = ScienceTarget(
@@ -204,8 +221,17 @@ class TargetRegistryService:
                 elevation_m=cand.elevation_m,
                 crs=cand.crs,
                 geology_type=geol,
-                scientific_value=priority_score,
+                scientific_value=None,
                 exploration_priority_score=priority_score,
+                scientific_evidence_summary={
+                    "matched_species": spec_label,
+                    "best_evidence_type": cand.best_evidence_type.value,
+                    "distinct_instruments": list(cand.distinct_instruments),
+                    "evidence_ids": list(cand.evidence_ids),
+                    "preserves_original_measurement_semantics": True,
+                },
+                scientific_confidence_state="QUALITATIVE_ONLY_NOT_STATISTICALLY_QUANTIFIED",
+                scientific_confidence_score=None,
                 prioritization_is_heuristic=True,
                 prioritization_breakdown=breakdown,
                 instrument_source=inst_str,

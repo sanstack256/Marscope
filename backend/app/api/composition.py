@@ -5,7 +5,8 @@ Martian Surface Intelligence & Exploration System
 
 import json
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
+from app.core.security import validate_identifier, verify_operator_auth
 from app.science.composition.index import CompositionSpatialIndex
 from app.science.composition.models import (
     CompositionEvidence,
@@ -59,11 +60,17 @@ async def get_index_status() -> CompositionIndexStatus:
 
 
 @router.post("/index/rebuild", response_model=CompositionIndexStatus)
-async def rebuild_composition_index() -> CompositionIndexStatus:
+async def rebuild_composition_index(request: Request) -> CompositionIndexStatus:
     """
     Rebuild the SQLite composition spatial index atomically from verified raw NASA PDS
     artifacts currently on disk (APXS, ChemCam MOC/PSV, CheMin RDR5, REMS exclusion audit).
+    Protected operator mutation: requires valid MARSCOPE_OPERATOR_TOKEN credentials.
     """
+    verify_operator_auth(
+        request,
+        fail_closed_when_unconfigured=True,
+        operation_name="composition_index_rebuild",
+    )
     return composition_index.rebuild_from_raw_directory(raw_dir=RAW_DIR, processed_dir=PROCESSED_DIR)
 
 
@@ -95,6 +102,7 @@ async def search_composition_structured(req: StructuredCompositionQuery) -> Stru
 @router.get("/evidence/{evidence_id}", response_model=CompositionEvidence)
 async def inspect_evidence_record(evidence_id: str) -> CompositionEvidence:
     """Retrieve complete provenance, uncertainties, coordinates, and 12-stage audit log for one evidence record."""
+    validate_identifier(evidence_id, field_name="evidence_id")
     ev = composition_index.get_evidence_by_id(evidence_id)
     if ev is None:
         raise HTTPException(
