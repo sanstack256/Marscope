@@ -111,7 +111,7 @@ Marscope/
 - **Python:** v3.11 or higher
 - **Git**
 
-### Installation
+### Reproducible Clean-Environment Installation & Verification (15 Steps)
 
 1. **Clone the Repository:**
    ```bash
@@ -119,22 +119,91 @@ Marscope/
    cd Marscope
    ```
 
-2. **Frontend Setup:**
-   ```bash
-   cd frontend
-   npm install
-   cp .env.example .env.local
-   npm run build
-   ```
+2. **Understand `.gitignore` Binary Policy:** Tracked catalog metadata lives in `datasets/catalog/*.json` and the pinned checksum manifest lives in `datasets/bootstrap_manifest.json`. Multi-hundred-MB raw/processed NASA binaries (`datasets/raw/`, `datasets/processed/`, `datasets/manifests/`, `datasets/index/`) are excluded from Git by `.gitignore`.
 
-3. **Backend Setup:**
+3. **Create Python Virtual Environment:**
    ```bash
-   cd ../backend
+   cd backend
    python3 -m venv venv
    source venv/bin/activate
+   ```
+
+4. **Install Backend Dependencies:**
+   ```bash
    pip install -r requirements.txt
    cp .env.example .env
    ```
+
+5. **Run Offline Preflight Dataset Verification (Mode A, No Network):**
+   ```bash
+   cd ..
+   python3 scripts/bootstrap_datasets.py --verify --json
+   ```
+   On a fresh clone, this accurately reports `MISSING_MANDATORY` / `MISSING_OPTIONAL` with zero fabricated data. Passing `--strict` exits non-zero when mandatory Gale Crater files are absent.
+
+6. **Acquire Authentic NASA Products (Mode B, Explicit Operator Step with Network):**
+   ```bash
+   python3 scripts/bootstrap_datasets.py --acquire --mandatory-only
+   ```
+   Or acquire the full manifest (`python3 scripts/bootstrap_datasets.py --acquire`). Every download enforces host allowlists, stream size caps, format magic/header checks, companion label retrieval, and SHA-256 verification.
+
+7. **Process Local DEM Derivatives (Calibrated Slope, Aspect, TRI GeoTIFFs):**
+   ```bash
+   python3 scripts/bootstrap_datasets.py --process --mandatory-only
+   ```
+
+8. **Build Versioned Composition Spatial Index:**
+   ```bash
+   python3 scripts/bootstrap_datasets.py --rebuild-index
+   ```
+
+9. **Re-Verify All Local Artifacts & 12-Property Readiness Audit:**
+   ```bash
+   python3 scripts/bootstrap_datasets.py --verify --strict
+   ```
+
+10. **Install & Build Frontend:**
+    ```bash
+    cd frontend
+    npm install
+    cp .env.example .env.local
+    npx tsc --noEmit && npm run lint && npm run build
+    ```
+
+11. **Configure Operator Token for Protected Mutations:** Set `MARSCOPE_OPERATOR_TOKEN` in backend environment when enabling protected mutations (`/api/composition/index/rebuild`, `/api/science-investigation/orchestration/invalidate`, and production approvals). Read-only inspection works without credentials; protected endpoints never leak token secrets in responses or logs.
+
+12. **Start Backend (FastAPI):**
+    ```bash
+    cd ../backend
+    source venv/bin/activate
+    uvicorn app.main:app --host 127.0.0.1 --port 8000
+    ```
+    *Health & 4-Pillar Readiness:* `http://127.0.0.1:8000/api/health` and `http://127.0.0.1:8000/api/health/readiness`
+
+13. **Start Frontend (Next.js):**
+    ```bash
+    cd ../frontend
+    npm run start
+    ```
+    *Application Workspace:* `http://localhost:3000`
+
+14. **Inspect Dataset Readiness Audit API:** `GET /api/datasets/readiness-audit` exposes the 12-property per-dataset lifecycle (`CATALOGED_ONLY` .. `INDEXED` / `CORRUPT` / `MISSING_COMPANION_FILES`) and exact CLI remediation steps.
+
+15. **Verify Exported Mission Dossiers:** Any dossier exported via `/api/science-investigation/campaigns/{id}/unified-dossier` can be independently verified via `POST /api/science-investigation/dossiers/verify`.
+
+### Test Tiers
+
+| Tier | Command | Network / Data Requirement | Scope |
+| :--- | :--- | :--- | :--- |
+| **Tier 1: Offline Code & Synthetic Contract Tests** | `cd backend && pytest tests -q` | **Offline** (real-data tests skip cleanly if local binaries absent; set `MARSCOPE_REQUIRE_REAL_DATA=1` to fail instead of skip) | Canonical hashing, persistence/locking, invalidation propagation, physics, CRS, auth/path traversal, API contracts |
+| **Tier 2: Frontend Static + Store Race Suite** | `cd frontend && npx tsc --noEmit && npm run lint && npm run build && node --test tests/test_store_race_and_sync.mjs` | **Offline** | TypeScript strictness, ESLint, Next.js production build, monotonic `AbortController` race guards, HTTP 409/401/403/422 classification |
+| **Tier 3: Live NASA Archive Integration** | `cd backend && NASA_INTEGRATION=1 pytest -m nasa_integration -q -s` | **Live Internet + Optional Real Assets** | Live NASA PDS ODE / Atlas / HiRISE / Mars Trek endpoint reachability (opt-in) |
+
+### Prompt 22 Reproducibility, Persistence & Security Architecture
+
+- **Four Reproducibility Classes:** MARSCOPE explicitly separates **Source-Code Reproducibility** (clean checkout builds cleanly), **Algorithm Reproducibility** (deterministic finite outputs sorted by stable keys, rejecting `NaN`/`Inf`), **Data Reproducibility** (exact SHA-256 verification against `datasets/bootstrap_manifest.json` + validated `.processing.json` manifests; locally computed hashes are tagged `locally_computed_only` and never misrepresented as archive-authoritative), and **Mission Dossier Reproducibility** (`mission_content_digest` strips volatile export/wall-clock check timestamps, while `export_artifact_digest` covers the complete emitted artifact).
+- **Atomic Persistence & Optimistic Concurrency:** State files across datasets, science campaigns, observations, comparisons, and EVA mission sessions use `locked_resource` (re-entrant thread `RLock` + POSIX `fcntl.flock`) paired with `atomic_write_text`/`atomic_write_json` (temp file + `fsync` + `os.replace`), plus `expected_plan_version` and strict idempotency conflict detection (`HTTP 409 Conflict`).
+- **Security Boundaries:** Identifier sanitization, constant-time operator token verification (`MARSCOPE_OPERATOR_TOKEN`, fail-closed on `/orchestration/invalidate` and `/composition/index/rebuild`, and in production), strict `RAW_DIR`/`PROCESSED_DIR` containment checks before `FileResponse`, and explicit outbound archive host allowlists (`imagery.py` browse/download).
 
 ### Running the Application
 
@@ -184,9 +253,10 @@ MARSCOPE strictly enforces an anti-fabrication standard:
 - **Real 3D Terrain Mesh & Science-Aware Route Planning (Prompt 11):**
   - **3D Heightfield Mesh & Texture Streaming (`app/terrain/mesh.py`, `app/api/terrain_mesh.py`):** Serves tiled `LOD 0..2` DEM meshes over real NASA HiRISE DTMs (`DTEEC_009149_1750_009294_1750_U01.IMG`, `DTEEC_040770_1755_039280_1755_U01.IMG`, 1.01 m/px) and MOLA MEGDR 128 ppd (`MEGT00N090HB.IMG`, 463 m/px), with bit-identical seam vertex coordinates, omitted NoData (`valid_mask === 0`) triangles, `HeightGridResponse` (`grid_rows`, `grid_cols`, `elevations_m`) for CesiumJS `HeightmapTerrainData`, and aligned PNG imagery/derivative overlays (`ortho`, `elevation`, `slope`, `roughness`).
   - **Science-Aware Graph Routing (`app/routing/`, `/api/routing/*`):** 8-connected directed grid pathfinder (A* and Dijkstra verified identical optimal cost across all modes), strict orthogonal passability checks preventing corner-cutting across steep cliffs or NoData cells, 3D elevation + obstacle-checked polyline simplification, `Conservative` vs `Balanced` vs `Science-Priority` mode comparison (`/routes`), honest optional user-configured duration & gravitational climb work $m \cdot g_{\text{Mars}} \cdot \Delta h$ without unvalidated metabolic or $\text{O}_2$ curve fabrication, True North (`°T`) and Equirectangular Grid North (`°G`) instructions (`/planner`), interactive 3D traversal playback (`/simulation`), and GeoJSON export.
-- **Reproducible Offline Index Rebuild:**
+- **Reproducible Offline Bootstrap & Index Rebuild:**
   ```bash
-  PYTHONPATH=backend python3 backend/scripts/rebuild_composition_index.py [--strict] [--acquire]
+  python3 scripts/bootstrap_datasets.py --verify [--strict]
+  python3 scripts/bootstrap_datasets.py --rebuild-index
   ```
 - **Automated & Browser Verification (Prompt 11):**
   - Backend pytest suite: `backend/tests/test_prompt11_{terrain_mesh,routing,real_nasa_integration}.py` + prior suites (`test_geospatial`, `test_catalog`, `test_pds_parsing_and_coords`, `test_composition_discovery`, `test_prompt5/6/7/8`, `test_imagery_catalogue`) verified cleanly offline/with local NASA products (`NASA_INTEGRATION=1` network suite remains opt-in).

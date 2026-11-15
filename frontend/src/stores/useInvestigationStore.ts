@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { API_BASE_URL } from "../lib/constants";
+import { createChannelGuard, isAbortError, parseApiError } from "../lib/requestGuard";
 import { useEvaOperationsStore } from "./useEvaOperationsStore";
 import type {
   CampaignBuildRequest,
@@ -88,15 +89,14 @@ interface InvestigationState {
   fetchIngestionLedger: (limit?: number) => Promise<void>;
 }
 
-async function _parseError(res: Response, fallback: string): Promise<string> {
-  try {
-    const body = await res.json();
-    if (typeof body?.detail === "string") return body.detail;
-    return JSON.stringify(body?.detail ?? body);
-  } catch {
-    return `${fallback} (HTTP ${res.status})`;
-  }
-}
+const _parseError = parseApiError;
+
+const _discoveryGuard = createChannelGuard();
+const _targetsGuard = createChannelGuard();
+const _campaignGuard = createChannelGuard();
+const _freshnessGuard = createChannelGuard();
+const _lifecycleGuard = createChannelGuard();
+const _inspectGuard = createChannelGuard();
 
 export const useInvestigationStore = create<InvestigationState>((set, get) => ({
   instruments: [],
@@ -239,16 +239,20 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
   },
 
   discoverEvidence: async (questionId) => {
+    const { seq, signal } = _discoveryGuard.next();
     set({ loadingDiscovery: true, error: null });
     try {
       const res = await fetch(
-        `${API_BASE_URL}/science-investigation/questions/${encodeURIComponent(questionId)}/discover-evidence`
+        `${API_BASE_URL}/science-investigation/questions/${encodeURIComponent(questionId)}/discover-evidence`,
+        { signal, cache: "no-store" }
       );
       if (!res.ok) throw new Error(await _parseError(res, "Failed to discover question evidence"));
       const data: QuestionEvidenceDiscoveryResponse = await res.json();
+      if (!_discoveryGuard.isCurrent(seq)) return null;
       set({ discovery: data, loadingDiscovery: false });
       return data;
     } catch (e: unknown) {
+      if (isAbortError(e) || !_discoveryGuard.isCurrent(seq)) return null;
       set({
         loadingDiscovery: false,
         error: e instanceof Error ? e.message : "Failed to discover question evidence",
@@ -258,6 +262,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
   },
 
   evaluateTargets: async (partialReq = {}) => {
+    const { seq, signal } = _targetsGuard.next();
     set({ loadingTargets: true, error: null });
     try {
       const qId = partialReq.question_id ?? get().activeQuestionId;
@@ -272,12 +277,15 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        signal,
       });
       if (!res.ok) throw new Error(await _parseError(res, "Failed to evaluate targets"));
       const data: TargetEvaluationBatchResponse = await res.json();
+      if (!_targetsGuard.isCurrent(seq)) return null;
       set({ evaluatedBatch: data, loadingTargets: false });
       return data;
     } catch (e: unknown) {
+      if (isAbortError(e) || !_targetsGuard.isCurrent(seq)) return null;
       set({
         loadingTargets: false,
         error: e instanceof Error ? e.message : "Failed to evaluate targets",
@@ -322,18 +330,22 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
   },
 
   loadCampaign: async (campaignId) => {
+    const { seq, signal } = _campaignGuard.next();
     set({ loadingCampaign: true, error: null });
     try {
       const res = await fetch(
-        `${API_BASE_URL}/science-investigation/campaigns/${encodeURIComponent(campaignId)}`
+        `${API_BASE_URL}/science-investigation/campaigns/${encodeURIComponent(campaignId)}`,
+        { signal, cache: "no-store" }
       );
       if (!res.ok) throw new Error(await _parseError(res, "Failed to load campaign"));
       const plan: ScienceCampaignPlan = await res.json();
+      if (!_campaignGuard.isCurrent(seq)) return null;
       set({ activeCampaign: plan, loadingCampaign: false });
       useEvaOperationsStore.getState().syncFromCampaignEnvelope(plan.eva_envelope);
       void get().fetchLifecycle(campaignId);
       return plan;
     } catch (e: unknown) {
+      if (isAbortError(e) || !_campaignGuard.isCurrent(seq)) return null;
       set({
         loadingCampaign: false,
         error: e instanceof Error ? e.message : "Failed to load campaign",
@@ -343,13 +355,16 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
   },
 
   checkFreshness: async (campaignId) => {
+    const { seq, signal } = _freshnessGuard.next();
     set({ loadingFreshness: true });
     try {
       const res = await fetch(
-        `${API_BASE_URL}/science-investigation/campaigns/${encodeURIComponent(campaignId)}/freshness`
+        `${API_BASE_URL}/science-investigation/campaigns/${encodeURIComponent(campaignId)}/freshness`,
+        { signal, cache: "no-store" }
       );
       if (!res.ok) throw new Error(await _parseError(res, "Freshness check failed"));
       const rep: CampaignFreshnessReport = await res.json();
+      if (!_freshnessGuard.isCurrent(seq)) return null;
       set((s) => ({
         freshnessReport: rep,
         loadingFreshness: false,
@@ -364,6 +379,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
       }));
       return rep;
     } catch (e: unknown) {
+      if (isAbortError(e) || !_freshnessGuard.isCurrent(seq)) return null;
       set({
         loadingFreshness: false,
         error: e instanceof Error ? e.message : "Freshness check failed",
@@ -373,20 +389,26 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
   },
 
   recomputeCampaign: async (campaignId) => {
+    const { seq } = _campaignGuard.next();
     set({ loadingCampaign: true, error: null });
     try {
+      const cur = get().activeCampaign;
+      const expectedVer = cur?.campaign_id === campaignId ? cur.plan_version : undefined;
+      const qs = expectedVer ? `?expected_plan_version=${expectedVer}` : "";
       const res = await fetch(
-        `${API_BASE_URL}/science-investigation/campaigns/${encodeURIComponent(campaignId)}/recompute`,
+        `${API_BASE_URL}/science-investigation/campaigns/${encodeURIComponent(campaignId)}/recompute${qs}`,
         { method: "POST" }
       );
       if (!res.ok) throw new Error(await _parseError(res, "Campaign recompute failed"));
       const plan: ScienceCampaignPlan = await res.json();
+      if (!_campaignGuard.isCurrent(seq)) return null;
       set({ activeCampaign: plan, freshnessReport: null, loadingCampaign: false });
       useEvaOperationsStore.getState().syncFromCampaignEnvelope(plan.eva_envelope);
       await get().fetchCampaigns();
       void get().fetchLifecycle(campaignId);
       return plan;
     } catch (e: unknown) {
+      if (!_campaignGuard.isCurrent(seq)) return null;
       set({
         loadingCampaign: false,
         error: e instanceof Error ? e.message : "Campaign recompute failed",
@@ -496,19 +518,22 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
   },
 
   inspectProductDetail: async (datasetId, questionId = "gale_boxwork_origin") => {
+    const { seq, signal } = _inspectGuard.next();
     set({ loadingProductInspect: true, error: null });
     try {
       const res = await fetch(
         `${API_BASE_URL}/science-investigation/products/${encodeURIComponent(
           datasetId
         )}/inspect?question_id=${encodeURIComponent(questionId)}`,
-        { cache: "no-store" }
+        { cache: "no-store", signal }
       );
       if (!res.ok) throw new Error(await _parseError(res, "Product inspection failed"));
       const data: ProductDetailInspectionResponse = await res.json();
+      if (!_inspectGuard.isCurrent(seq)) return null;
       set({ inspectedProduct: data, loadingProductInspect: false });
       return data;
     } catch (e: unknown) {
+      if (isAbortError(e) || !_inspectGuard.isCurrent(seq)) return null;
       set({
         loadingProductInspect: false,
         error: e instanceof Error ? e.message : "Product inspection failed",
@@ -559,12 +584,18 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
   ) => {
     set({ loadingApprove: true, error: null });
     try {
+      const cur = get().activeCampaign;
+      const expectedPlanVersion = cur?.campaign_id === campaignId ? cur.plan_version : undefined;
       const res = await fetch(
         `${API_BASE_URL}/science-investigation/campaigns/${encodeURIComponent(campaignId)}/approve`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ operator_id: operatorId, note }),
+          body: JSON.stringify({
+            operator_id: operatorId,
+            note,
+            ...(expectedPlanVersion !== undefined ? { expected_plan_version: expectedPlanVersion } : {}),
+          }),
         }
       );
       if (!res.ok) throw new Error(await _parseError(res, "Campaign approval failed"));
@@ -584,13 +615,15 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
   },
 
   fetchLifecycle: async (campaignId) => {
+    const { seq, signal } = _lifecycleGuard.next();
     try {
       const res = await fetch(
         `${API_BASE_URL}/science-investigation/campaigns/${encodeURIComponent(campaignId)}/lifecycle`,
-        { cache: "no-store" }
+        { cache: "no-store", signal }
       );
       if (!res.ok) return null;
       const summary: MissionLifecycleSummaryResponse = await res.json();
+      if (!_lifecycleGuard.isCurrent(seq)) return null;
       set({ activeLifecycle: summary });
       return summary;
     } catch {

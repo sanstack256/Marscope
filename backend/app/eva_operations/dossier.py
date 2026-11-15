@@ -16,14 +16,22 @@ from pydantic import BaseModel, Field
 
 from app.eva_operations.replanning import MissionOperationalSession
 from app.eva_operations.sensitivity import MissionSensitivityAnalysisReport
+from app.science.investigation.canonical import (
+    CONTENT_DIGEST_SCHEMA_VERSION,
+    compute_export_artifact_digest,
+    compute_mission_content_digest,
+)
 
 
 class MissionOperationsDossier(BaseModel):
-    """Complete reproducible Mission Operations Dossier (Prompt 20 Part 13)."""
+    """Complete reproducible Mission Operations Dossier (Prompt 20 Part 13 / Prompt 22 Part 4)."""
 
     dossier_id: str
-    dossier_schema_version: str = "p20_mission_dossier_v2.0"
+    dossier_schema_version: str = "p22_mission_dossier_v2.1"
+    content_digest_schema_version: str = CONTENT_DIGEST_SCHEMA_VERSION
     exported_at_utc: str
+    mission_content_digest: str
+    export_artifact_digest: str
     sha256_integrity_digest: str
     mission_id: str
     mission_name: str
@@ -118,60 +126,68 @@ def build_mission_operations_dossier(
         "All operational evaluations are strictly bounded by configured models and user-supplied assumptions; no human survival or flight safety guarantee is claimed.",
     ]
 
-    core_payload = {
+    exported_at_utc = datetime.now(timezone.utc).isoformat()
+    dossier_body = {
+        "dossier_id": f"dossier_{uuid.uuid4().hex[:10]}",
+        "dossier_schema_version": "p22_mission_dossier_v2.1",
+        "content_digest_schema_version": CONTENT_DIGEST_SCHEMA_VERSION,
+        "exported_at_utc": exported_at_utc,
         "mission_id": env.mission_id,
-        "plan_version": env.plan_version,
-        "dataset_provenance": dataset_prov,
-        "configured_mission_inputs": cfg.model_dump(),
-        "outbound_route_summary": outbound_summary,
-        "return_plan_summary": return_summary,
-        "time_budget": env.time_budget.model_dump(),
-        "energy_budget": env.energy_budget.model_dump(),
-        "resource_budget": env.resource_budget.model_dump(),
-    }
-    digest = hashlib.sha256(
-        json.dumps(core_payload, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
-
-    return MissionOperationsDossier(
-        dossier_id=f"dossier_{uuid.uuid4().hex[:10]}",
-        exported_at_utc=datetime.now(timezone.utc).isoformat(),
-        sha256_integrity_digest=digest,
-        mission_id=env.mission_id,
-        mission_name=env.mission_name,
-        study_region=env.study_region,
-        workflow_state=session.workflow_state.value,
-        plan_version=session.active_plan_version,
-        stale=session.stale,
-        stale_reasons=session.stale_reasons,
-        feasibility_status=env.envelope_status.value,
-        model_feasibility_status=env.model_feasibility_status.value,
-        feasibility_summary=(
+        "mission_name": env.mission_name,
+        "study_region": env.study_region,
+        "workflow_state": session.workflow_state.value,
+        "plan_version": session.active_plan_version,
+        "stale": session.stale,
+        "stale_reasons": session.stale_reasons,
+        "feasibility_status": env.envelope_status.value,
+        "model_feasibility_status": env.model_feasibility_status.value,
+        "feasibility_summary": (
             f"Envelope status: {env.envelope_status.value} | "
             f"Model status: {env.model_feasibility_status.value}"
         ),
-        dataset_provenance=dataset_prov,
-        configured_mission_inputs=cfg.model_dump(),
-        parameter_provenance=[p.model_dump() for p in env.parameter_provenance],
-        locomotion_model=(
-            env.locomotion_model.model_dump() if env.locomotion_model is not None else None
+        "dataset_provenance": dataset_prov,
+        "configured_mission_inputs": cfg.model_dump(mode="json"),
+        "parameter_provenance": [p.model_dump(mode="json") for p in env.parameter_provenance],
+        "locomotion_model": (
+            env.locomotion_model.model_dump(mode="json") if env.locomotion_model is not None else None
         ),
-        locomotion_scenarios=[s.model_dump() for s in env.locomotion_scenarios],
-        traversability_analytics=env.traversability_analytics,
-        outbound_route_summary=outbound_summary,
-        return_plan_summary=return_summary,
-        time_budget=env.time_budget.model_dump(),
-        energy_budget=env.energy_budget.model_dump(),
-        resource_budget=env.resource_budget.model_dump(),
-        schedule=[s.model_dump() for s in env.schedule],
-        constraint_checks=[c.model_dump() for c in env.constraints],
-        environmental_context=(
-            env.environmental_context.model_dump() if env.environmental_context is not None else {}
+        "locomotion_scenarios": [s.model_dump(mode="json") for s in env.locomotion_scenarios],
+        "traversability_analytics": env.traversability_analytics,
+        "outbound_route_summary": outbound_summary,
+        "return_plan_summary": return_summary,
+        "time_budget": env.time_budget.model_dump(mode="json"),
+        "energy_budget": env.energy_budget.model_dump(mode="json"),
+        "resource_budget": env.resource_budget.model_dump(mode="json"),
+        "schedule": [s.model_dump(mode="json") for s in env.schedule],
+        "constraint_checks": [c.model_dump(mode="json") for c in env.constraints],
+        "environmental_context": (
+            env.environmental_context.model_dump(mode="json") if env.environmental_context is not None else {}
         ),
-        telemetry_state=(
-            env.telemetry_state.model_dump() if env.telemetry_state is not None else {}
+        "telemetry_state": (
+            env.telemetry_state.model_dump(mode="json") if env.telemetry_state is not None else {}
         ),
-        replanning_history=replan_hist,
-        sensitivity_analysis=sensitivity_report.model_dump(),
-        scientific_limitations_and_disclosures=disclosures,
-    )
+        "replanning_history": replan_hist,
+        "sensitivity_analysis": sensitivity_report.model_dump(mode="json"),
+        "scientific_limitations_and_disclosures": disclosures,
+    }
+    core_payload = {
+        "mission_id": dossier_body["mission_id"],
+        "plan_version": dossier_body["plan_version"],
+        "dataset_provenance": dossier_body["dataset_provenance"],
+        "configured_mission_inputs": dossier_body["configured_mission_inputs"],
+        "outbound_route_summary": dossier_body["outbound_route_summary"],
+        "return_plan_summary": dossier_body["return_plan_summary"],
+        "time_budget": dossier_body["time_budget"],
+        "energy_budget": dossier_body["energy_budget"],
+        "resource_budget": dossier_body["resource_budget"],
+    }
+    legacy_core_digest = hashlib.sha256(
+        json.dumps(core_payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    content_digest = compute_mission_content_digest(dossier_body)
+    dossier_body["mission_content_digest"] = content_digest
+    dossier_body["sha256_integrity_digest"] = legacy_core_digest
+    export_digest = compute_export_artifact_digest(dossier_body)
+    dossier_body["export_artifact_digest"] = export_digest
+
+    return MissionOperationsDossier(**dossier_body)

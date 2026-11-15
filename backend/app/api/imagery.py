@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from fastapi.responses import FileResponse, RedirectResponse
 from app.ingestion.imagery import ArchiveError, ImageryArchiveService
-from app.services.container import CATALOG_DIR, acquisition_service, RAW_DIR
+from app.services.container import CATALOG_DIR, acquisition_service, RAW_DIR, PROCESSED_DIR
 
 router = APIRouter(prefix="/imagery", tags=["NASA Imagery"])
 service = ImageryArchiveService(CATALOG_DIR / "imagery_products" / "catalog.json", raw_dir=RAW_DIR)
@@ -127,8 +127,16 @@ async def imagery_original(product_id: str):
     record = service.get(product_id)
     if record is None:
         raise HTTPException(status_code=404, detail={"error": "product_not_catalogued", "product_id": product_id})
-    if record.local_file_path and Path(record.local_file_path).is_file():
-        return FileResponse(record.local_file_path, filename=Path(record.local_file_path).name)
+    if record.local_file_path:
+        resolved = Path(record.local_file_path).resolve()
+        allowed_roots = (RAW_DIR.resolve(), PROCESSED_DIR.resolve())
+        if not any(resolved.is_relative_to(root) for root in allowed_roots):
+            raise HTTPException(
+                status_code=403,
+                detail={"error": "local_file_path_outside_allowed_directory", "product_id": product_id},
+            )
+        if resolved.is_file():
+            return FileResponse(str(resolved), filename=resolved.name)
     if "download_available" not in {stage.value for stage in record.stages} or not record.original_product_url:
         raise HTTPException(status_code=409, detail={"error": "original_image_not_verified_available", "product_id": product_id})
     return RedirectResponse(record.original_product_url, status_code=307)

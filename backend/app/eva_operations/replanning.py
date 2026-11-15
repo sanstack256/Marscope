@@ -205,6 +205,7 @@ class MissionEventIngestRequest(BaseModel):
     event_type: MissionEventType
     operator_id: str = Field(default="operator", min_length=1, max_length=80)
     description: str = Field(..., min_length=3, max_length=400)
+    client_event_id: Optional[str] = Field(default=None, max_length=120)
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -213,6 +214,7 @@ class MissionReplanRequest(BaseModel):
 
     operator_id: str = Field(default="operator", min_length=1, max_length=80)
     reason: str = Field(default="Operator-initiated replan evaluation", max_length=300)
+    expected_plan_version: Optional[int] = Field(default=None, ge=1)
     updated_config: MissionConfigRequest
 
 

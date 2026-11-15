@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import { API_BASE_URL } from "../lib/constants";
+import { createChannelGuard, isAbortError, parseApiError } from "../lib/requestGuard";
 import type {
   EvaEnvironmentalContextReport,
   EvaExplicitResourceSpec,
@@ -85,6 +86,11 @@ interface EvaOperationsState {
   evaluateMission: (params: EvaEvaluateParams) => Promise<EvaMissionEnvelopeResponse | null>;
 }
 
+const _missionLoadGuard = createChannelGuard();
+const _sessionGuard = createChannelGuard();
+const _sensitivityGuard = createChannelGuard();
+const _evalGuard = createChannelGuard();
+
 export const useEvaOperationsStore = create<EvaOperationsState>((set, get) => ({
   evaEnvelope: null,
   lastEvalParams: null,
@@ -128,17 +134,16 @@ export const useEvaOperationsStore = create<EvaOperationsState>((set, get) => ({
   },
 
   loadLinkedMission: async (missionId) => {
+    const { seq, signal } = _missionLoadGuard.next();
     set({ loadingEva: true, error: null });
     try {
       const res = await fetch(
         `${API_BASE_URL}/eva-operations/mission/${encodeURIComponent(missionId)}/session`,
-        { cache: "no-store" }
+        { cache: "no-store", signal }
       );
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error(await parseApiError(res, `Failed to load mission '${missionId}'`));
       const session: MissionOperationalSession = await res.json();
+      if (!_missionLoadGuard.isCurrent(seq)) return null;
       set({
         missionSession: session,
         evaEnvelope: session.active_envelope,
@@ -151,6 +156,7 @@ export const useEvaOperationsStore = create<EvaOperationsState>((set, get) => ({
       void get().fetchReturnAnalysis(missionId);
       return session;
     } catch (e: unknown) {
+      if (isAbortError(e) || !_missionLoadGuard.isCurrent(seq)) return null;
       const msg = e instanceof Error ? e.message : "Failed to load linked mission session";
       set({ error: msg, loadingEva: false });
       return null;
@@ -175,13 +181,15 @@ export const useEvaOperationsStore = create<EvaOperationsState>((set, get) => ({
   },
 
   fetchSession: async (missionId) => {
+    const { seq, signal } = _sessionGuard.next();
     try {
       const res = await fetch(
         `${API_BASE_URL}/eva-operations/mission/${encodeURIComponent(missionId)}/session`,
-        { cache: "no-store" }
+        { cache: "no-store", signal }
       );
       if (!res.ok) return;
       const session: MissionOperationalSession = await res.json();
+      if (!_sessionGuard.isCurrent(seq)) return;
       set({
         missionSession: session,
         evaEnvelope: session.active_envelope,
@@ -193,20 +201,22 @@ export const useEvaOperationsStore = create<EvaOperationsState>((set, get) => ({
   },
 
   fetchSensitivity: async (missionId) => {
+    const { seq, signal } = _sensitivityGuard.next();
     set({ loadingSensitivity: true });
     try {
       const res = await fetch(
         `${API_BASE_URL}/eva-operations/mission/${encodeURIComponent(missionId)}/sensitivity`,
-        { cache: "no-store" }
+        { cache: "no-store", signal }
       );
       if (!res.ok) {
-        set({ loadingSensitivity: false });
+        if (_sensitivityGuard.isCurrent(seq)) set({ loadingSensitivity: false });
         return;
       }
       const rep: MissionSensitivityAnalysisReport = await res.json();
+      if (!_sensitivityGuard.isCurrent(seq)) return;
       set({ sensitivityReport: rep, loadingSensitivity: false });
     } catch {
-      set({ loadingSensitivity: false });
+      if (_sensitivityGuard.isCurrent(seq)) set({ loadingSensitivity: false });
     }
   },
 
@@ -289,18 +299,20 @@ export const useEvaOperationsStore = create<EvaOperationsState>((set, get) => ({
   previewReplan: async (missionId, payload) => {
     set({ loadingReplan: true, error: null });
     try {
+      const activeVer = get().missionSession?.mission_id === missionId ? get().missionSession?.active_plan_version : undefined;
+      const bodyPayload = {
+        ...payload,
+        ...(activeVer !== undefined ? { expected_plan_version: activeVer } : {}),
+      };
       const res = await fetch(
         `${API_BASE_URL}/eva-operations/mission/${encodeURIComponent(missionId)}/replan/preview`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+          body: JSON.stringify(bodyPayload),
         }
       );
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error(await parseApiError(res, "Failed to preview mission replan"));
       const cmp: PlanComparisonReport = await res.json();
       set({ pendingComparison: cmp, loadingReplan: false });
       await get().fetchSession(missionId);
@@ -315,18 +327,20 @@ export const useEvaOperationsStore = create<EvaOperationsState>((set, get) => ({
   approveReplan: async (missionId, note = "Operator verified and approved revised plan") => {
     set({ loadingReplan: true, error: null });
     try {
+      const activeVer = get().missionSession?.mission_id === missionId ? get().missionSession?.active_plan_version : undefined;
       const res = await fetch(
         `${API_BASE_URL}/eva-operations/mission/${encodeURIComponent(missionId)}/replan/approve`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ operator_id: "operator", note }),
+          body: JSON.stringify({
+            operator_id: "operator",
+            note,
+            ...(activeVer !== undefined ? { expected_plan_version: activeVer } : {}),
+          }),
         }
       );
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error(await parseApiError(res, "Failed to approve revised plan"));
       const session: MissionOperationalSession = await res.json();
       set({
         missionSession: session,
@@ -344,18 +358,20 @@ export const useEvaOperationsStore = create<EvaOperationsState>((set, get) => ({
   rejectReplan: async (missionId, note = "Operator retained previous plan") => {
     set({ loadingReplan: true, error: null });
     try {
+      const activeVer = get().missionSession?.mission_id === missionId ? get().missionSession?.active_plan_version : undefined;
       const res = await fetch(
         `${API_BASE_URL}/eva-operations/mission/${encodeURIComponent(missionId)}/replan/reject`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ operator_id: "operator", note }),
+          body: JSON.stringify({
+            operator_id: "operator",
+            note,
+            ...(activeVer !== undefined ? { expected_plan_version: activeVer } : {}),
+          }),
         }
       );
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error(await parseApiError(res, "Failed to reject revised plan"));
       const session: MissionOperationalSession = await res.json();
       set({
         missionSession: session,
@@ -370,18 +386,18 @@ export const useEvaOperationsStore = create<EvaOperationsState>((set, get) => ({
   },
 
   evaluateMission: async (params) => {
+    const { seq, signal } = _evalGuard.next();
     set({ loadingEva: true, error: null, lastEvalParams: params });
     try {
       const res = await fetch(`${API_BASE_URL}/eva-operations/mission/evaluate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(params),
+        signal,
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || `HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error(await parseApiError(res, "Failed to evaluate EVA operational envelope"));
       const data: EvaMissionEnvelopeResponse = await res.json();
+      if (!_evalGuard.isCurrent(seq)) return null;
       set({
         evaEnvelope: data,
         environmentalContext: data.environmental_context ?? null,
@@ -394,6 +410,7 @@ export const useEvaOperationsStore = create<EvaOperationsState>((set, get) => ({
       void get().fetchSensitivity(data.mission_id);
       return data;
     } catch (e: unknown) {
+      if (isAbortError(e) || !_evalGuard.isCurrent(seq)) return null;
       const msg = e instanceof Error ? e.message : "Failed to evaluate EVA operational envelope";
       set({ error: msg, loadingEva: false });
       return null;

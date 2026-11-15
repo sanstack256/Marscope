@@ -7,12 +7,15 @@ independently from discovery/license/download/processing, and persists metadata.
 """
 
 from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import httpx
+from app.core.persistence import atomic_write_text
 from app.geospatial.crs import validate_mars_crs
 from app.geospatial.raster import RasterInspectionService
-from app.ingestion.acquisition import AcquisitionService, safe_write_downloaded_bytes
+from app.ingestion.acquisition import AcquisitionService, safe_write_downloaded_bytes, validate_artifact_signature
 from app.ingestion.pds_label import extract_pds3_metadata, extract_pds4_metadata
 from app.ingestion.sources.hirise import HiriseSourceAdapter
 from app.ingestion.sources.mars_trek import MarsTrekSourceAdapter
@@ -21,10 +24,12 @@ from app.ingestion.sources.pds_mola import PdsMolaSourceAdapter
 from app.ingestion.sources.usgs_pgm import UsgsPlanetaryGeologicMappingAdapter
 from app.schemas.dataset import (
     AcquisitionState,
+    ChecksumSource,
     Dataset,
     DatasetLifecycleStatus,
     VerificationState,
     lifecycle_to_acquisition_state,
+    map_dataset_lifecycle_state,
 )
 
 
@@ -447,17 +452,46 @@ class DatasetCatalogService:
                 return cand
         return None
 
+    @staticmethod
+    def _compute_file_sha256(path: Path) -> str:
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    @staticmethod
+    def _validate_processing_manifest(proc_json_path: Path, dataset: Dataset, processed_path: Path) -> tuple[bool, Optional[str]]:
+        try:
+            payload = json.loads(proc_json_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return False, f"Corrupt .processing.json at '{proc_json_path.name}': {exc}"
+        if not isinstance(payload, dict):
+            return False, f"Invalid .processing.json structure at '{proc_json_path.name}': expected JSON object."
+        rec_ds = payload.get("dataset_id") or payload.get("source_dataset_id")
+        if rec_ds and str(rec_ds) != dataset.id:
+            return False, f"Processing manifest dataset_id '{rec_ds}' does not match '{dataset.id}'."
+        if not processed_path.exists() or not processed_path.is_file() or processed_path.stat().st_size == 0:
+            return False, f"Processed artifact '{processed_path.name}' missing or empty."
+        rec_raw_sha = payload.get("raw_sha256") or payload.get("source_sha256")
+        if rec_raw_sha and dataset.sha256_checksum and str(rec_raw_sha).lower() != dataset.sha256_checksum.lower():
+            return False, "Processing manifest source SHA-256 differs from current verified raw SHA-256 (stale processed artifact)."
+        rec_proc_sha = payload.get("processed_sha256") or payload.get("output_sha256")
+        if rec_proc_sha:
+            actual_proc_sha = DatasetCatalogService._compute_file_sha256(processed_path)
+            if actual_proc_sha.lower() != str(rec_proc_sha).lower():
+                return False, "Processed artifact SHA-256 mismatch vs .processing.json."
+        return True, None
+
     def _persist_dataset(self, dataset: Dataset) -> None:
         file_path = self.catalog_storage_dir / f"{dataset.id}.json"
-        file_path.write_text(dataset.model_dump_json(indent=2), encoding="utf-8")
+        atomic_write_text(file_path, dataset.model_dump_json(indent=2))
 
     def _load_persisted_catalog(self) -> None:
         bootstrap_map: Dict[str, Dict[str, Any]] = {}
         try:
             bpath = self.catalog_storage_dir.parent / "bootstrap_manifest.json"
             if bpath.exists():
-                import json
-
                 bdata = json.loads(bpath.read_text(encoding="utf-8"))
                 for item in bdata.get("products") or []:
                     bootstrap_map[str(item["dataset_id"])] = item
@@ -474,43 +508,83 @@ class DatasetCatalogService:
 
                 # Reconcile tracked catalog record against actual .gitignore'd workspace files
                 b_entry = bootstrap_map.get(ds.id)
+                expected_sha = (
+                    str(b_entry["expected_sha256"]).strip().lower()
+                    if b_entry and b_entry.get("expected_sha256")
+                    else (str(ds.sha256_checksum).strip().lower() if ds.sha256_checksum else None)
+                )
+                has_manifest_pin = bool(b_entry and b_entry.get("expected_sha256"))
+
+                raw_cand: Optional[Path] = None
                 if not is_wmts and b_entry:
                     raw_cand = self._resolve_existing_path(b_entry.get("expected_raw_path"))
-                    if raw_cand is not None:
-                        exp_sz = b_entry.get("expected_size_bytes")
-                        size_ok = (exp_sz is None) or (raw_cand.stat().st_size == int(exp_sz))
-                        if size_ok:
+                elif not is_wmts and ds.local_file_path:
+                    raw_cand = self._resolve_existing_path(ds.local_file_path)
+
+                if not is_wmts and raw_cand is not None:
+                    actual_size = raw_cand.stat().st_size
+                    exp_sz = b_entry.get("expected_size_bytes") if b_entry else ds.file_size_bytes
+                    size_ok = (exp_sz is None) or (actual_size == int(exp_sz))
+                    actual_sha = self._compute_file_sha256(raw_cand)
+
+                    if not size_ok:
+                        ds.status = DatasetLifecycleStatus.FAILED_VALIDATION
+                        ds.failure_reason = f"Local raw size mismatch: expected {exp_sz} B, found {actual_size} B."
+                        ds.verification.download_verification = VerificationState.FAILED
+                    elif expected_sha and actual_sha.lower() != expected_sha.lower():
+                        ds.status = DatasetLifecycleStatus.FAILED_VALIDATION
+                        ds.failure_reason = (
+                            f"SHA-256 integrity mismatch for '{raw_cand.name}': "
+                            f"expected {expected_sha[:16]}..., got {actual_sha[:16]}..."
+                        )
+                        ds.verification.download_verification = VerificationState.FAILED
+                    else:
+                        if b_entry and b_entry.get("expected_raw_path"):
                             ds.local_file_path = str(b_entry["expected_raw_path"])
                             lbl_cand = self._resolve_existing_path(b_entry.get("expected_label_path"))
                             if lbl_cand is not None:
                                 ds.local_label_path = str(b_entry["expected_label_path"])
-                            if ds.file_size_bytes is None:
-                                ds.file_size_bytes = raw_cand.stat().st_size
-                            if not ds.sha256_checksum and b_entry.get("expected_sha256"):
-                                ds.sha256_checksum = str(b_entry["expected_sha256"])
-                            ds.verification.download_verification = VerificationState.VERIFIED
-                            ds.verification.archive_availability = VerificationState.VERIFIED
-                            if ds.status == DatasetLifecycleStatus.DISCOVERED:
-                                ds.status = DatasetLifecycleStatus.DOWNLOADED
-                            mpath = manifests_dir / f"{ds.id}.manifest.json"
-                            if mpath.exists() and not ds.failure_reason:
-                                ds.verification.metadata_verification = VerificationState.VERIFIED
-                                ds.verification.coverage_verification = VerificationState.VERIFIED
-                                ds.verification.field_verification.update(
-                                    {
-                                        "crs": VerificationState.VERIFIED,
-                                        "units": VerificationState.VERIFIED,
-                                        "coverage": VerificationState.VERIFIED,
-                                        "license": VerificationState.VERIFIED,
-                                    }
-                                )
+                        ds.file_size_bytes = actual_size
+                        if not ds.sha256_checksum:
+                            ds.sha256_checksum = actual_sha
+                        if ds.checksum_source is None:
+                            ds.checksum_source = (
+                                ChecksumSource.MANIFEST_PINNED
+                                if has_manifest_pin
+                                else ChecksumSource.LOCALLY_COMPUTED_ONLY
+                            )
+                        ds.verification.download_verification = VerificationState.VERIFIED
+                        ds.verification.archive_availability = VerificationState.VERIFIED
+                        if ds.status == DatasetLifecycleStatus.DISCOVERED:
+                            ds.status = DatasetLifecycleStatus.DOWNLOADED
+                        mpath = manifests_dir / f"{ds.id}.manifest.json"
+                        if mpath.exists() and not ds.failure_reason:
+                            ds.verification.metadata_verification = VerificationState.VERIFIED
+                            ds.verification.coverage_verification = VerificationState.VERIFIED
+                            ds.verification.field_verification.update(
+                                {
+                                    "crs": VerificationState.VERIFIED,
+                                    "units": VerificationState.VERIFIED,
+                                    "coverage": VerificationState.VERIFIED,
+                                    "license": VerificationState.VERIFIED,
+                                }
+                            )
 
-                    proc_cand = self._resolve_existing_path(b_entry.get("expected_processed_path"))
+                if not is_wmts and ds.status != DatasetLifecycleStatus.FAILED_VALIDATION:
+                    proc_rel = b_entry.get("expected_processed_path") if b_entry else ds.processed_file_path
+                    proc_cand = self._resolve_existing_path(proc_rel) if proc_rel else None
                     proc_json = processed_dir / f"{ds.id}.processing.json"
                     if proc_cand is not None and proc_json.exists() and not ds.failure_reason:
-                        ds.processed_file_path = str(b_entry["expected_processed_path"])
-                        ds.verification.processing_verification = VerificationState.VERIFIED
-                        ds.status = DatasetLifecycleStatus.PROCESSED
+                        proc_ok, proc_err = self._validate_processing_manifest(proc_json, ds, proc_cand)
+                        if proc_ok:
+                            ds.processed_file_path = str(proc_rel)
+                            ds.verification.processing_verification = VerificationState.VERIFIED
+                            ds.status = DatasetLifecycleStatus.PROCESSED
+                        else:
+                            ds.processed_file_path = None
+                            ds.verification.processing_verification = VerificationState.FAILED
+                            ds.status = DatasetLifecycleStatus.FAILED_PROCESSING
+                            ds.failure_reason = proc_err
 
                 if ds.local_file_path and self._resolve_existing_path(ds.local_file_path) is None:
                     ds.local_file_path = None
@@ -536,7 +610,7 @@ class DatasetCatalogService:
                         else DatasetLifecycleStatus.DISCOVERED
                     )
                     ds.verification.coverage_verification = VerificationState.UNVERIFIED
-                    note = "Local raw/processed asset absent on disk in this checkout; run bootstrap_datasets.py --verify/--acquire."
+                    note = "Local raw/processed asset absent on disk in this checkout; run scripts/bootstrap_datasets.py --verify/--acquire."
                     if note not in ds.verification.evidence_notes:
                         ds.verification.evidence_notes.append(note)
 
@@ -552,3 +626,166 @@ class DatasetCatalogService:
                 self._datasets[ds.id] = ds
             except Exception as exc:
                 print(f"Failed to read catalog entry from {json_file}: {exc}")
+
+    def audit_dataset_readiness(
+        self,
+        *,
+        composition_index: Optional[Any] = None,
+        verify_checksums: bool = True,
+    ) -> Dict[str, Any]:
+        """Return Prompt 22 Section 12 12-property Data Readiness Audit across all cataloged datasets."""
+        bootstrap_map: Dict[str, Dict[str, Any]] = {}
+        bpath = self.catalog_storage_dir.parent / "bootstrap_manifest.json"
+        if bpath.exists():
+            try:
+                bdata = json.loads(bpath.read_text(encoding="utf-8"))
+                for item in bdata.get("products") or []:
+                    bootstrap_map[str(item["dataset_id"])] = item
+            except Exception:
+                bootstrap_map = {}
+
+        idx_status = None
+        indexed_ds_ids: set[str] = set()
+        if composition_index is not None:
+            try:
+                idx_status = composition_index.get_status()
+                for ds_name in (idx_status.dataset_counts or {}).keys():
+                    indexed_ds_ids.add(str(ds_name))
+            except Exception:
+                idx_status = None
+
+        processed_dir = self.catalog_storage_dir.parent / "processed"
+        records: List[Dict[str, Any]] = []
+        state_counts: Dict[str, int] = {}
+
+        for ds in sorted(self._datasets.values(), key=lambda d: d.id):
+            is_wmts = "{" in (ds.original_product_url or "")
+            b_entry = bootstrap_map.get(ds.id) or {}
+            mandatory = bool(b_entry.get("mandatory_for_gale_workflow", False))
+            companions = [str(c) for c in (b_entry.get("companion_dependencies") or [])]
+            ds_root = self.catalog_storage_dir.parent
+            missing_comp = [c for c in companions if not (ds_root / c).exists()]
+
+            raw_path = self._resolve_existing_path(ds.local_file_path or b_entry.get("expected_raw_path"))
+            raw_exists = raw_path is not None and raw_path.is_file()
+            actual_size = raw_path.stat().st_size if raw_exists else None
+
+            expected_sha = (
+                str(b_entry["expected_sha256"]).strip().lower()
+                if b_entry.get("expected_sha256")
+                else (str(ds.sha256_checksum).strip().lower() if ds.sha256_checksum else None)
+            )
+            actual_sha: Optional[str] = None
+            checksum_matches: Optional[bool] = None
+            checksum_source = ds.checksum_source.value if ds.checksum_source else (
+                ChecksumSource.MANIFEST_PINNED.value if b_entry.get("expected_sha256") else ChecksumSource.UNAVAILABLE.value
+            )
+            if raw_exists and verify_checksums:
+                actual_sha = self._compute_file_sha256(raw_path)
+                if expected_sha:
+                    checksum_matches = actual_sha.lower() == expected_sha.lower()
+                else:
+                    checksum_source = ChecksumSource.LOCALLY_COMPUTED_ONLY.value
+
+            format_ok = False
+            if raw_exists:
+                try:
+                    validate_artifact_signature(raw_path.read_bytes()[:4096], raw_path)
+                    format_ok = True
+                except Exception:
+                    format_ok = False
+
+            proc_rel = b_entry.get("expected_processed_path") or ds.processed_file_path
+            proc_path = self._resolve_existing_path(proc_rel) if proc_rel else None
+            proc_exists = proc_path is not None and proc_path.is_file()
+            proc_json = processed_dir / f"{ds.id}.processing.json"
+            proc_valid: Optional[bool] = None
+            proc_err: Optional[str] = None
+            if proc_exists and proc_json.exists():
+                proc_valid, proc_err = self._validate_processing_manifest(proc_json, ds, proc_path)
+            elif proc_exists and not proc_json.exists():
+                proc_valid = False
+                proc_err = f"Missing processing manifest '{proc_json.name}'."
+
+            is_indexed = ds.id in indexed_ds_ids or any(ds.id.lower() in k.lower() for k in indexed_ds_ids)
+            crs_ok = bool(ds.coordinate_reference_system)
+            units_ok = bool(ds.units and ds.units.lower() != "unknown")
+
+            lifecycle_13 = map_dataset_lifecycle_state(
+                ds.status,
+                is_wmts=is_wmts,
+                has_raw_file=raw_exists,
+                has_expected_sha256=bool(expected_sha),
+                checksum_matches=checksum_matches,
+                companion_missing=bool(missing_comp),
+                format_validated=format_ok,
+                has_processed_artifact=proc_exists,
+                processing_manifest_valid=proc_valid,
+                is_indexed=is_indexed,
+            )
+            state_counts[lifecycle_13] = state_counts.get(lifecycle_13, 0) + 1
+
+            if is_wmts:
+                repro_tier = "REMOTE_WMTS_SERVICE"
+                remediation = "Remote NASA/USGS WMTS imagery service; usable only when network egress is permitted."
+            elif lifecycle_13 in {"INDEXED", "PROCESSED", "VALIDATED_FORMAT", "HASH_VERIFIED"} and checksum_matches is not False:
+                repro_tier = "OFFLINE_REPRODUCIBLE"
+                remediation = "Ready for offline verification and processing."
+            elif lifecycle_13 in {"CORRUPT", "MISSING_COMPANION_FILES"}:
+                repro_tier = "CORRUPT_OR_INCOMPLETE"
+                remediation = proc_err or ds.failure_reason or (
+                    f"Re-acquire dataset '{ds.id}' via `python3 scripts/bootstrap_datasets.py --acquire --dataset-id {ds.id} --overwrite`."
+                )
+            else:
+                repro_tier = "ONLINE_ACQUIRABLE"
+                remediation = (
+                    f"Absent locally; acquire via `python3 scripts/bootstrap_datasets.py --acquire --dataset-id {ds.id}`."
+                )
+
+            records.append(
+                {
+                    "dataset_id": ds.id,
+                    "product_id": ds.product_id,
+                    "mission_instrument": f"{ds.mission} / {ds.instrument}",
+                    "catalog_status": ds.status.value,
+                    "lifecycle_state": lifecycle_13,
+                    "raw_file_exists": raw_exists,
+                    "raw_path": str(ds.local_file_path or b_entry.get("expected_raw_path") or ""),
+                    "raw_size_bytes": actual_size,
+                    "companion_labels_present": len(missing_comp) == 0,
+                    "missing_companions": missing_comp,
+                    "checksum_status": {
+                        "expected_sha256": expected_sha,
+                        "actual_sha256": actual_sha,
+                        "checksum_verified": checksum_matches,
+                        "checksum_source": checksum_source,
+                    },
+                    "format_validation_status": "verified" if format_ok else ("unavailable" if not raw_exists else "failed"),
+                    "processed_artifact_exists": proc_exists,
+                    "processed_path": str(proc_rel or ""),
+                    "processing_manifest_valid": proc_valid,
+                    "crs_and_units_verified": {"crs_ok": crs_ok, "crs": ds.coordinate_reference_system, "units_ok": units_ok, "units": ds.units},
+                    "indexed_in_composition_store": is_indexed,
+                    "index_generation_id": getattr(idx_status, "active_generation_id", None) if idx_status else None,
+                    "mandatory_for_gale_workflow": mandatory,
+                    "reproducibility_tier": repro_tier,
+                    "remediation_hint": remediation,
+                }
+            )
+
+        mandatory_items = [r for r in records if r["mandatory_for_gale_workflow"]]
+        mandatory_ready = all(
+            r["lifecycle_state"] in {"INDEXED", "PROCESSED", "VALIDATED_FORMAT", "HASH_VERIFIED"}
+            for r in mandatory_items
+        ) if mandatory_items else False
+
+        return {
+            "checked_at_utc": datetime.now(timezone.utc).isoformat(),
+            "total_catalog_datasets": len(records),
+            "mandatory_gale_count": len(mandatory_items),
+            "mandatory_gale_ready": mandatory_ready,
+            "lifecycle_state_counts": state_counts,
+            "index_available": bool(getattr(idx_status, "index_available", False)) if idx_status else False,
+            "active_index_generation": getattr(idx_status, "active_generation_id", None) if idx_status else None,
+            "datasets": records,
+        }

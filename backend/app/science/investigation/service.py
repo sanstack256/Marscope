@@ -15,8 +15,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.core.persistence import atomic_write_text, locked_resource
 from app.mobility.terrain_features import mars_great_circle_distance_meters
 from app.science.composition.species import list_all_species
+from app.science.investigation.canonical import (
+    CONTENT_DIGEST_SCHEMA_VERSION,
+    canonicalize_value,
+    compute_export_artifact_digest,
+    compute_mission_content_digest,
+    evaluate_dossier_reproducibility,
+    verify_campaign_dossier,
+)
 from app.science.investigation.campaign import (
     build_science_campaign_plan,
     evaluate_campaign_freshness,
@@ -55,22 +64,7 @@ from app.science.investigation.target_evaluation import evaluate_targets_for_que
 
 
 def _atomic_write_json(target_path: Path, text: str) -> None:
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{target_path.stem}_", suffix=".tmp", dir=str(target_path.parent)
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as h:
-            h.write(text)
-            h.flush()
-            os.fsync(h.fileno())
-        os.replace(tmp_name, target_path)
-    finally:
-        if os.path.exists(tmp_name):
-            try:
-                os.remove(tmp_name)
-            except OSError:
-                pass
+    atomic_write_text(target_path, text)
 
 
 class ScienceInvestigationService:
@@ -186,55 +180,73 @@ class ScienceInvestigationService:
         q = self.questions_repo.get_question(req.question_id)
         if q is None:
             raise KeyError(f"Science question '{req.question_id}' not found.")
-        prev_plan: Optional[ScienceCampaignPlan] = None
-        if req.campaign_id:
-            prev_path = self._campaign_path(req.campaign_id)
-            if prev_path.exists():
-                prev_plan = self._read_campaign_file(prev_path)
-                if req.expected_plan_version is not None and prev_plan.plan_version != req.expected_plan_version:
-                    raise LookupError(
-                        f"Plan version conflict for campaign '{req.campaign_id}': "
-                        f"expected v{req.expected_plan_version}, current active is v{prev_plan.plan_version}."
-                    )
-        plan = build_science_campaign_plan(
-            req=req,
-            question=q,
-            catalog_service=self.catalog_service,
-            target_registry=self.target_registry,
-            composition_search_service=self.composition_search_service,
-            composition_index=self.composition_index,
-            imagery_service=self.imagery_service,
-            routing_service=self.routing_service,
-            evidence_service=self.evidence_service,
-            recorded_observations=self.list_observations(),
-            eva_operations_service=self.eva_operations_service,
-            morphology_service=self.morphology_service,
-            spatial_coverage_service=self.spatial_coverage_service,
-        )
-        if prev_plan is not None:
-            plan = plan.model_copy(
-                update={
-                    "plan_version": prev_plan.plan_version + 1,
-                    "operator_approved": False,
-                    "hypothesis_reassessments": list(prev_plan.hypothesis_reassessments),
-                    "linked_invalidation_events": list(prev_plan.linked_invalidation_events),
-                    "lifecycle_transitions": list(prev_plan.lifecycle_transitions)
-                    + [
-                        {
-                            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                            "to_state": plan.integrated_lifecycle_state.value,
-                            "reason": f"Recomputed campaign v{prev_plan.plan_version + 1} (operator re-approval required)",
-                            "operator_approved": False,
-                        }
-                    ],
-                }
+
+        def _build_under_lock(lock_id: Optional[str]) -> ScienceCampaignPlan:
+            prev_plan: Optional[ScienceCampaignPlan] = None
+            if req.campaign_id:
+                prev_path = self._campaign_path(req.campaign_id)
+                if prev_path.exists():
+                    prev_plan = self._read_campaign_file(prev_path)
+                    if req.expected_plan_version is not None and prev_plan.plan_version != req.expected_plan_version:
+                        raise LookupError(
+                            f"Plan version conflict for campaign '{req.campaign_id}': "
+                            f"expected v{req.expected_plan_version}, current active is v{prev_plan.plan_version}."
+                        )
+            plan = build_science_campaign_plan(
+                req=req,
+                question=q,
+                catalog_service=self.catalog_service,
+                target_registry=self.target_registry,
+                composition_search_service=self.composition_search_service,
+                composition_index=self.composition_index,
+                imagery_service=self.imagery_service,
+                routing_service=self.routing_service,
+                evidence_service=self.evidence_service,
+                recorded_observations=self.list_observations(),
+                eva_operations_service=self.eva_operations_service,
+                morphology_service=self.morphology_service,
+                spatial_coverage_service=self.spatial_coverage_service,
             )
-        self._save_campaign(plan)
-        return plan
+            if prev_plan is not None:
+                plan = plan.model_copy(
+                    update={
+                        "plan_version": prev_plan.plan_version + 1,
+                        "operator_approved": False,
+                        "hypothesis_reassessments": list(prev_plan.hypothesis_reassessments),
+                        "linked_invalidation_events": list(prev_plan.linked_invalidation_events),
+                        "lifecycle_transitions": list(prev_plan.lifecycle_transitions)
+                        + [
+                            {
+                                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                                "to_state": plan.integrated_lifecycle_state.value,
+                                "reason": f"Recomputed campaign v{prev_plan.plan_version + 1} (operator re-approval required)",
+                                "operator_approved": False,
+                            }
+                        ],
+                    }
+                )
+            with locked_resource(self._campaign_lock(plan.campaign_id)):
+                self._save_campaign(plan)
+            return plan
+
+        if req.campaign_id:
+            with locked_resource(self._campaign_lock(req.campaign_id)):
+                return _build_under_lock(req.campaign_id)
+        return _build_under_lock(None)
 
     def _campaign_path(self, campaign_id: str) -> Path:
         safe_id = "".join(c if c.isalnum() or c in {"-", "_"} else "_" for c in campaign_id)
         return self.campaigns_dir / f"{safe_id}.json"
+
+    def _campaign_lock(self, campaign_id: str) -> Path:
+        safe_id = "".join(c if c.isalnum() or c in {"-", "_"} else "_" for c in campaign_id)
+        return self.campaigns_dir / f".{safe_id}.lock"
+
+    def _observations_lock(self) -> Path:
+        return self.base_dir / ".observations.lock"
+
+    def _comparisons_lock(self) -> Path:
+        return self.base_dir / ".comparisons.lock"
 
     def _read_campaign_file(self, p: Path) -> ScienceCampaignPlan:
         try:
@@ -332,23 +344,24 @@ class ScienceInvestigationService:
     def recompute_campaign(
         self, campaign_id: str, *, expected_plan_version: Optional[int] = None
     ) -> ScienceCampaignPlan:
-        existing = self.get_campaign(campaign_id)
-        if existing is None:
-            raise KeyError(f"Science campaign '{campaign_id}' not found.")
-        if expected_plan_version is not None and existing.plan_version != expected_plan_version:
-            raise LookupError(
-                f"Plan version conflict for '{campaign_id}': expected v{expected_plan_version}, actual v{existing.plan_version}."
+        with locked_resource(self._campaign_lock(campaign_id)):
+            existing = self.get_campaign(campaign_id)
+            if existing is None:
+                raise KeyError(f"Science campaign '{campaign_id}' not found.")
+            if expected_plan_version is not None and existing.plan_version != expected_plan_version:
+                raise LookupError(
+                    f"Plan version conflict for '{campaign_id}': expected v{expected_plan_version}, actual v{existing.plan_version}."
+                )
+            req = existing.request.model_copy(
+                update={"campaign_id": existing.campaign_id, "expected_plan_version": expected_plan_version}
             )
-        req = existing.request.model_copy(
-            update={"campaign_id": existing.campaign_id, "expected_plan_version": expected_plan_version}
-        )
-        new_plan = self.build_campaign(req)
-        # Mark previously logged invalidation events as resolved in the recomputed baseline
-        if new_plan.linked_invalidation_events:
-            resolved_evts = [{**e, "resolved": True} for e in new_plan.linked_invalidation_events]
-            new_plan = new_plan.model_copy(update={"linked_invalidation_events": resolved_evts})
-            self._save_campaign(new_plan)
-        return new_plan
+            new_plan = self.build_campaign(req)
+            # Mark previously logged invalidation events as resolved in the recomputed baseline
+            if new_plan.linked_invalidation_events:
+                resolved_evts = [{**e, "resolved": True} for e in new_plan.linked_invalidation_events]
+                new_plan = new_plan.model_copy(update={"linked_invalidation_events": resolved_evts})
+                self._save_campaign(new_plan)
+            return new_plan
 
     def approve_campaign(
         self,
@@ -358,51 +371,52 @@ class ScienceInvestigationService:
         note: str = "",
         expected_plan_version: Optional[int] = None,
     ) -> ScienceCampaignPlan:
-        plan = self.get_campaign(campaign_id)
-        if plan is None:
-            raise KeyError(f"Science campaign '{campaign_id}' not found.")
-        if expected_plan_version is not None and plan.plan_version != expected_plan_version:
-            raise LookupError(
-                f"Plan version conflict for '{campaign_id}': expected v{expected_plan_version}, actual v{plan.plan_version}."
+        with locked_resource(self._campaign_lock(campaign_id)):
+            plan = self.get_campaign(campaign_id)
+            if plan is None:
+                raise KeyError(f"Science campaign '{campaign_id}' not found.")
+            if expected_plan_version is not None and plan.plan_version != expected_plan_version:
+                raise LookupError(
+                    f"Plan version conflict for '{campaign_id}': expected v{expected_plan_version}, actual v{plan.plan_version}."
+                )
+            fresh = self.check_campaign_freshness(campaign_id, plan=plan)
+            if fresh.freshness_state != CampaignFreshnessState.CURRENT:
+                raise ValueError(
+                    f"Cannot approve stale campaign '{campaign_id}': recompute first ({'; '.join(fresh.staleness_reasons)})."
+                )
+            now_iso = datetime.now(timezone.utc).isoformat()
+            transitions = list(plan.lifecycle_transitions) + [
+                {
+                    "timestamp_utc": now_iso,
+                    "to_state": IntegratedMissionLifecycleState.EXECUTION_NOT_STARTED.value,
+                    "reason": note or "Operator approved integrated science-to-EVA mission baseline",
+                    "operator_id": operator_id,
+                    "operator_approved": True,
+                }
+            ]
+            updated = plan.model_copy(
+                update={
+                    "operator_approved": True,
+                    "operator_approved_by": operator_id,
+                    "operator_approved_at_utc": now_iso,
+                    "operator_approval_note": note,
+                    "integrated_lifecycle_state": IntegratedMissionLifecycleState.EXECUTION_NOT_STARTED,
+                    "lifecycle_transitions": transitions,
+                }
             )
-        fresh = self.check_campaign_freshness(campaign_id, plan=plan)
-        if fresh.freshness_state != CampaignFreshnessState.CURRENT:
-            raise ValueError(
-                f"Cannot approve stale campaign '{campaign_id}': recompute first ({'; '.join(fresh.staleness_reasons)})."
-            )
-        now_iso = datetime.now(timezone.utc).isoformat()
-        transitions = list(plan.lifecycle_transitions) + [
-            {
-                "timestamp_utc": now_iso,
-                "to_state": IntegratedMissionLifecycleState.EXECUTION_NOT_STARTED.value,
-                "reason": note or "Operator approved integrated science-to-EVA mission baseline",
-                "operator_id": operator_id,
-                "operator_approved": True,
-            }
-        ]
-        updated = plan.model_copy(
-            update={
-                "operator_approved": True,
-                "operator_approved_by": operator_id,
-                "operator_approved_at_utc": now_iso,
-                "operator_approval_note": note,
-                "integrated_lifecycle_state": IntegratedMissionLifecycleState.EXECUTION_NOT_STARTED,
-                "lifecycle_transitions": transitions,
-            }
-        )
-        self._save_campaign(updated)
-        if self.eva_operations_service is not None and updated.linked_mission_id:
-            try:
-                sess = self.eva_operations_service.get_session(updated.linked_mission_id)
-                if sess is not None:
-                    sess.integrated_lifecycle_state = IntegratedMissionLifecycleState.EXECUTION_NOT_STARTED.value
-                    sess.active_envelope.integrated_lifecycle_state = (
-                        IntegratedMissionLifecycleState.EXECUTION_NOT_STARTED.value
-                    )
-                    self.eva_operations_service._save_session(sess)
-            except Exception:
-                pass
-        return updated
+            self._save_campaign(updated)
+            if self.eva_operations_service is not None and updated.linked_mission_id:
+                try:
+                    sess = self.eva_operations_service.get_session(updated.linked_mission_id)
+                    if sess is not None:
+                        sess.integrated_lifecycle_state = IntegratedMissionLifecycleState.EXECUTION_NOT_STARTED.value
+                        sess.active_envelope.integrated_lifecycle_state = (
+                            IntegratedMissionLifecycleState.EXECUTION_NOT_STARTED.value
+                        )
+                        self.eva_operations_service._save_session(sess)
+                except Exception:
+                    pass
+            return updated
 
     # ── 6. Observation Capture & Scale-Aware Archive Comparison ──────────────────
     def _load_observations_map(self) -> Dict[str, RecordedFieldObservation]:
@@ -448,144 +462,159 @@ class ScienceInvestigationService:
         )
 
     def record_observation(self, req: RecordObservationRequest) -> RecordedFieldObservation:
-        obs_map = self._load_observations_map()
-        if req.campaign_id and req.expected_plan_version is not None:
-            plan = self.get_campaign(req.campaign_id)
-            if plan is None:
-                raise KeyError(f"Science campaign '{req.campaign_id}' not found.")
-            if plan.plan_version != req.expected_plan_version:
-                raise LookupError(
-                    f"Plan version conflict for campaign '{req.campaign_id}': "
-                    f"expected v{req.expected_plan_version}, actual v{plan.plan_version}."
-                )
+        with locked_resource(self._observations_lock()):
+            obs_map = self._load_observations_map()
+            if req.campaign_id and req.expected_plan_version is not None:
+                plan = self.get_campaign(req.campaign_id)
+                if plan is None:
+                    raise KeyError(f"Science campaign '{req.campaign_id}' not found.")
+                if plan.plan_version != req.expected_plan_version:
+                    raise LookupError(
+                        f"Plan version conflict for campaign '{req.campaign_id}': "
+                        f"expected v{req.expected_plan_version}, actual v{plan.plan_version}."
+                    )
 
-        # Idempotency & duplicate submission prevention
-        norm_lon = req.longitude_east % 360.0
-        for existing in obs_map.values():
-            if req.client_submission_id and existing.client_submission_id == req.client_submission_id:
-                return existing
-            if (
-                existing.campaign_id == req.campaign_id
-                and existing.target_id == req.target_id
-                and existing.instrument_id == req.instrument_id.upper()
-                and existing.species_or_feature == req.species_or_feature
-                and str(existing.measured_value) == str(req.measured_value)
-                and abs(existing.latitude - req.latitude) < 1e-6
-                and abs(existing.longitude_east - norm_lon) < 1e-6
-                and req.sol_or_timestamp
-                and existing.sol_or_timestamp == req.sol_or_timestamp
-            ):
-                return existing
+            # Idempotency & duplicate submission conflict detection
+            norm_lon = req.longitude_east % 360.0
+            for existing in obs_map.values():
+                if req.client_submission_id and existing.client_submission_id == req.client_submission_id:
+                    same_semantic = (
+                        existing.campaign_id == req.campaign_id
+                        and existing.target_id == req.target_id
+                        and existing.instrument_id == req.instrument_id.upper()
+                        and existing.species_or_feature == req.species_or_feature
+                        and str(existing.measured_value) == str(req.measured_value)
+                        and existing.units == req.units
+                    )
+                    if not same_semantic:
+                        raise LookupError(
+                            f"Idempotency conflict: client_submission_id '{req.client_submission_id}' "
+                            f"was previously committed with a different observation payload ('{existing.observation_id}')."
+                        )
+                    return existing
+                if (
+                    existing.campaign_id == req.campaign_id
+                    and existing.target_id == req.target_id
+                    and existing.instrument_id == req.instrument_id.upper()
+                    and existing.species_or_feature == req.species_or_feature
+                    and str(existing.measured_value) == str(req.measured_value)
+                    and abs(existing.latitude - req.latitude) < 1e-6
+                    and abs(existing.longitude_east - norm_lon) < 1e-6
+                    and req.sol_or_timestamp
+                    and existing.sol_or_timestamp == req.sol_or_timestamp
+                ):
+                    return existing
 
-        now_utc = datetime.now(timezone.utc).isoformat()
-        seed = (
-            f"{req.instrument_id}|{req.species_or_feature}|{req.latitude:.6f}|"
-            f"{req.longitude_east:.6f}|{req.measured_value}|{now_utc}"
-        )
-        obs_id = "obs_" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+            now_utc = datetime.now(timezone.utc).isoformat()
+            seed = (
+                f"{req.instrument_id}|{req.species_or_feature}|{req.latitude:.6f}|"
+                f"{req.longitude_east:.6f}|{req.measured_value}|{now_utc}"
+            )
+            obs_id = "obs_" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
 
-        # Enforce allowed vs prohibited inference check on the entered measurement claim
-        inf_check = check_inference_validity(
-            req.instrument_id,
-            f"{req.measurement_type} {req.species_or_feature}",
-        )
-        prohib_warn: Optional[str] = None
-        if not inf_check.allowed:
-            prohib_warn = inf_check.rationale
+            # Enforce allowed vs prohibited inference check on the entered measurement claim
+            inf_check = check_inference_validity(
+                req.instrument_id,
+                f"{req.measurement_type} {req.species_or_feature}",
+            )
+            prohib_warn: Optional[str] = None
+            if not inf_check.allowed:
+                prohib_warn = inf_check.rationale
 
-        val_state = (
-            "EVIDENCE_VALIDATED"
-            if (req.calibration_metadata and not prohib_warn)
-            else "RECORDED_UNVALIDATED"
-        )
-        obs_lc_state = (
-            ObservationLifecycleState.EVIDENCE_VALIDATED
-            if val_state == "EVIDENCE_VALIDATED"
-            else ObservationLifecycleState.OBSERVATION_RECORDED
-        )
+            val_state = (
+                "EVIDENCE_VALIDATED"
+                if (req.calibration_metadata and not prohib_warn)
+                else "RECORDED_UNVALIDATED"
+            )
+            obs_lc_state = (
+                ObservationLifecycleState.EVIDENCE_VALIDATED
+                if val_state == "EVIDENCE_VALIDATED"
+                else ObservationLifecycleState.OBSERVATION_RECORDED
+            )
 
-        obs = RecordedFieldObservation(
-            observation_id=obs_id,
-            campaign_id=req.campaign_id,
-            stop_id=req.stop_id,
-            target_id=req.target_id,
-            instrument_id=req.instrument_id.upper(),
-            measurement_type=req.measurement_type,
-            species_or_feature=req.species_or_feature,
-            measured_value=req.measured_value,
-            units=req.units,
-            latitude=req.latitude,
-            longitude_east=norm_lon,
-            coordinate_reference=req.coordinate_reference,
-            observer_identity=req.observer_identity,
-            calibration_metadata=req.calibration_metadata,
-            raw_attachment_ref=req.raw_attachment_ref,
-            client_submission_id=req.client_submission_id,
-            sol_or_timestamp=req.sol_or_timestamp or now_utc,
-            notes=req.notes,
-            measurement_scale_m=req.measurement_scale_m,
-            quality_flag=req.quality_flag,
-            validation_state=val_state,
-            lifecycle_state=obs_lc_state,
-            prohibited_inference_warning=prohib_warn,
-            recorded_at_utc=now_utc,
-        )
-        obs_map[obs_id] = obs
-        self._save_observations_map(obs_map)
+            obs = RecordedFieldObservation(
+                observation_id=obs_id,
+                campaign_id=req.campaign_id,
+                stop_id=req.stop_id,
+                target_id=req.target_id,
+                instrument_id=req.instrument_id.upper(),
+                measurement_type=req.measurement_type,
+                species_or_feature=req.species_or_feature,
+                measured_value=req.measured_value,
+                units=req.units,
+                latitude=req.latitude,
+                longitude_east=norm_lon,
+                coordinate_reference=req.coordinate_reference,
+                observer_identity=req.observer_identity,
+                calibration_metadata=req.calibration_metadata,
+                raw_attachment_ref=req.raw_attachment_ref,
+                client_submission_id=req.client_submission_id,
+                sol_or_timestamp=req.sol_or_timestamp or now_utc,
+                notes=req.notes,
+                measurement_scale_m=req.measurement_scale_m,
+                quality_flag=req.quality_flag,
+                validation_state=val_state,
+                lifecycle_state=obs_lc_state,
+                prohibited_inference_warning=prohib_warn,
+                recorded_at_utc=now_utc,
+            )
+            obs_map[obs_id] = obs
+            self._save_observations_map(obs_map)
 
         # Synchronize campaign observation lifecycle state and notify linked EVA mission session
         if obs.campaign_id:
-            p = self._campaign_path(obs.campaign_id)
-            if p.exists():
-                plan = self._read_campaign_file(p)
-                updated_stops = []
-                for sp in plan.stop_plans:
-                    if (obs.stop_id and sp.stop_id == obs.stop_id) or (obs.target_id and sp.target_id == obs.target_id):
-                        sp = sp.model_copy(
-                            update={
-                                "observation_plan": sp.observation_plan.model_copy(
-                                    update={"observation_lifecycle_state": obs_lc_state}
-                                )
-                            }
-                        )
-                    updated_stops.append(sp)
-                transitions = list(plan.lifecycle_transitions) + [
-                    {
-                        "timestamp_utc": now_utc,
-                        "to_state": IntegratedMissionLifecycleState.FIELD_OBSERVATION.value,
-                        "reason": f"Field observation '{obs_id}' captured ({obs.instrument_id}: {obs.species_or_feature})",
-                        "operator_id": obs.observer_identity,
-                    }
-                ]
-                plan = plan.model_copy(
-                    update={
-                        "stop_plans": updated_stops,
-                        "integrated_lifecycle_state": IntegratedMissionLifecycleState.FIELD_OBSERVATION,
-                        "lifecycle_transitions": transitions,
-                    }
-                )
-                self._save_campaign(plan)
-                if self.eva_operations_service is not None and plan.linked_mission_id:
-                    try:
-                        from app.eva_operations.replanning import MissionEventIngestRequest, MissionEventType
+            with locked_resource(self._campaign_lock(obs.campaign_id)):
+                p = self._campaign_path(obs.campaign_id)
+                if p.exists():
+                    plan = self._read_campaign_file(p)
+                    updated_stops = []
+                    for sp in plan.stop_plans:
+                        if (obs.stop_id and sp.stop_id == obs.stop_id) or (obs.target_id and sp.target_id == obs.target_id):
+                            sp = sp.model_copy(
+                                update={
+                                    "observation_plan": sp.observation_plan.model_copy(
+                                        update={"observation_lifecycle_state": obs_lc_state}
+                                    )
+                                }
+                            )
+                        updated_stops.append(sp)
+                    transitions = list(plan.lifecycle_transitions) + [
+                        {
+                            "timestamp_utc": now_utc,
+                            "to_state": IntegratedMissionLifecycleState.FIELD_OBSERVATION.value,
+                            "reason": f"Field observation '{obs_id}' captured ({obs.instrument_id}: {obs.species_or_feature})",
+                            "operator_id": obs.observer_identity,
+                        }
+                    ]
+                    plan = plan.model_copy(
+                        update={
+                            "stop_plans": updated_stops,
+                            "integrated_lifecycle_state": IntegratedMissionLifecycleState.FIELD_OBSERVATION,
+                            "lifecycle_transitions": transitions,
+                        }
+                    )
+                    self._save_campaign(plan)
+                    if self.eva_operations_service is not None and plan.linked_mission_id:
+                        try:
+                            from app.eva_operations.replanning import MissionEventIngestRequest, MissionEventType
 
-                        self.eva_operations_service.record_mission_event(
-                            plan.linked_mission_id,
-                            MissionEventIngestRequest(
-                                event_type=MissionEventType.FIELD_OBSERVATION_ADDED,
-                                operator_id=obs.observer_identity,
-                                description=f"Field observation {obs_id} captured for {obs.species_or_feature}",
-                                payload={
-                                    "observation_id": obs_id,
-                                    "target_id": obs.target_id,
-                                    "validation_state": obs.validation_state,
-                                    "_from_science_service": True,
-                                    "client_event_id": f"obs_evt_{obs_id}",
-                                },
-                            ),
-                        )
-                    except Exception:
-                        pass
+                            self.eva_operations_service.record_mission_event(
+                                plan.linked_mission_id,
+                                MissionEventIngestRequest(
+                                    event_type=MissionEventType.FIELD_OBSERVATION_ADDED,
+                                    operator_id=obs.observer_identity,
+                                    description=f"Field observation {obs_id} captured for {obs.species_or_feature}",
+                                    payload={
+                                        "observation_id": obs_id,
+                                        "target_id": obs.target_id,
+                                        "validation_state": obs.validation_state,
+                                        "_from_science_service": True,
+                                        "client_event_id": f"obs_evt_{obs_id}",
+                                    },
+                                ),
+                            )
+                        except Exception:
+                            pass
         return obs
 
     def list_observations(
@@ -801,31 +830,34 @@ class ScienceInvestigationService:
             explanation=explanation,
             next_verification_steps=next_steps,
         )
-        cmp_map = self._load_comparisons_map()
-        cmp_map[cmp_id] = cmp
-        self._save_comparisons_map(cmp_map)
+        with locked_resource(self._comparisons_lock()):
+            cmp_map = self._load_comparisons_map()
+            cmp_map[cmp_id] = cmp
+            self._save_comparisons_map(cmp_map)
 
         # Mark observation as ARCHIVE_COMPARED and execute linked campaign hypothesis reassessment
-        obs_map = self._load_observations_map()
-        if observation_id in obs_map:
-            impact_label = (
-                "CONTRADICTS_OR_DIVERGES"
-                if outcome
-                in {
-                    ArchiveComparisonOutcome.DIFFERS_FROM_PRIOR_LOCAL_MEASUREMENT,
-                    ArchiveComparisonOutcome.DIFFERS_FROM_ORBITAL_SCALE_EXPECTATION,
-                }
-                else ("CONSISTENT" if outcome == ArchiveComparisonOutcome.CONSISTENT_WITH_ARCHIVE else "EXTENDS_OR_NEW")
-            )
-            obs_map[observation_id] = obs_map[observation_id].model_copy(
-                update={
-                    "lifecycle_state": ObservationLifecycleState.ARCHIVE_COMPARED,
-                    "reassessment_impact": impact_label,
-                }
-            )
-            self._save_observations_map(obs_map)
+        with locked_resource(self._observations_lock()):
+            obs_map = self._load_observations_map()
+            if observation_id in obs_map:
+                impact_label = (
+                    "CONTRADICTS_OR_DIVERGES"
+                    if outcome
+                    in {
+                        ArchiveComparisonOutcome.DIFFERS_FROM_PRIOR_LOCAL_MEASUREMENT,
+                        ArchiveComparisonOutcome.DIFFERS_FROM_ORBITAL_SCALE_EXPECTATION,
+                    }
+                    else ("CONSISTENT" if outcome == ArchiveComparisonOutcome.CONSISTENT_WITH_ARCHIVE else "EXTENDS_OR_NEW")
+                )
+                obs_map[observation_id] = obs_map[observation_id].model_copy(
+                    update={
+                        "lifecycle_state": ObservationLifecycleState.ARCHIVE_COMPARED,
+                        "reassessment_impact": impact_label,
+                    }
+                )
+                self._save_observations_map(obs_map)
         if obs.campaign_id:
-            self._reassess_campaign_after_observation(obs.campaign_id, obs, cmp)
+            with locked_resource(self._campaign_lock(obs.campaign_id)):
+                self._reassess_campaign_after_observation(obs.campaign_id, obs, cmp)
 
         return cmp
 
@@ -903,33 +935,34 @@ class ScienceInvestigationService:
         mission_id: str,
         event: Any,
     ) -> None:
-        p = self._campaign_path(campaign_id)
-        if not p.exists():
-            return
-        plan = self._read_campaign_file(p)
-        evt_entry = {
-            "event_id": getattr(event, "event_id", None),
-            "source_type": "eva_mission_event",
-            "mission_id": mission_id,
-            "event_type": getattr(getattr(event, "event_type", None), "value", str(getattr(event, "event_type", ""))),
-            "description": getattr(event, "description", "EVA mission event"),
-            "recorded_at_utc": getattr(event, "recorded_at_utc", datetime.now(timezone.utc).isoformat()),
-            "resolved": False,
-        }
-        updated = plan.model_copy(
-            update={
-                "freshness_state": CampaignFreshnessState.STALE_UPSTREAM_DEPENDENCY_CHANGED,
-                "integrated_lifecycle_state": IntegratedMissionLifecycleState.REPLAN_IF_REQUIRED,
-                "linked_invalidation_events": list(plan.linked_invalidation_events) + [evt_entry],
-                "staleness_reasons": list(
-                    dict.fromkeys(
-                        list(plan.staleness_reasons)
-                        + [f"[EVA {evt_entry['event_type']}] {evt_entry['description']}"]
-                    )
-                ),
+        with locked_resource(self._campaign_lock(campaign_id)):
+            p = self._campaign_path(campaign_id)
+            if not p.exists():
+                return
+            plan = self._read_campaign_file(p)
+            evt_entry = {
+                "event_id": getattr(event, "event_id", None),
+                "source_type": "eva_mission_event",
+                "mission_id": mission_id,
+                "event_type": getattr(getattr(event, "event_type", None), "value", str(getattr(event, "event_type", ""))),
+                "description": getattr(event, "description", "EVA mission event"),
+                "recorded_at_utc": getattr(event, "recorded_at_utc", datetime.now(timezone.utc).isoformat()),
+                "resolved": False,
             }
-        )
-        self._save_campaign(updated)
+            updated = plan.model_copy(
+                update={
+                    "freshness_state": CampaignFreshnessState.STALE_UPSTREAM_DEPENDENCY_CHANGED,
+                    "integrated_lifecycle_state": IntegratedMissionLifecycleState.REPLAN_IF_REQUIRED,
+                    "linked_invalidation_events": list(plan.linked_invalidation_events) + [evt_entry],
+                    "staleness_reasons": list(
+                        dict.fromkeys(
+                            list(plan.staleness_reasons)
+                            + [f"[EVA {evt_entry['event_type']}] {evt_entry['description']}"]
+                        )
+                    ),
+                }
+            )
+            self._save_campaign(updated)
 
     def handle_eva_replan_approved(
         self,
@@ -940,28 +973,29 @@ class ScienceInvestigationService:
         operator_id: str,
         approval_note: str = "",
     ) -> None:
-        p = self._campaign_path(campaign_id)
-        if not p.exists():
-            return
-        plan = self._read_campaign_file(p)
-        resolved = [{**e, "resolved": True} for e in plan.linked_invalidation_events]
-        transitions = list(plan.lifecycle_transitions) + [
-            {
-                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-                "to_state": IntegratedMissionLifecycleState.EXECUTION_NOT_STARTED.value,
-                "reason": f"Linked EVA replan v{plan_version} approved by {operator_id}: {approval_note}".strip(),
-                "operator_id": operator_id,
-                "operator_approved": True,
-            }
-        ]
-        updated = plan.model_copy(
-            update={
-                "integrated_lifecycle_state": IntegratedMissionLifecycleState.EXECUTION_NOT_STARTED,
-                "linked_invalidation_events": resolved,
-                "lifecycle_transitions": transitions,
-            }
-        )
-        self._save_campaign(updated)
+        with locked_resource(self._campaign_lock(campaign_id)):
+            p = self._campaign_path(campaign_id)
+            if not p.exists():
+                return
+            plan = self._read_campaign_file(p)
+            resolved = [{**e, "resolved": True} for e in plan.linked_invalidation_events]
+            transitions = list(plan.lifecycle_transitions) + [
+                {
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    "to_state": IntegratedMissionLifecycleState.EXECUTION_NOT_STARTED.value,
+                    "reason": f"Linked EVA replan v{plan_version} approved by {operator_id}: {approval_note}".strip(),
+                    "operator_id": operator_id,
+                    "operator_approved": True,
+                }
+            ]
+            updated = plan.model_copy(
+                update={
+                    "integrated_lifecycle_state": IntegratedMissionLifecycleState.EXECUTION_NOT_STARTED,
+                    "linked_invalidation_events": resolved,
+                    "lifecycle_transitions": transitions,
+                }
+            )
+            self._save_campaign(updated)
 
     def propagate_external_invalidation(
         self,
@@ -976,58 +1010,66 @@ class ScienceInvestigationService:
         now_iso = datetime.now(timezone.utc).isoformat()
         for path in self.campaigns_dir.glob("*.json"):
             try:
-                plan = self._read_campaign_file(path)
+                plan_preview = self._read_campaign_file(path)
             except ValueError:
                 continue
-            matches_ds = bool(dataset_id and (plan.dataset_id == dataset_id or dataset_id in plan.provenance_graph.input_datasets))
-            matches_q = bool(question_id and plan.question.question_id == question_id)
+            matches_ds = bool(
+                dataset_id
+                and (plan_preview.dataset_id == dataset_id or dataset_id in plan_preview.provenance_graph.input_datasets)
+            )
+            matches_q = bool(question_id and plan_preview.question.question_id == question_id)
             if not (matches_ds or matches_q or (dataset_id is None and question_id is None)):
                 continue
-            evt_entry = {
-                "event_id": f"ext_{hashlib.sha256(f'{source_type}|{description}|{now_iso}'.encode()).hexdigest()[:10]}",
-                "source_type": source_type,
-                "description": description,
-                "dataset_id": dataset_id,
-                "question_id": question_id,
-                "recorded_at_utc": now_iso,
-                "resolved": False,
-            }
-            updated = plan.model_copy(
-                update={
-                    "freshness_state": CampaignFreshnessState.STALE_UPSTREAM_DEPENDENCY_CHANGED,
-                    "integrated_lifecycle_state": IntegratedMissionLifecycleState.CAMPAIGN_FRESHNESS_CHECK,
-                    "linked_invalidation_events": list(plan.linked_invalidation_events) + [evt_entry],
-                    "staleness_reasons": list(
-                        dict.fromkeys(list(plan.staleness_reasons) + [f"[{source_type}] {description}"])
-                    ),
+            with locked_resource(self._campaign_lock(plan_preview.campaign_id)):
+                p = self._campaign_path(plan_preview.campaign_id)
+                if not p.exists():
+                    continue
+                plan = self._read_campaign_file(p)
+                evt_entry = {
+                    "event_id": f"ext_{hashlib.sha256(f'{source_type}|{description}|{now_iso}'.encode()).hexdigest()[:10]}",
+                    "source_type": source_type,
+                    "description": description,
+                    "dataset_id": dataset_id,
+                    "question_id": question_id,
+                    "recorded_at_utc": now_iso,
+                    "resolved": False,
                 }
-            )
-            self._save_campaign(updated)
-            affected_campaigns.append(plan.campaign_id)
-            if self.eva_operations_service is not None and plan.linked_mission_id:
-                try:
-                    from app.eva_operations.replanning import MissionEventIngestRequest, MissionEventType
-
-                    evt_type = (
-                        MissionEventType.OBSTACLE_REVIEW_CHANGED
-                        if "morphology" in source_type.lower() or "obstacle" in source_type.lower()
-                        else MissionEventType.DATASET_UPDATED_OR_REINGESTED
-                    )
-                    self.eva_operations_service.record_mission_event(
-                        plan.linked_mission_id,
-                        MissionEventIngestRequest(
-                            event_type=evt_type,
-                            operator_id="system_orchestrator",
-                            description=description,
-                            payload={
-                                "source_type": source_type,
-                                "dataset_id": dataset_id,
-                                "_from_science_service": True,
-                            },
+                updated = plan.model_copy(
+                    update={
+                        "freshness_state": CampaignFreshnessState.STALE_UPSTREAM_DEPENDENCY_CHANGED,
+                        "integrated_lifecycle_state": IntegratedMissionLifecycleState.CAMPAIGN_FRESHNESS_CHECK,
+                        "linked_invalidation_events": list(plan.linked_invalidation_events) + [evt_entry],
+                        "staleness_reasons": list(
+                            dict.fromkeys(list(plan.staleness_reasons) + [f"[{source_type}] {description}"])
                         ),
-                    )
-                except Exception:
-                    pass
+                    }
+                )
+                self._save_campaign(updated)
+                affected_campaigns.append(plan.campaign_id)
+                if self.eva_operations_service is not None and plan.linked_mission_id:
+                    try:
+                        from app.eva_operations.replanning import MissionEventIngestRequest, MissionEventType
+
+                        evt_type = (
+                            MissionEventType.OBSTACLE_REVIEW_CHANGED
+                            if "morphology" in source_type.lower() or "obstacle" in source_type.lower()
+                            else MissionEventType.DATASET_UPDATED_OR_REINGESTED
+                        )
+                        self.eva_operations_service.record_mission_event(
+                            plan.linked_mission_id,
+                            MissionEventIngestRequest(
+                                event_type=evt_type,
+                                operator_id="system_orchestrator",
+                                description=description,
+                                payload={
+                                    "source_type": source_type,
+                                    "dataset_id": dataset_id,
+                                    "_from_science_service": True,
+                                },
+                            ),
+                        )
+                    except Exception:
+                        pass
         return affected_campaigns
 
     def get_mission_lifecycle_summary(self, campaign_id: str) -> Dict[str, Any]:
@@ -1112,6 +1154,8 @@ class ScienceInvestigationService:
 
         core_dossier = {
             "dossier_version": "3.0.0-p21",
+            "dossier_schema_version": "3.1.0-p22",
+            "content_digest_schema_version": CONTENT_DIGEST_SCHEMA_VERSION,
             "exported_at_utc": datetime.now(timezone.utc).isoformat(),
             "operational_safety_certified": False,
             "campaign_id": plan.campaign_id,
@@ -1141,11 +1185,28 @@ class ScienceInvestigationService:
             "missing_inputs": plan.missing_inputs,
             "provenance_graph": plan.provenance_graph.model_dump(mode="json"),
         }
-        digest = hashlib.sha256(
-            json.dumps(core_dossier, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()
-        core_dossier["sha256_integrity_digest"] = digest
-        return core_dossier
+        canonicalized = canonicalize_value(core_dossier)
+        repro_status, repro_warnings = evaluate_dossier_reproducibility(canonicalized)
+        canonicalized["reproducibility_status"] = repro_status
+        canonicalized["reproducibility_warnings"] = repro_warnings
+        mission_digest = compute_mission_content_digest(canonicalized)
+        canonicalized["mission_content_digest"] = mission_digest
+        canonicalized["sha256_integrity_digest"] = mission_digest
+        export_digest = compute_export_artifact_digest(canonicalized)
+        canonicalized["export_artifact_digest"] = export_digest
+        return canonicalized
+
+    def verify_dossier(
+        self,
+        dossier_payload: Dict[str, Any],
+        *,
+        expected_artifact_sha256: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Verify integrity & reproducibility status of a previously exported unified campaign dossier."""
+        return verify_campaign_dossier(
+            dossier_payload,
+            expected_artifact_sha256=expected_artifact_sha256,
+        )
 
     def inspect_product_detail(self, dataset_id: str, *, question_id: str = "gale_boxwork_origin") -> Dict[str, Any]:
         """Return full Prompt 18 product verification, scaling, CRS/registration, and 17-dim eligibility."""

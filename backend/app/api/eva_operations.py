@@ -32,6 +32,7 @@ class WorkflowTransitionRequest(BaseModel):
 class PlanApprovalRequest(BaseModel):
     operator_id: str = Field(default="operator", min_length=1, max_length=80)
     note: str = Field(default="", max_length=300)
+    expected_plan_version: Optional[int] = Field(default=None, ge=1)
 
 
 class TelemetryConnectRequest(BaseModel):
@@ -193,6 +194,8 @@ def record_eva_mission_event(mission_id: str, req: MissionEventIngestRequest):
         return eva_operations_service.record_mission_event(mission_id, req)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/mission/{mission_id}/replan/preview")
@@ -202,6 +205,8 @@ def preview_eva_mission_replan(mission_id: str, req: MissionReplanRequest):
         return eva_operations_service.preview_mission_replan(mission_id, req)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -211,10 +216,15 @@ def approve_eva_mission_replan(mission_id: str, req: PlanApprovalRequest):
     """Explicitly approve a pending candidate replan to become the active mission plan while preserving history."""
     try:
         return eva_operations_service.approve_revised_plan(
-            mission_id, operator_id=req.operator_id, approval_note=req.note
+            mission_id,
+            operator_id=req.operator_id,
+            approval_note=req.note,
+            expected_plan_version=req.expected_plan_version,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -224,10 +234,15 @@ def reject_eva_mission_replan(mission_id: str, req: PlanApprovalRequest):
     """Explicitly reject a pending candidate replan and retain the previous active plan."""
     try:
         return eva_operations_service.reject_revised_plan(
-            mission_id, operator_id=req.operator_id, rejection_reason=req.note
+            mission_id,
+            operator_id=req.operator_id,
+            rejection_reason=req.note,
+            expected_plan_version=req.expected_plan_version,
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/mission/{mission_id}/sensitivity")

@@ -26,6 +26,7 @@ from app.services.container import (
     composition_index,
     composition_search_service,
     localization_service,
+    science_investigation_service,
 )
 
 router = APIRouter(prefix="/composition", tags=["Scientific Composition Discovery"])
@@ -71,7 +72,15 @@ async def rebuild_composition_index(request: Request) -> CompositionIndexStatus:
         fail_closed_when_unconfigured=True,
         operation_name="composition_index_rebuild",
     )
-    return composition_index.rebuild_from_raw_directory(raw_dir=RAW_DIR, processed_dir=PROCESSED_DIR)
+    res = composition_index.rebuild_from_raw_directory(raw_dir=RAW_DIR, processed_dir=PROCESSED_DIR)
+    science_investigation_service.propagate_external_invalidation(
+        source_type="composition_index_rebuilt",
+        description=(
+            f"Composition spatial index rebuilt to generation '{res.active_generation_id}'; "
+            "dependent science campaigns marked stale for freshness verification."
+        ),
+    )
+    return res
 
 
 @router.post("/search", response_model=StructuredCompositionSearchResult)

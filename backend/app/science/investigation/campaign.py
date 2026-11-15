@@ -130,17 +130,34 @@ def compute_dependency_snapshot_and_hash(
             )
     relevant_obs.sort(key=lambda o: o["observation_id"])
 
+    morph_fp: Optional[Dict[str, Any]] = None
+    if catalog_service and getattr(catalog_service, "catalog_storage_dir", None):
+        morph_path = Path(catalog_service.catalog_storage_dir).parent / "processed" / "morphology" / "reviews.json"
+        if morph_path.exists():
+            morph_fp = _artifact_fingerprint(str(morph_path), None)
+
     snapshot: Dict[str, Any] = {
-        "schema_version": "2.0.0-p18",
+        "schema_version": "2.2.0-p22",
+        "physics_and_model": {
+            "software_version": "2.2.0-p22",
+            "algorithm_version": "2.0.0-p18",
+            "mars_gravity_mps2": 3.72076,
+            "locomotion_category": req.locomotion_category,
+            "unknown_terrain_policy": req.unknown_terrain_policy,
+            "confirm_default_policies": req.confirm_default_policies,
+        },
         "dataset": {
             "dataset_id": req.dataset_id,
             "status": ds.status.value if ds else "missing",
             "sha256": ds.sha256_checksum if ds else None,
+            "crs": ds.coordinate_reference_system if ds else None,
+            "horizontal_resolution_meters": ds.horizontal_resolution_meters if ds else None,
             "raw_file": _artifact_fingerprint(ds.local_file_path, catalog_service) if ds else None,
             "label_file": _artifact_fingerprint(ds.local_label_path, catalog_service) if ds else None,
             "processed_file": _artifact_fingerprint(ds.processed_file_path, catalog_service) if ds else None,
             "processing_manifest": proc_manifest_fp,
         },
+        "morphology_reviews": morph_fp,
         "composition_index": {
             "active_generation_id": getattr(comp_st, "active_generation_id", None) if comp_st else None,
             "source_artifact_digest": getattr(comp_st, "source_artifact_digest", None) if comp_st else None,
@@ -248,8 +265,12 @@ def evaluate_campaign_freshness(
     )
 
     old_snap = plan.dependency_snapshot or {}
+    if old_snap.get("physics_and_model") != current_snap.get("physics_and_model"):
+        reasons.append("Algorithm version, Mars gravity/physics constant, locomotion category, or unknown-terrain policy changed.")
+    if old_snap.get("morphology_reviews") != current_snap.get("morphology_reviews"):
+        reasons.append("Operator morphology obstacle review ledger changed.")
     if old_snap.get("dataset") != current_snap.get("dataset"):
-        reasons.append("Upstream terrain dataset status, raw/label SHA-256, or processed DEM artifact changed.")
+        reasons.append("Upstream terrain dataset status, CRS/resolution, raw/label SHA-256, or processed DEM artifact changed.")
     if old_snap.get("composition_index") != current_snap.get("composition_index"):
         reasons.append("Composition spatial index generation, manifest digest, checksum, or CRISM status changed.")
     if old_snap.get("question") != current_snap.get("question"):

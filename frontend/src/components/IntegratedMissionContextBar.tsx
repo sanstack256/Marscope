@@ -108,6 +108,15 @@ export function IntegratedMissionContextBar() {
     Boolean(missionSession?.stale) ||
     Boolean(evaEnvelope?.stale);
 
+  const hasContextMismatch = Boolean(
+    (activeCampaign?.linked_mission_id &&
+      missionSession?.mission_id &&
+      activeCampaign.linked_mission_id !== missionSession.mission_id) ||
+      (activeCampaign?.dataset_id &&
+        evaEnvelope?.dataset_id &&
+        activeCampaign.dataset_id !== evaEnvelope.dataset_id)
+  );
+
   const linkQuery = useMemo(() => {
     const p = new URLSearchParams();
     if (effectiveCampaignId) p.set("campaignId", effectiveCampaignId);
@@ -162,6 +171,12 @@ export function IntegratedMissionContextBar() {
           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-amber-500/50 bg-amber-500/20 text-amber-200 font-mono text-[10px]">
             <AlertTriangle className="w-3 h-3" />
             STALE — RECOMPUTE REQUIRED
+          </span>
+        )}
+        {hasContextMismatch && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-rose-500/50 bg-rose-500/20 text-rose-200 font-mono text-[10px]">
+            <AlertTriangle className="w-3 h-3" />
+            CAMPAIGN / EVA CONTEXT MISMATCH
           </span>
         )}
         {activeCampaign && !activeCampaign.operator_approved && (

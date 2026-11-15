@@ -13,6 +13,7 @@ from app.services.container import (
     RAW_DIR,
     acquisition_service,
     catalog_service,
+    composition_index,
     science_investigation_service,
 )
 from app.terrain.processor import DEMProcessingService, InsufficientDEMCoverageError
@@ -41,6 +42,17 @@ async def discover_datasets(request: Request) -> List[Dataset]:
     """Poll official NASA/ESA source adapters to discover planetary products."""
     verify_operator_auth(request, fail_closed_when_unconfigured=False, operation_name="dataset_discover")
     return catalog_service.discover_all_sources()
+
+
+@router.get("/readiness-audit")
+async def dataset_readiness_audit(
+    verify_checksums: bool = Query(True, description="Recompute raw artifact SHA-256 checksums on disk"),
+) -> Dict[str, Any]:
+    """Return 12-property per-dataset reproducibility, checksum, companion, processing, and index readiness audit."""
+    return catalog_service.audit_dataset_readiness(
+        composition_index=composition_index,
+        verify_checksums=verify_checksums,
+    )
 
 
 @router.get("/{dataset_id}", response_model=Dataset)

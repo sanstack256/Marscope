@@ -413,9 +413,11 @@ class AcquisitionService:
                                     f"Declared payload size ({declared_size} bytes) exceeds max_bytes limit ({max_bytes} bytes)."
                                 )
 
-                            resume_meta_path.write_text(
+                            from app.core.persistence import atomic_write_text
+
+                            atomic_write_text(
+                                resume_meta_path,
                                 json.dumps({"source_url": source_url, "etag": etag_hdr}),
-                                encoding="utf-8",
                             )
                             mode = "ab" if is_partial else "wb"
                             with temp_path.open(mode) as stream:

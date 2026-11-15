@@ -18,6 +18,7 @@ import time
 from typing import Any, Dict, List, Optional
 import uuid
 
+from app.core.persistence import atomic_write_text, locked_resource
 from app.evidence_intelligence.schemas import CacheValidityState, CorridorAssessRequest
 from app.eva_operations.constraints import (
     determine_envelope_and_model_status,
@@ -80,22 +81,7 @@ from app.science.provenance_graph import (
 
 
 def _atomic_write_json(target_path: Path, text: str) -> None:
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{target_path.stem}_", suffix=".tmp", dir=str(target_path.parent)
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as h:
-            h.write(text)
-            h.flush()
-            os.fsync(h.fileno())
-        os.replace(tmp_name, target_path)
-    finally:
-        if os.path.exists(tmp_name):
-            try:
-                os.remove(tmp_name)
-            except OSError:
-                pass
+    atomic_write_text(target_path, text)
 
 
 class EvaOperationsService:
@@ -765,48 +751,52 @@ class EvaOperationsService:
     def record_mission_event(
         self, mission_id: str, req: MissionEventIngestRequest
     ) -> MissionOperationalSession:
-        sess = self.get_session(mission_id)
-        if sess is None:
-            raise FileNotFoundError(f"Mission '{mission_id}' not found.")
-        # Idempotency guard against duplicate identical event submissions
-        cid = req.payload.get("client_event_id") if isinstance(req.payload, dict) else None
-        if cid:
-            if any(isinstance(e.payload, dict) and e.payload.get("client_event_id") == cid for e in sess.events):
-                return sess
-        elif sess.events:
-            last = sess.events[-1]
-            if (
-                last.event_type == req.event_type
-                and last.description == req.description
-                and last.payload == req.payload
-            ):
-                return sess
+        with locked_resource(self.storage_dir / f".{mission_id}.lock"):
+            sess = self.get_session(mission_id)
+            if sess is None:
+                raise FileNotFoundError(f"Mission '{mission_id}' not found.")
+            # Explicit identifier + semantic idempotency guard (never drops distinct events without a stable key)
+            cid = getattr(req, "client_event_id", None) or (
+                req.payload.get("client_event_id") if isinstance(req.payload, dict) else None
+            )
+            if cid:
+                for existing in sess.events:
+                    existing_cid = existing.payload.get("client_event_id") if isinstance(existing.payload, dict) else None
+                    if existing_cid == cid:
+                        if existing.event_type != req.event_type or existing.description != req.description:
+                            raise LookupError(
+                                f"Idempotency conflict on client_event_id '{cid}': semantics differ from stored event '{existing.event_id}'."
+                            )
+                        return sess
 
-        inv = list(EVENT_INVALIDATION_RULES.get(req.event_type, ["outbound_route", "return_route"]))
-        evt = MissionEventRecord(
-            event_id=f"evt_{uuid.uuid4().hex[:10]}",
-            mission_id=mission_id,
-            event_type=req.event_type,
-            recorded_at_utc=datetime.now(timezone.utc).isoformat(),
-            operator_id=req.operator_id,
-            description=req.description,
-            payload=req.payload,
-            invalidated_subsystems=inv,
-            triggers_replanning=True,
-        )
-        sess.events.append(evt)
-        sess.stale = True
-        sess.stale_subsystems = list(dict.fromkeys(sess.stale_subsystems + inv))
-        reason_msg = f"[{evt.event_type.value}] {evt.description} (invalidates: {', '.join(inv)})"
-        if reason_msg not in sess.stale_reasons:
-            sess.stale_reasons.append(reason_msg)
-        sess.workflow_state = MissionWorkflowState.REPLANNING_REQUIRED
-        sess.integrated_lifecycle_state = "REPLAN_IF_REQUIRED"
-        sess.active_envelope.stale = True
-        sess.active_envelope.stale_reasons = list(sess.stale_reasons)
-        sess.active_envelope.workflow_state = MissionWorkflowState.REPLANNING_REQUIRED.value
-        sess.active_envelope.integrated_lifecycle_state = "REPLAN_IF_REQUIRED"
-        self._save_session(sess)
+            inv = list(EVENT_INVALIDATION_RULES.get(req.event_type, ["outbound_route", "return_route"]))
+            payload_copy = dict(req.payload) if isinstance(req.payload, dict) else {}
+            if cid and "client_event_id" not in payload_copy:
+                payload_copy["client_event_id"] = cid
+            evt = MissionEventRecord(
+                event_id=f"evt_{uuid.uuid4().hex[:10]}",
+                mission_id=mission_id,
+                event_type=req.event_type,
+                recorded_at_utc=datetime.now(timezone.utc).isoformat(),
+                operator_id=req.operator_id,
+                description=req.description,
+                payload=payload_copy,
+                invalidated_subsystems=inv,
+                triggers_replanning=True,
+            )
+            sess.events.append(evt)
+            sess.stale = True
+            sess.stale_subsystems = list(dict.fromkeys(sess.stale_subsystems + inv))
+            reason_msg = f"[{evt.event_type.value}] {evt.description} (invalidates: {', '.join(inv)})"
+            if reason_msg not in sess.stale_reasons:
+                sess.stale_reasons.append(reason_msg)
+            sess.workflow_state = MissionWorkflowState.REPLANNING_REQUIRED
+            sess.integrated_lifecycle_state = "REPLAN_IF_REQUIRED"
+            sess.active_envelope.stale = True
+            sess.active_envelope.stale_reasons = list(sess.stale_reasons)
+            sess.active_envelope.workflow_state = MissionWorkflowState.REPLANNING_REQUIRED.value
+            sess.active_envelope.integrated_lifecycle_state = "REPLAN_IF_REQUIRED"
+            self._save_session(sess)
         if self.science_service is not None and sess.linked_campaign_id and not req.payload.get("_from_science_service"):
             try:
                 self.science_service.handle_eva_session_event(
@@ -821,85 +811,99 @@ class EvaOperationsService:
     def preview_mission_replan(
         self, mission_id: str, req: MissionReplanRequest
     ) -> PlanComparisonReport:
-        sess = self.get_session(mission_id)
-        if sess is None:
-            raise FileNotFoundError(f"Mission '{mission_id}' not found.")
-        cand_ver = max([h.plan_version for h in sess.plan_history] or [sess.active_plan_version]) + 1
-        cand_cfg = req.updated_config.model_copy(
-            update={
-                "mission_id": mission_id,
-                "linked_campaign_id": req.updated_config.linked_campaign_id or sess.linked_campaign_id,
-                "linked_question_id": req.updated_config.linked_question_id or sess.linked_question_id,
-            }
-        )
-        cand_env = self._compute_envelope_internal(
-            cand_cfg,
-            plan_version=cand_ver,
-            workflow_state=MissionWorkflowState.MISSION_PLAN_REVIEW_REQUIRED,
-        )
-        cand_env.integrated_lifecycle_state = "MISSION_REVIEW"
-        cmp_report = build_plan_comparison_report(
-            mission_id=mission_id,
-            prev_env=sess.active_envelope,
-            cand_env=cand_env,
-            trigger_event_ids=[e.event_id for e in sess.events],
-            invalidated_subsystems=sess.stale_subsystems,
-        )
-        sess.pending_candidate_config = cand_cfg
-        sess.pending_candidate_envelope = cand_env
-        sess.pending_comparison = cmp_report
-        sess.workflow_state = MissionWorkflowState.MISSION_PLAN_REVIEW_REQUIRED
-        sess.integrated_lifecycle_state = "MISSION_REVIEW"
-        sess.active_envelope.workflow_state = MissionWorkflowState.MISSION_PLAN_REVIEW_REQUIRED.value
-        sess.plan_history.append(
-            MissionVersionHistoryEntry(
-                plan_version=cand_ver,
-                created_at_utc=cand_env.created_at_utc,
-                status="CANDIDATE_PENDING_APPROVAL",
-                reason=req.reason,
-                config=cand_cfg,
-                envelope=cand_env,
+        with locked_resource(self.storage_dir / f".{mission_id}.lock"):
+            sess = self.get_session(mission_id)
+            if sess is None:
+                raise FileNotFoundError(f"Mission '{mission_id}' not found.")
+            if req.expected_plan_version is not None and sess.active_plan_version != req.expected_plan_version:
+                raise LookupError(
+                    f"EVA mission version conflict for '{mission_id}': expected v{req.expected_plan_version}, actual v{sess.active_plan_version}."
+                )
+            cand_ver = max([h.plan_version for h in sess.plan_history] or [sess.active_plan_version]) + 1
+            cand_cfg = req.updated_config.model_copy(
+                update={
+                    "mission_id": mission_id,
+                    "linked_campaign_id": req.updated_config.linked_campaign_id or sess.linked_campaign_id,
+                    "linked_question_id": req.updated_config.linked_question_id or sess.linked_question_id,
+                }
             )
-        )
-        self._save_session(sess)
-        return cmp_report
+            cand_env = self._compute_envelope_internal(
+                cand_cfg,
+                plan_version=cand_ver,
+                workflow_state=MissionWorkflowState.MISSION_PLAN_REVIEW_REQUIRED,
+            )
+            cand_env.integrated_lifecycle_state = "MISSION_REVIEW"
+            cmp_report = build_plan_comparison_report(
+                mission_id=mission_id,
+                prev_env=sess.active_envelope,
+                cand_env=cand_env,
+                trigger_event_ids=[e.event_id for e in sess.events],
+                invalidated_subsystems=sess.stale_subsystems,
+            )
+            sess.pending_candidate_config = cand_cfg
+            sess.pending_candidate_envelope = cand_env
+            sess.pending_comparison = cmp_report
+            sess.workflow_state = MissionWorkflowState.MISSION_PLAN_REVIEW_REQUIRED
+            sess.integrated_lifecycle_state = "MISSION_REVIEW"
+            sess.active_envelope.workflow_state = MissionWorkflowState.MISSION_PLAN_REVIEW_REQUIRED.value
+            sess.plan_history.append(
+                MissionVersionHistoryEntry(
+                    plan_version=cand_ver,
+                    created_at_utc=cand_env.created_at_utc,
+                    status="CANDIDATE_PENDING_APPROVAL",
+                    reason=req.reason,
+                    config=cand_cfg,
+                    envelope=cand_env,
+                )
+            )
+            self._save_session(sess)
+            return cmp_report
 
     def approve_revised_plan(
-        self, mission_id: str, operator_id: str = "operator", approval_note: str = ""
+        self,
+        mission_id: str,
+        operator_id: str = "operator",
+        approval_note: str = "",
+        expected_plan_version: Optional[int] = None,
     ) -> MissionOperationalSession:
-        sess = self.get_session(mission_id)
-        if sess is None:
-            raise FileNotFoundError(f"Mission '{mission_id}' not found.")
-        if sess.pending_candidate_envelope is None or sess.pending_candidate_config is None:
-            raise ValueError(f"No pending candidate replan exists for mission '{mission_id}'.")
+        with locked_resource(self.storage_dir / f".{mission_id}.lock"):
+            sess = self.get_session(mission_id)
+            if sess is None:
+                raise FileNotFoundError(f"Mission '{mission_id}' not found.")
+            if expected_plan_version is not None and sess.active_plan_version != expected_plan_version:
+                raise LookupError(
+                    f"EVA mission version conflict for '{mission_id}': expected v{expected_plan_version}, actual v{sess.active_plan_version}."
+                )
+            if sess.pending_candidate_envelope is None or sess.pending_candidate_config is None:
+                raise ValueError(f"No pending candidate replan exists for mission '{mission_id}'.")
 
-        cand_ver = sess.pending_candidate_envelope.plan_version
-        for h in sess.plan_history:
-            if h.status == "ACTIVE":
-                h.status = "SUPERSEDED"
-            elif h.plan_version == cand_ver:
-                h.status = "ACTIVE"
-                if approval_note:
-                    h.reason = f"{h.reason} | Approved by {operator_id}: {approval_note}"
+            cand_ver = sess.pending_candidate_envelope.plan_version
+            for h in sess.plan_history:
+                if h.status == "ACTIVE":
+                    h.status = "SUPERSEDED"
+                elif h.plan_version == cand_ver:
+                    h.status = "ACTIVE"
+                    if approval_note:
+                        h.reason = f"{h.reason} | Approved by {operator_id}: {approval_note}"
 
-        sess.active_plan_version = cand_ver
-        sess.active_config = sess.pending_candidate_config
-        sess.active_envelope = sess.pending_candidate_envelope
-        sess.active_envelope.stale = False
-        sess.active_envelope.stale_reasons = []
-        sess.active_envelope.workflow_state = MissionWorkflowState.EXECUTION_NOT_STARTED.value
-        sess.active_envelope.integrated_lifecycle_state = "EXECUTION_NOT_STARTED"
-        sess.stale = False
-        sess.stale_subsystems = []
-        sess.stale_reasons = []
-        sess.workflow_state = MissionWorkflowState.EXECUTION_NOT_STARTED
-        sess.integrated_lifecycle_state = "EXECUTION_NOT_STARTED"
-        if sess.pending_comparison is not None:
-            sess.pending_comparison.approved_by_operator = True
-            sess.pending_comparison.requires_operator_approval = False
-        sess.pending_candidate_envelope = None
-        sess.pending_candidate_config = None
-        self._save_session(sess)
+            sess.active_plan_version = cand_ver
+            sess.active_config = sess.pending_candidate_config
+            sess.active_envelope = sess.pending_candidate_envelope
+            sess.active_envelope.stale = False
+            sess.active_envelope.stale_reasons = []
+            sess.active_envelope.workflow_state = MissionWorkflowState.EXECUTION_NOT_STARTED.value
+            sess.active_envelope.integrated_lifecycle_state = "EXECUTION_NOT_STARTED"
+            sess.stale = False
+            sess.stale_subsystems = []
+            sess.stale_reasons = []
+            sess.workflow_state = MissionWorkflowState.EXECUTION_NOT_STARTED
+            sess.integrated_lifecycle_state = "EXECUTION_NOT_STARTED"
+            if sess.pending_comparison is not None:
+                sess.pending_comparison.approved_by_operator = True
+                sess.pending_comparison.requires_operator_approval = False
+            sess.pending_candidate_envelope = None
+            sess.pending_candidate_config = None
+            self._save_session(sess)
         if self.science_service is not None and sess.linked_campaign_id:
             try:
                 self.science_service.handle_eva_replan_approved(
@@ -912,39 +916,40 @@ class EvaOperationsService:
             except Exception:
                 pass
         return sess
-        sess.workflow_state = MissionWorkflowState.EXECUTION_NOT_STARTED
-        if sess.pending_comparison is not None:
-            sess.pending_comparison.approved_by_operator = True
-            sess.pending_comparison.requires_operator_approval = False
-        sess.pending_candidate_envelope = None
-        sess.pending_candidate_config = None
-        self._save_session(sess)
-        return sess
 
     def reject_revised_plan(
-        self, mission_id: str, operator_id: str = "operator", rejection_reason: str = ""
+        self,
+        mission_id: str,
+        operator_id: str = "operator",
+        rejection_reason: str = "",
+        expected_plan_version: Optional[int] = None,
     ) -> MissionOperationalSession:
-        sess = self.get_session(mission_id)
-        if sess is None:
-            raise FileNotFoundError(f"Mission '{mission_id}' not found.")
-        if sess.pending_candidate_envelope is not None:
-            cand_ver = sess.pending_candidate_envelope.plan_version
-            for h in sess.plan_history:
-                if h.plan_version == cand_ver:
-                    h.status = "REJECTED_CANDIDATE"
-                    if rejection_reason:
-                        h.reason = f"{h.reason} | Rejected by {operator_id}: {rejection_reason}"
-        sess.pending_candidate_envelope = None
-        sess.pending_candidate_config = None
-        sess.pending_comparison = None
-        sess.workflow_state = (
-            MissionWorkflowState.REPLANNING_REQUIRED
-            if sess.stale
-            else MissionWorkflowState.EXECUTION_NOT_STARTED
-        )
-        sess.active_envelope.workflow_state = sess.workflow_state.value
-        self._save_session(sess)
-        return sess
+        with locked_resource(self.storage_dir / f".{mission_id}.lock"):
+            sess = self.get_session(mission_id)
+            if sess is None:
+                raise FileNotFoundError(f"Mission '{mission_id}' not found.")
+            if expected_plan_version is not None and sess.active_plan_version != expected_plan_version:
+                raise LookupError(
+                    f"EVA mission version conflict for '{mission_id}': expected v{expected_plan_version}, actual v{sess.active_plan_version}."
+                )
+            if sess.pending_candidate_envelope is not None:
+                cand_ver = sess.pending_candidate_envelope.plan_version
+                for h in sess.plan_history:
+                    if h.plan_version == cand_ver:
+                        h.status = "REJECTED_CANDIDATE"
+                        if rejection_reason:
+                            h.reason = f"{h.reason} | Rejected by {operator_id}: {rejection_reason}"
+            sess.pending_candidate_envelope = None
+            sess.pending_candidate_config = None
+            sess.pending_comparison = None
+            sess.workflow_state = (
+                MissionWorkflowState.REPLANNING_REQUIRED
+                if sess.stale
+                else MissionWorkflowState.EXECUTION_NOT_STARTED
+            )
+            sess.active_envelope.workflow_state = sess.workflow_state.value
+            self._save_session(sess)
+            return sess
 
     def get_sensitivity_report(self, mission_id: str) -> MissionSensitivityAnalysisReport:
         sess = self.get_session(mission_id)

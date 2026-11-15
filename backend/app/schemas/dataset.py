@@ -40,6 +40,60 @@ class AcquisitionState(str, Enum):
     UNVERIFIED = "UNVERIFIED"
 
 
+class ChecksumSource(str, Enum):
+    AUTHORITATIVE_PDS = "authoritative_pds"
+    MANIFEST_PINNED = "manifest_pinned"
+    LOCALLY_COMPUTED_ONLY = "locally_computed_only"
+    UNAVAILABLE = "unavailable"
+
+
+def map_dataset_lifecycle_state(
+    status: DatasetLifecycleStatus,
+    *,
+    is_wmts: bool = False,
+    has_raw_file: bool = False,
+    has_expected_sha256: bool = False,
+    checksum_matches: Optional[bool] = None,
+    companion_missing: bool = False,
+    format_validated: bool = False,
+    has_processed_artifact: bool = False,
+    processing_manifest_valid: Optional[bool] = None,
+    is_indexed: bool = False,
+    incompatible_version: bool = False,
+    stale: bool = False,
+) -> str:
+    """Map dataset disk/manifest/index evidence to the 13 Prompt 22 dataset lifecycle states."""
+    if incompatible_version:
+        return "INCOMPATIBLE_VERSION"
+    if checksum_matches is False or status == DatasetLifecycleStatus.FAILED_VALIDATION:
+        return "CORRUPT"
+    if companion_missing:
+        return "MISSING_COMPANION_FILES"
+    if stale:
+        return "STALE"
+    if status == DatasetLifecycleStatus.FAILED_DOWNLOAD or (is_wmts and status != DatasetLifecycleStatus.AVAILABLE):
+        return "UNAVAILABLE"
+    if is_indexed and (has_processed_artifact or has_raw_file):
+        return "INDEXED"
+    if has_processed_artifact and processing_manifest_valid is True:
+        return "PROCESSED"
+    if status == DatasetLifecycleStatus.FAILED_PROCESSING or processing_manifest_valid is False:
+        return "CORRUPT"
+    if has_raw_file:
+        if format_validated and checksum_matches is True:
+            return "VALIDATED_FORMAT"
+        if checksum_matches is True:
+            return "HASH_VERIFIED"
+        return "DOWNLOADED"
+    if is_wmts and status == DatasetLifecycleStatus.AVAILABLE:
+        return "AVAILABLE" if hasattr(DatasetLifecycleStatus, "AVAILABLE") else "METADATA_VERIFIED"
+    if has_expected_sha256:
+        return "CHECKSUM_PINNED"
+    if status in {DatasetLifecycleStatus.METADATA_VERIFIED, DatasetLifecycleStatus.LICENSE_VERIFIED}:
+        return "METADATA_VERIFIED"
+    return "CATALOGED_ONLY"
+
+
 def lifecycle_to_acquisition_state(
     status: DatasetLifecycleStatus,
     *,
@@ -146,6 +200,10 @@ class Dataset(BaseModel):
     # Lifecycle & Verification tracking
     file_size_bytes: Optional[int] = Field(None, description="File size on disk or archive")
     sha256_checksum: Optional[str] = Field(None, description="SHA-256 verification hash")
+    checksum_source: Optional[ChecksumSource] = Field(
+        None,
+        description="Provenance of the SHA-256 checksum (authoritative_pds | manifest_pinned | locally_computed_only | unavailable)",
+    )
     status: DatasetLifecycleStatus = Field(DatasetLifecycleStatus.DISCOVERED, description="Current lifecycle state")
     acquisition_state: Optional[AcquisitionState] = Field(
         None,

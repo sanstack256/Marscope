@@ -313,13 +313,24 @@ class OrchestrationInvalidationRequest(BaseModel):
     question_id: Optional[str] = None
 
 
+class DossierVerifyRequest(BaseModel):
+    dossier: Dict[str, Any]
+    expected_artifact_sha256: Optional[str] = None
+
+
 # 23
 @router.post("/campaigns/{campaign_id}/approve", response_model=ScienceCampaignPlan)
 async def approve_science_campaign(
     campaign_id: str,
     req: CampaignApprovalRequest,
+    request: Request,
 ) -> ScienceCampaignPlan:
     """Explicitly approve a fresh, reviewed science-to-EVA mission baseline (never auto-approved)."""
+    verify_operator_auth(
+        request,
+        fail_closed_when_unconfigured=False,
+        operation_name="science campaign approval",
+    )
     validate_identifier(campaign_id, field_name="campaign_id")
     try:
         return science_investigation_service.approve_campaign(
@@ -334,6 +345,16 @@ async def approve_science_campaign(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
+# 23b
+@router.post("/dossiers/verify")
+async def verify_unified_dossier(req: DossierVerifyRequest) -> Dict[str, Any]:
+    """Independently verify SHA-256 content and export integrity digests of an exported dossier."""
+    return science_investigation_service.verify_dossier(
+        req.dossier,
+        expected_artifact_sha256=req.expected_artifact_sha256,
+    )
 
 
 # 24

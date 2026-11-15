@@ -304,8 +304,8 @@ def require_real_data_or_skip(
         return
     msg = (
         f"Real NASA product file(s) absent locally: {', '.join(missing)}. "
-        "Run 'python3 backend/scripts/bootstrap_datasets.py --verify' (Mode A) or "
-        "'python3 backend/scripts/bootstrap_datasets.py --acquire' (Mode B)."
+        "Run 'python3 scripts/bootstrap_datasets.py --verify' (Mode A) or "
+        "'python3 scripts/bootstrap_datasets.py --acquire' (Mode B)."
     )
     if os.getenv(require_env_var) == "1":
         pytest.fail(f"[{require_env_var}=1 preflight failure] {msg}")

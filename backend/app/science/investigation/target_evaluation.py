@@ -202,6 +202,10 @@ def _evaluate_single_location(
     pair_reg_cache: Optional[Dict[str, Any]] = None,
     morph_reviews: Optional[Dict[str, Any]] = None,
     spatial_coverage_service: Optional[Any] = None,
+    cached_datasets: Optional[List[Any]] = None,
+    footprint_cache: Optional[Dict[str, Any]] = None,
+    cached_species_ids: Optional[List[str]] = None,
+    cached_comp_status: Optional[Any] = None,
 ) -> CandidateTargetEvaluation:
     is_gale_q = "gale" in question.study_region.lower() or "sharp" in question.study_region.lower()
     known_facts: List[str] = []
@@ -219,7 +223,7 @@ def _evaluate_single_location(
     crs_valid = validate_mars_crs(crs)
     coords_valid = -90.0 <= float(latitude) <= 90.0 and -180.0 <= float(longitude_east) <= 360.0
 
-    datasets = list(catalog_service.list_datasets()) if catalog_service else []
+    datasets = cached_datasets if cached_datasets is not None else (list(catalog_service.list_datasets()) if catalog_service else [])
     covering_ds: List[str] = []
     covering_dtms: List[Any] = []
     has_highres_dtm = False
@@ -255,7 +259,12 @@ def _evaluate_single_location(
             in_valid_swath = True
             swath_reason = "bbox_only"
             try:
-                fp_rec = get_or_extract_dataset_footprint(ds, dataset_root_dir=ds_root)
+                fp_key = f"{ds.id}|{ds.sha256_checksum or ''}|{ds.processed_file_path or ''}"
+                fp_rec = footprint_cache.get(fp_key) if footprint_cache is not None else None
+                if fp_rec is None:
+                    fp_rec = get_or_extract_dataset_footprint(ds, dataset_root_dir=ds_root)
+                    if footprint_cache is not None:
+                        footprint_cache[fp_key] = fp_rec
                 in_valid_swath, swath_reason = point_intersects_footprint(
                     fp_rec, latitude, longitude_east, require_valid_pixels_if_known=True
                 )
@@ -396,7 +405,7 @@ def _evaluate_single_location(
     nearest_obs_m: Optional[float] = None
     distinct_insts = list(dict.fromkeys([i for i in initial_instruments if i and i.lower() != "manual"]))
 
-    comp_status = composition_index.get_status() if composition_index else None
+    comp_status = cached_comp_status if cached_comp_status is not None else (composition_index.get_status() if composition_index else None)
     comp_integrity_ok = bool(
         comp_status
         and getattr(comp_status, "index_available", False)
@@ -404,7 +413,7 @@ def _evaluate_single_location(
     )
     if comp_integrity_ok:
         deg_pad = max(0.01, search_radius_m / 59200.0 + 0.005)
-        all_species_ids = [s.canonical_id for s in list_all_species()]
+        all_species_ids = cached_species_ids if cached_species_ids is not None else [s.canonical_id for s in list_all_species()]
         bbox_hits = composition_index.query_evidence(
             species_ids=all_species_ids,
             located_only=True,
@@ -714,6 +723,10 @@ def evaluate_targets_for_question(
     evaluated_map: Dict[str, CandidateTargetEvaluation] = {}
     rejected_map: Dict[str, CandidateTargetEvaluation] = {}
     pair_reg_cache: Dict[str, Any] = {}
+    footprint_cache: Dict[str, Any] = {}
+    cached_datasets = list(catalog_service.list_datasets()) if catalog_service else []
+    cached_species_ids = [s.canonical_id for s in list_all_species()]
+    comp_status = composition_index.get_status() if composition_index else None
     morph_reviews: Optional[Dict[str, Any]] = None
     if morphology_service is not None and getattr(morphology_service, "review_store", None) is not None:
         try:
@@ -753,6 +766,10 @@ def evaluate_targets_for_question(
             pair_reg_cache=pair_reg_cache,
             morph_reviews=morph_reviews,
             spatial_coverage_service=spatial_coverage_service,
+            cached_datasets=cached_datasets,
+            footprint_cache=footprint_cache,
+            cached_species_ids=cached_species_ids,
+            cached_comp_status=comp_status,
         )
         if ev.eligibility_decision == "REJECTED_FOR_CAMPAIGN" and not (req.target_ids and ev.target_id in req.target_ids):
             rejected_map[ev.target_id] = ev
@@ -760,7 +777,6 @@ def evaluate_targets_for_question(
             evaluated_map[ev.target_id] = ev
 
     # Discover genuine evidence-backed candidate locations across ALL question.target_phenomena
-    comp_status = composition_index.get_status() if composition_index else None
     if (
         req.include_discovered_candidates
         and composition_search_service
@@ -821,6 +837,10 @@ def evaluate_targets_for_question(
                     pair_reg_cache=pair_reg_cache,
                     morph_reviews=morph_reviews,
                     spatial_coverage_service=spatial_coverage_service,
+                    cached_datasets=cached_datasets,
+                    footprint_cache=footprint_cache,
+                    cached_species_ids=cached_species_ids,
+                    cached_comp_status=comp_status,
                 )
                 if ev.eligibility_decision == "REJECTED_FOR_CAMPAIGN" and not (target_id_set and tid in target_id_set):
                     rejected_map[tid] = ev
