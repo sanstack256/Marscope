@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type * as CesiumTypes from "cesium";
 import { API_BASE_URL } from "../lib/constants";
+import { fetchHeightGridForCesium } from "../lib/terrainNoData";
 import { useLayerStore } from "../stores/useLayerStore";
 import { useAuthMissionStore } from "../stores/useAuthMissionStore";
 import { useMissionStore } from "../stores/useMissionStore";
@@ -156,32 +157,20 @@ function createMarscopeDemTerrainProvider(
         grid_size: String(gridSize),
       });
 
-      const promise = fetch(`${API_BASE_URL}/terrain/mesh/heightgrid?${qs.toString()}`, {
-        signal,
-      })
-        .then(async (res) => {
-          if (!res.ok) {
-            return new Float32Array(gridSize * gridSize);
-          }
-          const payload = (await res.json()) as {
-            grid_rows: number;
-            grid_cols: number;
-            elevations_m: Array<number | null>;
-          };
-          const out = new Float32Array(payload.grid_rows * payload.grid_cols);
-          for (let i = 0; i < out.length; i += 1) {
-            const h = payload.elevations_m[i];
-            out[i] = h != null && Number.isFinite(h) ? h : 0;
-          }
-          return out;
-        })
-        .catch(() => new Float32Array(gridSize * gridSize))
-        .then((floatBuf) => {
-          pendingFetches = Math.max(0, pendingFetches - 1);
+      const promise = fetchHeightGridForCesium(
+        `${API_BASE_URL}/terrain/mesh/heightgrid?${qs.toString()}`,
+        {
+          signal,
+          onSettled: () => {
+            pendingFetches = Math.max(0, pendingFetches - 1);
+          },
+        }
+      )
+        .then(({ buffer, width, height }) => {
           return new Cesium.HeightmapTerrainData({
-            buffer: floatBuf,
-            width: gridSize,
-            height: gridSize,
+            buffer,
+            width,
+            height,
             childTileMask: level < 15 ? 15 : 0,
             structure: {
               heightScale: 1,
@@ -190,6 +179,11 @@ function createMarscopeDemTerrainProvider(
               stride: 1,
             },
           });
+        })
+        .catch((err) => {
+          // Never cache failed, aborted, unavailable, or partial-nodata terrain tiles
+          tileCache.delete(key);
+          throw err;
         });
 
       tileCache.set(key, promise);

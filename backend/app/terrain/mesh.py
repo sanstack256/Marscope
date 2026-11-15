@@ -222,6 +222,14 @@ class TerrainMeshTileResponse(BaseModel):
 
 
 class HeightGridResponse(BaseModel):
+    """
+    Cesium heightgrid response contract:
+    - elevations_m[i] is a finite float (including 0.0) when valid_mask[i] == 1.
+    - elevations_m[i] is None (JSON null) when valid_mask[i] == 0 (unavailable/nodata).
+    - Missing samples are NEVER converted to 0.0; nodata_fill_value is None.
+    - native_resolution_m reports source DEM pixel size; sample_spacing_m reports
+      the actual delivered grid spacing after resampling.
+    """
     dataset_id: str
     product_id: str
     available: bool
@@ -231,8 +239,11 @@ class HeightGridResponse(BaseModel):
     grid_rows: int
     grid_cols: int
     valid_fraction: float
-    nodata_fill_value: float = 0.0
+    nodata_fill_value: Optional[float] = None
     elevations_m: List[Optional[float]]
+    valid_mask: List[int] = Field(default_factory=list)
+    sample_spacing_m: Optional[Dict[str, float]] = None
+    native_resolution_m: Optional[float] = None
     min_elevation_m: Optional[float] = None
     max_elevation_m: Optional[float] = None
 
@@ -1286,7 +1297,10 @@ class TerrainMeshService:
                 grid_rows=0,
                 grid_cols=0,
                 valid_fraction=0.0,
+                nodata_fill_value=None,
                 elevations_m=[],
+                valid_mask=[],
+                native_resolution_m=ds.horizontal_resolution_meters,
             )
 
         tile = self.get_mesh_tile(
@@ -1308,7 +1322,11 @@ class TerrainMeshService:
             grid_rows=tile.grid_rows,
             grid_cols=tile.grid_cols,
             valid_fraction=round(valid_frac, 4),
+            nodata_fill_value=None,
             elevations_m=tile.elevations_m,
+            valid_mask=tile.valid_mask,
+            sample_spacing_m=tile.sample_spacing_m,
+            native_resolution_m=tile.native_resolution_m,
             min_elevation_m=tile.elevation_min_m,
             max_elevation_m=tile.elevation_max_m,
         )

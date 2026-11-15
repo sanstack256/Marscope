@@ -21,6 +21,10 @@ import {
   Columns2,
 } from "lucide-react";
 import { API_BASE_URL } from "@/lib/constants";
+import {
+  buildCompactedTileMeshGeometryData,
+  buildValidTileBoundarySegments,
+} from "@/lib/terrainNoData";
 import { useAuthMissionStore } from "@/stores/useAuthMissionStore";
 import { useEvaOperationsStore } from "@/stores/useEvaOperationsStore";
 import { useEvidenceStore } from "@/stores/useEvidenceStore";
@@ -278,6 +282,12 @@ export function LocalTerrain3DViewer({
   const overviewClusterRef = useRef(false);
 
   const [tilesLoading, setTilesLoading] = useState(false);
+  const [deliveredSampleSpacing, setDeliveredSampleSpacing] = useState<{
+    dx_m: number;
+    dy_m: number;
+    cols: number;
+    rows: number;
+  } | null>(null);
   const [tilesLoadedCount, setTilesLoadedCount] = useState(0);
   const [tileError, setTileError] = useState<string | null>(null);
   const [showTargets, setShowTargets] = useState(true);
@@ -862,71 +872,32 @@ export function LocalTerrain3DViewer({
         const texLoader = new THREE.TextureLoader();
         const currentOverlay = activeOverlayRef.current;
 
+        let firstTileSpacing: { dx_m: number; dy_m: number; cols: number; rows: number } | null = null;
         fetchedTiles.forEach((tile) => {
-          const rows = tile.grid_rows;
-          const cols = tile.grid_cols;
-          const numVerts = rows * cols;
-          const positions = new Float32Array(numVerts * 3);
-          const uvs = new Float32Array(numVerts * 2);
+          if (!firstTileSpacing && tile.sample_spacing_m) {
+            firstTileSpacing = {
+              dx_m: tile.sample_spacing_m.dx_m,
+              dy_m: tile.sample_spacing_m.dy_m,
+              cols: tile.grid_cols,
+              rows: tile.grid_rows,
+            };
+          }
+          const compacted = buildCompactedTileMeshGeometryData(tile, TERRAIN_TEX_SIZE);
+          if (!compacted) return;
 
           const minE = tile.local_bounds_m.min_east_m;
           const maxE = tile.local_bounds_m.max_east_m;
           const minN = tile.local_bounds_m.min_north_m;
           const maxN = tile.local_bounds_m.max_north_m;
 
-          for (let r = 0; r < rows; r += 1) {
-            const vFrac = rows > 1 ? r / (rows - 1) : 0; // 0=North, 1=South
-            const northM = maxN - vFrac * (maxN - minN);
-            const zCoord = -northM;
-
-            for (let c = 0; c < cols; c += 1) {
-              const uFrac = cols > 1 ? c / (cols - 1) : 0; // 0=West, 1=East
-              const eastM = minE + uFrac * (maxE - minE);
-              const idx = r * cols + c;
-              const rawElev = tile.elevations_m[idx];
-              const yCoord =
-                tile.valid_mask[idx] === 1 && rawElev != null && Number.isFinite(rawElev)
-                  ? rawElev
-                  : refElevMRef.current;
-
-              positions[idx * 3] = eastM;
-              positions[idx * 3 + 1] = yCoord;
-              positions[idx * 3 + 2] = zCoord;
-
-              // Half-texel inset aligns adjacent tile boundary pixels without bilinear edge seams
-              uvs[idx * 2] = (0.5 + uFrac * (TERRAIN_TEX_SIZE - 1)) / TERRAIN_TEX_SIZE;
-              uvs[idx * 2 + 1] = 1 - (0.5 + vFrac * (TERRAIN_TEX_SIZE - 1)) / TERRAIN_TEX_SIZE;
-            }
-          }
-
-          // Emit triangles ONLY when all 3 vertices have valid data (strict nodata omission)
-          const indices: number[] = [];
-          for (let r = 0; r < rows - 1; r += 1) {
-            for (let c = 0; c < cols - 1; c += 1) {
-              const a = r * cols + c;
-              const b = a + 1;
-              const sw = (r + 1) * cols + c;
-              const se = sw + 1;
-
-              const va = tile.valid_mask[a] === 1;
-              const vb = tile.valid_mask[b] === 1;
-              const vsw = tile.valid_mask[sw] === 1;
-              const vse = tile.valid_mask[se] === 1;
-
-              if (va && vsw && vb) indices.push(a, sw, b);
-              if (vb && vsw && vse) indices.push(b, sw, se);
-            }
-          }
-
-          if (indices.length === 0) return;
           totalVerts += tile.valid_vertex_count;
 
           const geom = new THREE.BufferGeometry();
-          geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-          geom.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
-          geom.setIndex(indices);
-          if (tile.normals && tile.normals.length === numVerts * 3) {
-            geom.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(tile.normals), 3));
+          geom.setAttribute("position", new THREE.BufferAttribute(compacted.positions, 3));
+          geom.setAttribute("uv", new THREE.BufferAttribute(compacted.uvs, 2));
+          geom.setIndex(compacted.indices);
+          if (compacted.normals) {
+            geom.setAttribute("normal", new THREE.BufferAttribute(compacted.normals, 3));
           } else {
             geom.computeVertexNormals();
           }
@@ -995,6 +966,7 @@ export function LocalTerrain3DViewer({
 
         setTilesLoadedCount(fetchedTiles.length);
         setRenderedVertexTotal(totalVerts);
+        setDeliveredSampleSpacing(firstTileSpacing);
         setTilesLoading(false);
 
         // Auto-fit camera ONLY when DEM dataset or region bounds change (preserve focus on LOD/overlay switches)
@@ -1157,26 +1129,20 @@ export function LocalTerrain3DViewer({
       const ud = mesh.userData as TileMeshUserData | undefined;
       if (!ud?.tile) return;
       const t = ud.tile;
-      const rows = t.grid_rows;
-      const cols = t.grid_cols;
-      const pts: THREE.Vector3[] = [];
-      const pushRc = (r: number, c: number) => {
-        const idx = r * cols + c;
-        const vFrac = rows > 1 ? r / (rows - 1) : 0;
-        const uFrac = cols > 1 ? c / (cols - 1) : 0;
-        const eastM = ud.minEastM + uFrac * (ud.maxEastM - ud.minEastM);
-        const northM = ud.maxNorthM - vFrac * (ud.maxNorthM - ud.minNorthM);
-        const zVal = t.valid_mask[idx] === 1 && t.elevations_m[idx] != null ? (t.elevations_m[idx] as number) : refElev;
-        pts.push(new THREE.Vector3(eastM, (zVal - refElev) * exag + 2.5, -northM));
-      };
-      for (let c = 0; c < cols; c += 1) pushRc(0, c);
-      for (let r = 1; r < rows; r += 1) pushRc(r, cols - 1);
-      for (let c = cols - 2; c >= 0; c -= 1) pushRc(rows - 1, c);
-      for (let r = rows - 2; r >= 0; r -= 1) pushRc(r, 0);
-
-      const lineGeom = new THREE.BufferGeometry().setFromPoints(pts);
+      const segPositions = buildValidTileBoundarySegments(
+        t,
+        ud.minEastM,
+        ud.maxEastM,
+        ud.minNorthM,
+        ud.maxNorthM,
+        refElev,
+        exag
+      );
+      if (segPositions.length === 0) return;
+      const lineGeom = new THREE.BufferGeometry();
+      lineGeom.setAttribute("position", new THREE.BufferAttribute(segPositions, 3));
       const lineMat = new THREE.LineBasicMaterial({ color: "#38bdf8", transparent: true, opacity: 0.75 });
-      boundsGroup.add(new THREE.Line(lineGeom, lineMat));
+      boundsGroup.add(new THREE.LineSegments(lineGeom, lineMat));
     });
   }, [showTileBoundaries, meshManifest, verticalExaggeration, tilesLoadedCount]);
 
@@ -2844,8 +2810,11 @@ export function LocalTerrain3DViewer({
                   </span>
                   <span className="text-[9px] text-slate-400">
                     {meshManifest?.native_resolution_m
-                      ? `${meshManifest.native_resolution_m.toFixed(2)} m/px`
+                      ? `Src ${meshManifest.native_resolution_m.toFixed(2)} m/px`
                       : "DEM"}
+                    {deliveredSampleSpacing
+                      ? ` · Grid ${deliveredSampleSpacing.dx_m.toFixed(1)}×${deliveredSampleSpacing.dy_m.toFixed(1)} m`
+                      : ""}
                   </span>
                 </div>
 
@@ -2910,7 +2879,12 @@ export function LocalTerrain3DViewer({
             </span>
             <span className="text-cyan-300/90">IAU2000:49900</span>
             {meshManifest?.native_resolution_m != null && (
-              <span>{meshManifest.native_resolution_m.toFixed(2)} m/px</span>
+              <span>Src {meshManifest.native_resolution_m.toFixed(2)} m/px</span>
+            )}
+            {deliveredSampleSpacing && (
+              <span title="Delivered terrain mesh vertex spacing after backend grid resampling">
+                Grid {deliveredSampleSpacing.dx_m.toFixed(1)}×{deliveredSampleSpacing.dy_m.toFixed(1)} m ({deliveredSampleSpacing.cols}×{deliveredSampleSpacing.rows})
+              </span>
             )}
             {verticalExaggeration > 1 && (
               <span
@@ -2920,12 +2894,6 @@ export function LocalTerrain3DViewer({
                 EXAG {verticalExaggeration}x VISUAL ONLY
               </span>
             )}
-            <span>|</span>
-            <span>
-              {meshManifest?.native_resolution_m
-                ? `${meshManifest.native_resolution_m.toFixed(2)} m/px`
-                : "DEM"}
-            </span>
             <span>|</span>
             <span>{tilesLoadedCount} tiles / {renderedVertexTotal.toLocaleString()} valid pts</span>
             <span>|</span>
