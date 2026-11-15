@@ -198,8 +198,18 @@ def evaluate_dataset_eligibility(
         )
     )
 
-    # 9. Coordinate validity
-    crs_ok = validate_mars_crs(ds.coordinate_reference_system)
+    # 9. Coordinate validity (Prompt 19 detailed Mars CRS registry check)
+    from app.geospatial.crs import validate_mars_crs_detailed
+    from app.geospatial.models import SpatialRegistrationAssessmentState as _RegAssessState
+    from app.geospatial.registration import evaluate_product_pair_registration
+
+    crs_det = validate_mars_crs_detailed(
+        ds.coordinate_reference_system,
+        latitude_convention=ds.latitude_convention,
+        longitude_direction=ds.longitude_direction,
+        vertical_reference=ds.calibration_status,
+    )
+    crs_ok = crs_det.valid and validate_mars_crs(ds.coordinate_reference_system)
     coord_ok = (
         crs_ok
         and ds.coverage.min_latitude >= -90.0
@@ -210,11 +220,14 @@ def evaluate_dataset_eligibility(
         EvidenceEligibilityDimensionResult(
             dimension="9_coordinate_validity",
             status="PASS" if coord_ok else "FAIL",
-            detail=f"CRS={ds.coordinate_reference_system!r}, lat=[{ds.coverage.min_latitude},{ds.coverage.max_latitude}], conv={ds.latitude_convention}/{ds.longitude_direction}.",
+            detail=(
+                f"CRS={ds.coordinate_reference_system!r} ({crs_det.validation_state.value}), "
+                f"lat=[{ds.coverage.min_latitude},{ds.coverage.max_latitude}], conv={ds.latitude_convention}/{ds.longitude_direction}."
+            ),
         )
     )
 
-    # 10. Spatial registration quality
+    # 10. Spatial registration quality (pairwise footprint/datum check when local files exist)
     ref = reference_dtm
     if ref is not None and ref.id != ds.id:
         reg_report = evaluate_spatial_registration(
@@ -265,11 +278,36 @@ def evaluate_dataset_eligibility(
         reg_dim_stat = "PASS_WITH_LIMITATION"
     else:
         reg_dim_stat = "PASS"
+
+    reg_detail = f"State={reg_state.value}; error_status={reg_report['registration_error_status']}."
+    if ref is not None and ref.id != ds.id and (ds.local_file_path or ds.processed_file_path) and (ref.local_file_path or ref.processed_file_path):
+        try:
+            from pathlib import Path as _P
+
+            ds_root = _P(__file__).resolve().parents[4] / "datasets"
+            pair_reg = evaluate_product_pair_registration(
+                ds,
+                ref,
+                dataset_root_dir=ds_root,
+                intended_analysis=question.question_id,
+            )
+            if pair_reg.overall_state in {
+                _RegAssessState.INCOMPATIBLE_CRS_OR_FRAME,
+                _RegAssessState.NOT_REGISTERED,
+            } or pair_reg.footprint_overlap_status == "bbox_only_no_valid_pixel_overlap":
+                reg_dim_stat = "FAIL"
+                reg_state = SpatialRegistrationState.NOT_REGISTERED
+            elif pair_reg.overall_state == _RegAssessState.VALIDATED_WITH_LIMITATIONS and reg_dim_stat == "PASS":
+                reg_dim_stat = "PASS_WITH_LIMITATION"
+            reg_detail = f"State={pair_reg.overall_state.value}; overlap={pair_reg.footprint_overlap_status} ({pair_reg.overlap_area_m2 or 0.0} m2)."
+        except Exception:
+            pass
+
     dims.append(
         EvidenceEligibilityDimensionResult(
             dimension="10_spatial_registration_quality",
             status=reg_dim_stat,
-            detail=f"State={reg_state.value}; error_status={reg_report['registration_error_status']}.",
+            detail=reg_detail,
         )
     )
 

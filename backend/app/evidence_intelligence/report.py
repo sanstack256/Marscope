@@ -517,6 +517,27 @@ class EvidenceIntelligenceService:
             segment_bounds=dem_stats["segment_bounds"],
             native_resolution_m=native_res_m,
         )
+        # Prompt 19 Part 12.4: Enrich corridor coverage_summary with true DEM-to-Optical registration assessment
+        if ds_meta is not None and primary_ortho_id:
+            ortho_ds_meta = self.catalog_service.get_dataset(primary_ortho_id)
+            if ortho_ds_meta is not None:
+                try:
+                    from app.geospatial.registration import evaluate_product_pair_registration
+
+                    pair_reg = evaluate_product_pair_registration(
+                        ds_meta,
+                        ortho_ds_meta,
+                        dataset_root_dir=Path(self.raw_dir).parent,
+                        intended_analysis="corridor_evidence_intelligence",
+                    )
+                    coverage_summary["spatial_registration_state"] = pair_reg.overall_state.value
+                    coverage_summary["spatial_overlap_status"] = pair_reg.footprint_overlap_status
+                    coverage_summary["spatial_registration_summary"] = (
+                        f"{pair_reg.overall_state.value}: overlap={pair_reg.footprint_overlap_status}, "
+                        f"rel_accuracy={pair_reg.relative_registration_accuracy}"
+                    )
+                except Exception:
+                    pass
         ds_unc_prof = (
             inspect_dataset_elevation_uncertainty(
                 dataset=ds_meta,

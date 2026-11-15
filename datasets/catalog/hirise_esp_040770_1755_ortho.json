@@ -1,7 +1,7 @@
 {
   "id": "hirise_esp_040770_1755_ortho",
   "product_id": "ESP_040770_1755_RED_C_01_ORTHO.JP2",
-  "product_title": "HiRISE Orthorectified Surface Image — Bradbury to Vera Rubin Ridge (1.01 m/px)",
+  "product_title": "HiRISE Orthorectified Surface Image \u2014 Bradbury to Vera Rubin Ridge (1.01 m/px)",
   "product_type": "IMAGE / Orthorectified Orbital Imagery",
   "mission": "Mars Reconnaissance Orbiter (MRO)",
   "instrument": "High Resolution Imaging Science Experiment (HiRISE)",
@@ -40,27 +40,22 @@
   "data_format": "PDS3 .LBL + JPEG2000 (.JP2)",
   "file_size_bytes": 24772092,
   "sha256_checksum": "f25a1a8caab875cd84250a6e79fb2ea082eb3f01f6db2ab9791be25f05649a2a",
-  "status": "downloaded",
+  "status": "discovered",
   "verification": {
-    "archive_availability": "verified",
+    "archive_availability": "unverified",
     "product_discovery": "verified",
-    "metadata_verification": "verified",
+    "metadata_verification": "unverified",
     "license_verification": "verified",
-    "coverage_verification": "verified",
-    "download_verification": "verified",
-    "processing_verification": "unverified",
+    "coverage_verification": "unverified",
+    "download_verification": "unverified",
+    "processing_verification": "not_applicable",
     "field_verification": {
-      "resolution": "verified",
-      "crs": "verified",
-      "units": "verified",
-      "coverage": "verified",
       "license": "verified"
     },
     "evidence_notes": [
-      "Verified downloaded file esp_040770_1755_red_c_01_ortho.jp2 (24772092 bytes, SHA-256=f25a1a8caab8...)",
       "Verified PDS3 header esp_040770_1755_red_c_01_ortho.lbl"
     ],
-    "last_checked_utc": "2026-11-14T14:28:36.420458Z"
+    "last_checked_utc": null
   },
   "failure_reason": null,
   "quality_flags": [],
@@ -68,7 +63,7 @@
   "processing_history": [
     "Catalog record discovered via HiriseSourceAdapter"
   ],
-  "local_file_path": "raw/esp_040770_1755_red_c_01_ortho.jp2",
-  "local_label_path": "raw/esp_040770_1755_red_c_01_ortho.lbl",
+  "local_file_path": null,
+  "local_label_path": null,
   "processed_file_path": null
 }

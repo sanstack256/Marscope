@@ -7,6 +7,37 @@ import { useLayerStore } from "../stores/useLayerStore";
 import { useMissionStore } from "../stores/useMissionStore";
 import { useRoutingStore } from "../stores/useRoutingStore";
 import { Compass, Globe2, Layers, Minus, Plus, RotateCcw, Crosshair, Route as RouteIcon } from "lucide-react";
+import { useSpatialStore } from "@/stores/useSpatialStore";
+import type { GeoJsonGeometry } from "@/types";
+
+function extractGlobeOuterRings(geom: GeoJsonGeometry | null | undefined): Array<Array<[number, number]>> {
+  if (!geom || !geom.coordinates) return [];
+  const toRing = (coords: unknown): Array<[number, number]> => {
+    if (!Array.isArray(coords)) return [];
+    const pts: Array<[number, number]> = [];
+    for (const c of coords) {
+      if (Array.isArray(c) && c.length >= 2 && typeof c[0] === "number" && typeof c[1] === "number") {
+        pts.push([c[0], c[1]]);
+      }
+    }
+    return pts;
+  };
+  if (geom.type === "Polygon" && Array.isArray(geom.coordinates)) {
+    const outer = toRing((geom.coordinates as unknown[])[0]);
+    return outer.length >= 3 ? [outer] : [];
+  }
+  if (geom.type === "MultiPolygon" && Array.isArray(geom.coordinates)) {
+    const rings: Array<Array<[number, number]>> = [];
+    for (const poly of geom.coordinates as unknown[]) {
+      if (Array.isArray(poly)) {
+        const outer = toRing(poly[0]);
+        if (outer.length >= 3) rings.push(outer);
+      }
+    }
+    return rings;
+  }
+  return [];
+}
 
 type SceneViewMode = "3D" | "2.5D" | "2D";
 const GLOBAL_VIEW_CAMERA_HEIGHT_M = 9_000_000; // Initial UI framing distance; not a scientific parameter.
@@ -347,6 +378,28 @@ export function MarsGlobeViewer() {
             picked && typeof picked === "object" && "id" in picked && picked.id && typeof picked.id === "object" && "id" in picked.id
               ? String((picked.id as { id: unknown }).id)
               : null;
+
+          if (pickedEntityId && pickedEntityId.startsWith("footprint:")) {
+            const did = pickedEntityId.slice("footprint:".length);
+            const fp = useSpatialStore
+              .getState()
+              .intersectingFootprints.find((f) => f.dataset_id === did);
+            if (fp) {
+              useSpatialStore.getState().setSelectedEntity({ kind: "footprint", data: fp });
+              return;
+            }
+          }
+
+          if (pickedEntityId && pickedEntityId.startsWith("gap:")) {
+            const gid = pickedEntityId.slice("gap:".length);
+            const gap = useSpatialStore
+              .getState()
+              .coverageReport?.evidence_gaps.find((g) => g.gap_id === gid);
+            if (gap) {
+              useSpatialStore.getState().setSelectedEntity({ kind: "gap", data: gap });
+              return;
+            }
+          }
 
           if (pickedEntityId && pickedEntityId.startsWith("waypoint:")) {
             const seq = Number(pickedEntityId.slice("waypoint:".length));
@@ -788,6 +841,71 @@ export function MarsGlobeViewer() {
 
     viewer.scene.requestRender();
   }, [viewerReady, activeRoute, startPoint, destinationPoint, selectedWaypointSeq]);
+
+  // Sync Prompt 19 Swath Footprints & Evidence-Gap Overlays on Mars Globe
+  const intersectingFootprints = useSpatialStore((s) => s.intersectingFootprints);
+  const coverageReport = useSpatialStore((s) => s.coverageReport);
+  const showFootprintsOverlay = useSpatialStore((s) => s.showFootprintsOverlay);
+  const showGapsOverlay = useSpatialStore((s) => s.showGapsOverlay);
+
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    const Cesium = cesiumRef.current;
+    const marsEllipsoid = ellipsoidRef.current;
+    if (!viewerReady || !viewer || viewer.isDestroyed() || !Cesium || !marsEllipsoid) return;
+
+    let spatialSource = viewer.dataSources.getByName("marscope-spatial-overlays")[0];
+    if (!spatialSource) {
+      spatialSource = new Cesium.CustomDataSource("marscope-spatial-overlays");
+      void viewer.dataSources.add(spatialSource);
+    }
+    const entities = spatialSource.entities;
+    entities.removeAll();
+    const toLon180 = (lonEast: number) => (lonEast > 180 ? lonEast - 360 : lonEast);
+
+    if (showFootprintsOverlay && intersectingFootprints.length > 0) {
+      intersectingFootprints.slice(0, 12).forEach((fp) => {
+        const rings = extractGlobeOuterRings(fp.valid_data_geojson || fp.footprint_geojson);
+        rings.forEach((ring, rIdx) => {
+          const flat = ring.flatMap(([lon, lat]) => [toLon180(lon), lat]);
+          if (flat.length < 6) return;
+          const isApprox = fp.is_approximate;
+          entities.add({
+            id: rIdx === 0 ? `footprint:${fp.dataset_id}` : `footprint:${fp.dataset_id}:${rIdx}`,
+            polygon: {
+              hierarchy: Cesium.Cartesian3.fromDegreesArray(flat, marsEllipsoid),
+              material: Cesium.Color.fromCssColorString(isApprox ? "#64748b" : "#22d3ee").withAlpha(0.08),
+              outline: true,
+              outlineColor: Cesium.Color.fromCssColorString(isApprox ? "#94a3b8" : "#22d3ee"),
+              heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+            },
+          });
+        });
+      });
+    }
+
+    if (showGapsOverlay && coverageReport?.evidence_gaps?.length) {
+      coverageReport.evidence_gaps.slice(0, 12).forEach((gap) => {
+        const rings = extractGlobeOuterRings(gap.geometry_geojson);
+        rings.forEach((ring, rIdx) => {
+          const flat = ring.flatMap(([lon, lat]) => [toLon180(lon), lat]);
+          if (flat.length < 6) return;
+          entities.add({
+            id: rIdx === 0 ? `gap:${gap.gap_id}` : `gap:${gap.gap_id}:${rIdx}`,
+            polygon: {
+              hierarchy: Cesium.Cartesian3.fromDegreesArray(flat, marsEllipsoid),
+              material: Cesium.Color.fromCssColorString("#f59e0b").withAlpha(0.14),
+              outline: true,
+              outlineColor: Cesium.Color.fromCssColorString("#fb7185"),
+              heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+            },
+          });
+        });
+      });
+    }
+
+    viewer.scene.requestRender();
+  }, [viewerReady, intersectingFootprints, coverageReport, showFootprintsOverlay, showGapsOverlay]);
 
   // Camera control handlers (proportional distance-aware zoom + Mars ellipsoid bounds)
   const handleZoom = (factor: number) => {

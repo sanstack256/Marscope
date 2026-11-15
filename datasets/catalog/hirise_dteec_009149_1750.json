@@ -1,7 +1,7 @@
 {
   "id": "hirise_dteec_009149_1750",
   "product_id": "DTEEC_009149_1750_009294_1750_U01.IMG",
-  "product_title": "HiRISE Stereo DTM — Gale Crater / Mount Sharp / Boxwork Formations (1.01 m/px)",
+  "product_title": "HiRISE Stereo DTM \u2014 Gale Crater / Mount Sharp / Boxwork Formations (1.01 m/px)",
   "product_type": "DEM / High-Resolution Stereo DTM",
   "mission": "Mars Reconnaissance Orbiter (MRO)",
   "instrument": "High Resolution Imaging Science Experiment (HiRISE)",
@@ -36,33 +36,27 @@
   "horizontal_resolution_meters": 1.0117,
   "vertical_resolution_meters": 0.25,
   "units": "meters",
-  "nodata_value": -3.4028226550889045e38,
+  "nodata_value": -3.4028226550889045e+38,
   "data_format": "PDS3 Attached-Label 32-bit PC_REAL Image",
   "file_size_bytes": 390551132,
   "sha256_checksum": "74881a6f7af9f3dcacbee72cf148020467bba5fac5dec4b5349a614397455e32",
-  "status": "processed",
+  "status": "discovered",
   "verification": {
-    "archive_availability": "verified",
+    "archive_availability": "unverified",
     "product_discovery": "verified",
-    "metadata_verification": "verified",
+    "metadata_verification": "unverified",
     "license_verification": "verified",
-    "coverage_verification": "verified",
-    "download_verification": "verified",
-    "processing_verification": "verified",
+    "coverage_verification": "unverified",
+    "download_verification": "unverified",
+    "processing_verification": "not_applicable",
     "field_verification": {
-      "crs": "verified",
-      "units": "verified",
-      "resolution": "verified",
-      "coverage": "verified",
       "license": "verified"
     },
     "evidence_notes": [
       "Catalogued from UArizona HiRISE DTMCUMINDEX.TAB; covers Mount Sharp, Gediz Vallis, and 2025/2026 Boxwork Formations.",
-      "Verified downloaded file dteec_009149_1750_009294_1750_u01.img (390551132 bytes, SHA-256=74881a6f7af9...)",
-      "Verified PDS3 header dteec_009149_1750_009294_1750_u01.img",
-      "Processed DEM and terrain derivatives to hirise_dteec_009149_1750_dem.tif"
+      "Verified PDS3 header dteec_009149_1750_009294_1750_u01.img"
     ],
-    "last_checked_utc": "2026-11-14T14:28:36.420458Z"
+    "last_checked_utc": null
   },
   "failure_reason": null,
   "quality_flags": [
@@ -73,11 +67,9 @@
     "Oblique stereo swath leaves diagonal no-data regions inside the bounding box; never interpolate across missing swath corners."
   ],
   "processing_history": [
-    "Catalog record discovered via HiriseSourceAdapter",
-    "Processed DEM -> Slope/Aspect/TRI GeoTIFFs (v2.0.0, an_45c3ea26a640e68d)",
-    "Processed Boxwork/Mount Sharp 1.01 m/px core -> Slope/Aspect/TRI GeoTIFFs (v2.0.0)"
+    "Catalog record discovered via HiriseSourceAdapter"
   ],
-  "local_file_path": "raw/dteec_009149_1750_009294_1750_u01.img",
-  "local_label_path": "raw/dteec_009149_1750_009294_1750_u01.img",
-  "processed_file_path": "processed/hirise_dteec_009149_1750_dem.tif"
+  "local_file_path": null,
+  "local_label_path": null,
+  "processed_file_path": null
 }

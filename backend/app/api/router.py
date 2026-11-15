@@ -21,6 +21,7 @@ from app.api import (
     physics,
     routing,
     sources,
+    spatial_intelligence,
     targets,
     terrain,
     terrain_mesh,
@@ -51,3 +52,4 @@ api_router.include_router(evidence_intelligence.router)
 api_router.include_router(eva_operations.router)
 api_router.include_router(terrain_uncertainty.router)
 api_router.include_router(science_investigation.router)
+api_router.include_router(spatial_intelligence.router)

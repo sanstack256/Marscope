@@ -40,29 +40,23 @@
   "data_format": "PDS3 Binary Image (MSB_INTEGER 16-bit)",
   "file_size_bytes": 129761280,
   "sha256_checksum": "764946162d4c650abfb22aa284595a15374a7185f302a639c19e6602c67a1d6e",
-  "status": "processed",
+  "status": "discovered",
   "verification": {
-    "archive_availability": "verified",
+    "archive_availability": "unverified",
     "product_discovery": "verified",
-    "metadata_verification": "verified",
+    "metadata_verification": "unverified",
     "license_verification": "verified",
-    "coverage_verification": "verified",
-    "download_verification": "verified",
-    "processing_verification": "verified",
+    "coverage_verification": "unverified",
+    "download_verification": "unverified",
+    "processing_verification": "unverified",
     "field_verification": {
-      "crs": "verified",
-      "units": "verified",
-      "resolution": "verified",
-      "coverage": "verified",
       "license": "verified"
     },
     "evidence_notes": [
       "Catalog reference registered; requires PDS3 .LBL + .IMG acquisition to verify.",
-      "Verified downloaded file megt00n090hb.img (129761280 bytes, SHA-256=764946162d4c...)",
-      "Verified PDS3 header megt00n090hb.lbl",
-      "Processed DEM and terrain derivatives to mola_megt00n090hb_dem.tif"
+      "Verified PDS3 header megt00n090hb.lbl"
     ],
-    "last_checked_utc": "2026-11-14T14:28:36.420458Z"
+    "last_checked_utc": null
   },
   "failure_reason": null,
   "quality_flags": [
@@ -74,11 +68,9 @@
     "Equatorial track spacing results in ~12 km gap interpolation between orbital ground tracks."
   ],
   "processing_history": [
-    "Catalog record discovered via PdsMolaSourceAdapter",
-    "Processed DEM -> Slope/Aspect/TRI GeoTIFFs (v2.0.0, an_45c67975da115320)",
-    "Processed Gale Crater 463 m/px DEM -> Slope/Aspect/TRI GeoTIFFs (v2.0.0)"
+    "Catalog record discovered via PdsMolaSourceAdapter"
   ],
-  "local_file_path": "raw/megt00n090hb.img",
-  "local_label_path": "raw/megt00n090hb.lbl",
-  "processed_file_path": "processed/mola_megt00n090hb_dem.tif"
+  "local_file_path": null,
+  "local_label_path": null,
+  "processed_file_path": null
 }

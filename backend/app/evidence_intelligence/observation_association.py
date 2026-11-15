@@ -321,6 +321,22 @@ def associate_corridor_observations(
         )
         mtype = str(rec.get("measurement_type") or rec.get("observation_type") or default_mtype)
 
+        from app.science.rover_association import evaluate_rover_orbital_association
+
+        seg_obj = next((s for s in segments if s.segment_id == seg_id), None)
+        feat_lat = seg_obj.start_coord.lat if seg_obj is not None else lat_f
+        feat_lon = seg_obj.start_coord.lon_east if seg_obj is not None else lon_f
+        rover_assoc = evaluate_rover_orbital_association(
+            observation=rec,
+            feature_lat=feat_lat,
+            feature_lon_east=feat_lon,
+            orbital_dataset_id="route_corridor_dem",
+            orbital_product_id="CORRIDOR_ORBITAL_DEM",
+            orbital_pixel_footprint_m=float(rec.get("orbital_pixel_footprint_m") or 1.0117),
+            orbital_crs=str(rec.get("crs") or "IAU2000:49900"),
+            feature_id=seg_id,
+        )
+
         associated.append(
             AssociatedObservation(
                 observation_id=obs_id,
@@ -347,9 +363,14 @@ def associate_corridor_observations(
                 is_panorama=is_pano,
                 panorama_metadata=rec.get("panorama_metadata") or (rec if is_pano else None),
                 classification=ScientificDataClassification.DIRECTLY_MEASURED,
+                rover_association_state=rover_assoc.association_state.value,
+                location_semantic_type=rover_assoc.location_semantic_type,
+                scale_disparity_ratio=rover_assoc.scale_disparity_ratio,
+                scale_disparity_statement=rover_assoc.scale_disparity_statement,
+                confirms_entire_orbital_pixel=rover_assoc.confirms_entire_orbital_pixel,
                 spatial_association_note=(
-                    f"{assoc_type.value}: {mission} ({instrument}) at {dist_route_m:.1f} m from route "
-                    f"(corridor distance {dist_corridor_m:.1f} m) near {seg_id}; point/archive context only."
+                    f"{assoc_type.value} ({rover_assoc.association_state.value}): {mission} ({instrument}) at {dist_route_m:.1f} m from route "
+                    f"(corridor distance {dist_corridor_m:.1f} m) near {seg_id}; {rover_assoc.scale_disparity_statement}"
                 ),
             )
         )

@@ -160,3 +160,17 @@ The live NASA integration run on 2026-11-14 queried ODE for `MSL-M-NAVCAM-5-RDR-
   - **Full Backend Suite (`pytest -q`):** `158 passed, 3 skipped` (3 network-gated NASA live tests skipped without `NASA_INTEGRATION=1`; live CheMin test verified separately with `NASA_INTEGRATION=1`).
   - **Frontend Production Build:** `npx tsc --noEmit`, `npm run lint`, and `npm run build` exited `0` (`17` App Router routes).
   - **Real Gale HiRISE Benchmarks (`hirise_dteec_009149_1750`):** GeoTIFF inspection across `2,143,296` pixels `31.56 ms`; outbound route (`128.4 m`, `5` vertices) `257.79 ms`; `8`-scenario sensitivity evaluation `72.54 ms`; distinct multi-route comparison (`2` alternatives) `402.58 ms`; independent return + `4` turnback checkpoints (`129.96 m`) `234.28 ms`.
+
+
+---
+
+## Prompt 19: Multi-Mission Spatial Intelligence Validation (`test_prompt19_spatial_intelligence.py`)
+
+- **Adversarial & Real-Data Test Suite (`tests/test_prompt19_spatial_intelligence.py`, 14 tests across 6 classes):**
+  - `TestPlanetaryCrsIntelligence` (4 tests): Validates `MARS_CRS_REGISTRY`, Earth (`EPSG:4326`) and lunar (`IAU_2015:30100`) CRS rejection, Planetocentric $\leftrightarrow$ Planetographic oblate round-trip conversion, convention mismatch warnings, vertical datum incompatibility (`AREOID_RELATIVE_ELEVATION` vs `ELLIPSOID_RELATIVE_ELEVATION`), and coordinate transformation provenance.
+  - `TestSpatialFootprintsAndCoverage` (3 tests): Verifies real `hirise_dteec_009149_1750` valid-pixel swath hull (`70.9%` of outer bbox), oblique NoData corner rejection (`(-4.915, 137.460)` inside outer bbox but excluded from valid swath), self-intersecting polygon repair (`make_valid`) + Mars LAEA area, approximate bbox percentage suppression, and 6-category $\times$ 5-stage coverage + `SpatialGapRegion` generation.
+  - `TestMultiMissionSpatialRegistration` (2 tests): Verifies 12-step registration on real `hirise_dteec_009149_1750` $\leftrightarrow$ `hirise_psp_009149_1750_ortho` (`VALIDATED_WITH_LIMITATIONS`, `independence_assumption_valid=False`, `skipped_incompatible_physics` modality guard), partial overlap (`009149` $\leftrightarrow$ `040770`), and breakdown-resistant control-point outlier rejection.
+  - `TestMultiResolutionTerrainAndChangeGating` (1 test): Verifies `inspect_dem_native_metadata`, 13-layer `compute_terrain_derivatives_window` (`9,216` valid pixels over `[-4.80, -4.76] x [137.39, 137.43]`, mean slope `14.24 deg`), `compare_terrain_scales` (`HiRISE` vs `MOLA`), and 6-gate `evaluate_terrain_change` (`CHANGE_NOT_EVALUABLE`).
+  - `TestGeologicalMorphologyAndHumanReview` (1 test): Verifies 2-pixel NoData border cliff rejection (`rejected_nodata_border_candidates`), `BOULDER` resolution gating at $1.0\,\text{m/px}$, and atomic `USER_PROVIDED` human review persistence.
+  - `TestScaleAwareRoverAssociationAndCrossEngineIntegration` (2 tests): Verifies APXS-to-HiRISE scale disparity (`59.4x`, `confirms_entire_orbital_pixel=False`), and cross-engine oblique swath corner exclusion across `evaluate_dataset_eligibility`, `_evaluate_single_location`, and `routing_service._select_dem_for_points`.
+  - `TestScalableDeliveryCacheAndSpatialApi` (1 test): Verifies 9-input `compute_spatial_cache_digest`, `/api/spatial/*` endpoints, `upsampling_prevented=True` pyramid planning, and fail-closed `403` / authenticated `200` `X-Mars-Operator-Token` cache invalidation.

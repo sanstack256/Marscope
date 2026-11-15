@@ -25,6 +25,14 @@ from app.terrain.mesh import TerrainMeshService
 from app.terrain_uncertainty.service import TerrainUncertaintyService
 from app.ingestion.imagery import ImageryArchiveService
 from app.science.investigation.service import ScienceInvestigationService
+from app.geospatial.footprints import SpatialFootprintIndex
+from app.geospatial.services import (
+    RoverSpatialAssociationService,
+    SpatialCoverageService,
+    SpatialRegistrationService,
+)
+from app.geospatial.spatial_delivery import SpatialDeliveryService
+from app.terrain.morphology import GeologicalMorphologyService
 
 # Project root path resolution
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
@@ -111,4 +119,35 @@ science_investigation_service = ScienceInvestigationService(
     evidence_service=evidence_intelligence_service,
     processed_dir=PROCESSED_DIR,
     imagery_service=imagery_service,
+)
+
+# Prompt 19 Multi-Mission Spatial Intelligence singletons
+footprint_index_service = SpatialFootprintIndex(
+    catalog_service=catalog_service,
+    dataset_root_dir=DATASETS_DIR,
+)
+spatial_registration_service = SpatialRegistrationService(
+    catalog_service=catalog_service,
+    footprint_index=footprint_index_service,
+    dataset_root_dir=DATASETS_DIR,
+)
+spatial_coverage_service = SpatialCoverageService(
+    catalog_service=catalog_service,
+    footprint_index=footprint_index_service,
+    dataset_root_dir=DATASETS_DIR,
+    composition_index=composition_index,
+)
+morphology_service = GeologicalMorphologyService(
+    catalog_service=catalog_service,
+    raw_dir=RAW_DIR,
+    processed_dir=PROCESSED_DIR,
+)
+spatial_delivery_service = SpatialDeliveryService(
+    catalog_service=catalog_service,
+    raw_dir=RAW_DIR,
+)
+spatial_delivery_service.attach_mesh_service(terrain_mesh_service)
+rover_association_service = RoverSpatialAssociationService(
+    catalog_service=catalog_service,
+    composition_index=composition_index,
 )

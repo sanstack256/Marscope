@@ -29,6 +29,7 @@ import pytest
 
 from app.geospatial.raster import RasterInspectionService
 from app.ingestion.acquisition import AcquisitionService
+from app.ingestion.bootstrap import load_bootstrap_manifest, require_real_data_or_skip, verify_local_datasets
 from app.ingestion.catalog import DatasetCatalogService
 from app.ingestion.pds_label import extract_pds3_metadata, extract_pds4_metadata, parse_pds4_table_delimited
 from app.ingestion.sources.msl_curiosity import MslCuriositySourceAdapter
@@ -47,13 +48,57 @@ from app.services.container import (
 )
 
 REPO_DATASETS_RAW = Path(__file__).resolve().parents[2] / "datasets" / "raw"
+REPO_DATASETS_DIR = Path(__file__).resolve().parents[2] / "datasets"
 
 
+@pytest.mark.unit
+def test_bootstrap_manifest_and_clean_checkout_honesty(tmp_path: Path):
+    """
+    Deterministic unit test (works identically in clean Git checkouts without raw binaries):
+      - Bootstrap manifest resolves exact product IDs, archive URLs, and expected hashes.
+      - Verification against an empty directory refuses to claim missing products are present
+        and fails strict preflight while leaving non-strict check honest.
+      - MOLA label parser refuses to fabricate SCALING_FACTOR when omitted in PDS3 header.
+    """
+    manifest = load_bootstrap_manifest()
+    assert len(manifest.get("products", [])) >= 10
+    empty_ds = tmp_path / "datasets"
+    empty_ds.mkdir(parents=True)
+    report_non_strict = verify_local_datasets(
+        datasets_dir=empty_ds,
+        manifest_path=REPO_DATASETS_DIR / "bootstrap_manifest.json",
+        strict=False,
+    )
+    assert report_non_strict.verified_count == 0
+    assert report_non_strict.missing_mandatory_count >= 1
+    assert report_non_strict.preflight_passed is True  # no integrity corruption; missing reported explicitly
+    report_strict = verify_local_datasets(
+        datasets_dir=empty_ds,
+        manifest_path=REPO_DATASETS_DIR / "bootstrap_manifest.json",
+        strict=True,
+    )
+    assert report_strict.preflight_passed is False
+
+    # Synthetic isolated PDS3 header without SCALING_FACTOR -> parser never fabricates 1.0
+    mola_no_scale = tmp_path / "mock_megt.lbl"
+    mola_no_scale.write_text(
+        'PDS_VERSION_ID = PDS3\nPRODUCT_ID = "MEGT_TEST.IMG"\nOBJECT = IMAGE\n  LINES = 10\n  LINE_SAMPLES = 10\n  SAMPLE_BITS = 16\n  SAMPLE_TYPE = MSB_INTEGER\n  UNIT = METER\nEND_OBJECT = IMAGE\nEND\n',
+        encoding="utf-8",
+    )
+    parsed = extract_pds3_metadata(mola_no_scale)
+    assert parsed["scaling_factor"] is None
+    assert parsed["offset"] is None
+
+
+@pytest.mark.local_real_data
 def test_real_workspace_nasa_products_end_to_end(tmp_path: Path):
     """Verify authentic acquired NASA products on disk end-to-end without fabricating missing metadata."""
-    # 1. HiRISE Stereo DTM DTEEC_009149_1750_009294_1750_U01.IMG (32-bit float meters)
     hirise_raw = REPO_DATASETS_RAW / "dteec_009149_1750_009294_1750_u01.img"
-    assert hirise_raw.exists(), f"Missing real HiRISE DTM artifact: {hirise_raw}"
+    apxs_xml = REPO_DATASETS_RAW / "ds01_2021je007171r.xml"
+    mola_lbl = REPO_DATASETS_RAW / "megt00n090hb.lbl"
+    require_real_data_or_skip([hirise_raw, apxs_xml, mola_lbl])
+
+    # 1. HiRISE Stereo DTM DTEEC_009149_1750_009294_1750_U01.IMG (32-bit float meters)
     hirise_meta = extract_pds3_metadata(hirise_raw)
     assert hirise_meta["product_id"] == "DTEEC_009149_1750_009294_1750_U01"
     assert hirise_meta["instrument_id"] == "HIRISE"
@@ -69,16 +114,12 @@ def test_real_workspace_nasa_products_end_to_end(tmp_path: Path):
         assert r_insp["stats"]["available"] is True
 
     # 2. PDS4 MSL APXS DS01_2021JE007171R XML + CSV verification
-    apxs_xml = REPO_DATASETS_RAW / "ds01_2021je007171r.xml"
-    assert apxs_xml.exists()
     apxs_meta = extract_pds4_metadata(apxs_xml)
     assert "urn:nasa:pds:msl_apxs_supplement_sols_0_3076" in str(apxs_meta["logical_identifier"])
     apxs_schema = parse_pds4_table_delimited(apxs_xml)
     assert len(apxs_schema["fields"]) >= 20
 
     # 3. Real PDS3 MOLA MEGDR (MEGT00N090HB.LBL) omits SCALING_FACTOR; parser NEVER invents 1.0
-    mola_lbl = REPO_DATASETS_RAW / "megt00n090hb.lbl"
-    assert mola_lbl.exists()
     mola_meta = extract_pds3_metadata(mola_lbl)
     assert mola_meta["product_id"] == "MEGT00N090HB.IMG"
     assert mola_meta["scaling_factor"] is None

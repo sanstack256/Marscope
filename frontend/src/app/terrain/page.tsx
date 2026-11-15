@@ -318,15 +318,23 @@ export default function TerrainIntelligencePage() {
         }
         description="Spatially explicit planetary DEM characterization, resolution suitability analysis, 5-state coverage intelligence, elevation gain/loss transects, and assumption-transparent human traversal modelling (no route optimization or safety certification)."
         actions={
-          <button
-            type="button"
-            onClick={() => void loadTerrain()}
-            disabled={loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#161c2b] hover:bg-[#1e263b] border border-[#252f44] text-xs font-medium text-slate-200 disabled:opacity-50"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
-            <span>Refresh</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <Link
+              href="/spatial-intelligence"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-xs font-medium text-cyan-200"
+            >
+              <span>Spatial Intelligence →</span>
+            </Link>
+            <button
+              type="button"
+              onClick={() => void loadTerrain()}
+              disabled={loading}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#161c2b] hover:bg-[#1e263b] border border-[#252f44] text-xs font-medium text-slate-200 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+              <span>Refresh</span>
+            </button>
+          </div>
         }
       />
 

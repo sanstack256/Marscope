@@ -40,33 +40,26 @@
   "data_format": "PDS3 Binary Image (MSB_INTEGER 16-bit)",
   "file_size_bytes": 2073600,
   "sha256_checksum": "25f16fb7aaf857898dcf98bc4f841341a24f8b9f7e98453ca083bc45d897ca2c",
-  "status": "processed",
+  "status": "discovered",
   "verification": {
-    "archive_availability": "verified",
+    "archive_availability": "unverified",
     "product_discovery": "verified",
-    "metadata_verification": "verified",
+    "metadata_verification": "unverified",
     "license_verification": "verified",
-    "coverage_verification": "verified",
-    "download_verification": "verified",
-    "processing_verification": "verified",
+    "coverage_verification": "unverified",
+    "download_verification": "unverified",
+    "processing_verification": "unverified",
     "field_verification": {
-      "crs": "verified",
-      "units": "verified",
-      "resolution": "verified",
-      "coverage": "verified",
       "license": "verified"
     },
     "evidence_notes": [
       "Catalog reference registered; requires PDS3 .LBL + .IMG acquisition to verify.",
-      "Companion label fetch warning: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1082)",
       "Verified metadata from PDS3 label megt90n000cb.lbl",
-      "Downloaded 2073600 bytes; SHA-256=25f16fb7aaf85789...",
-      "Verified metadata from PDS3 label megt90n000cb.lbl",
-      "Processed DEM and terrain derivatives to mola_megt90n000cb_dem.tif"
+      "Verified metadata from PDS3 label megt90n000cb.lbl"
     ],
-    "last_checked_utc": "2026-11-14T05:10:11.937240Z"
+    "last_checked_utc": null
   },
-  "failure_reason": "Bounds and transform are inconsistent",
+  "failure_reason": null,
   "quality_flags": [
     "Global Continuous Coverage"
   ],
@@ -74,12 +67,9 @@
     "Coarse macro-scale elevation only (~14.8 km/pixel). Cannot resolve local obstacles or boxwork ridges."
   ],
   "processing_history": [
-    "Catalog record discovered via PdsMolaSourceAdapter",
-    "Downloaded 2073600 bytes at 2026-11-14T05:07:19.084618+00:00 (SHA-256: 25f16fb7aaf8...)",
-    "Validated catalog CRS & coverage geometry; local product acquisition pending",
-    "Processed DEM -> Slope/Aspect/TRI GeoTIFFs (v1.1.0)"
+    "Catalog record discovered via PdsMolaSourceAdapter"
   ],
-  "local_file_path": "raw/megt90n000cb.img",
-  "local_label_path": "raw/megt90n000cb.lbl",
-  "processed_file_path": "processed/mola_megt90n000cb_dem.tif"
+  "local_file_path": null,
+  "local_label_path": null,
+  "processed_file_path": null
 }

@@ -230,3 +230,33 @@ All endpoints are served under the `/api` prefix by the FastAPI backend. Standar
 - **`POST /api/science-investigation/campaigns/build`:** Returns 5-state `feasibility_state`, `constraint_evaluation_complete`, `evaluated_inputs_and_constraints`, `epistemic_classification`, explicit `survivability_disclaimer`, `operational_safety_certified = false`, and SHA-256 `dependency_signature` for staleness checks (`STALE_UPSTREAM_DEPENDENCY_CHANGED`).
 - **Fail-Closed Operator Authentication (`X-Mars-Operator-Token`):** Mutating endpoints (`POST /api/composition/index/rebuild`, `POST /api/datasets/discover`, `POST /api/datasets/download`, `POST /api/datasets/process`, `POST /api/targets`, `DELETE /api/targets/{id}`) enforce `require_operator_token`, returning HTTP `401`/`403` when `MARSCOPE_OPERATOR_TOKEN` is missing or mismatched.
 - **Explicit Bounds/Dataset Validation (`422`):** `/api/mobility/coverage`, `/api/mobility/terrain/features`, and `/api/mobility/cost-surface/metadata` require explicit `dataset_id` and bounding parameters (never silently substituting Gale defaults).
+
+
+---
+
+## Prompt 19: Spatial Intelligence & Cache Management API (`/api/spatial/*`, `/api/terrain/mesh/cache/*`)
+
+| Method & Path | Purpose & Key Contract Fields |
+|---|---|
+| `GET /api/spatial/crs/registry` | Returns `MARS_CRS_REGISTRY` (`mars_crs_registry_v2.0`), 5 canonical Mars CRS definitions, and `VerticalDatumKind` enumerations. |
+| `POST /api/spatial/crs/validate` | Evaluates CRS string, latitude/longitude conventions, and vertical datum (`CrsValidationResult`, 8 states). Rejects Earth/non-Mars CRS (`CRS_INCOMPATIBLE`/`CRS_UNSUPPORTED`). |
+| `POST /api/spatial/crs/vertical-datum-check` | Checks vertical datum compatibility between two products (`VerticalDatumComparisonResult`), blocking direct elevation subtraction across incompatible datums without a validated offset. |
+| `POST /api/spatial/crs/transform` | Transforms Mars coordinates across CRS, latitude conventions (`Planetocentric` $\leftrightarrow$ `Planetographic`), and longitude domains (`[0, 360)` / `[-180, 180]`) with auditable `provenance_steps`. |
+| `GET /api/spatial/footprints` | Lists `SpatialFootprintRecord` entries for all catalog datasets (`valid_data_geojson`, `invalid_nodata_geojson`, `valid_data_fraction`, `swath_to_bbox_ratio`, `is_approximate`). |
+| `GET /api/spatial/footprints/{dataset_id}` | Returns the exact `SpatialFootprintRecord` for a validated `dataset_id` (`422` on invalid characters, `404` if unknown). |
+| `POST /api/spatial/footprints/intersect` | Queries `SpatialFootprintIndex` (`STRtree`) for products intersecting `[min_lat, max_lat, min_lon, max_lon]`. |
+| `GET /api/spatial/registration/assessments` | Returns pre-computed multi-mission `SpatialRegistrationAssessment` records for primary Gale Crater product pairs. |
+| `POST /api/spatial/registration/evaluate` | Runs the 12-step registration engine (`evaluate_product_pair_registration`) between `dataset_a_id` and `dataset_b_id`, with optional `control_points` and `attempt_image_matching`. |
+| `GET /api/spatial/coverage` | Computes the 6-category $\times$ 5-stage `MultiCategorySpatialCoverageReport` and explicit `SpatialGapRegion` list over `[min_lat, max_lat, min_lon, max_lon]`. |
+| `GET /api/spatial/gaps` | Returns the explicit `SpatialGapRegion` polygons (`never_implies_feature_absence=True`) for the requested bounding box. |
+| `GET /api/spatial/terrain/metadata/{dataset_id}` | Returns `NativeDemMetadataRecord` (native pixel spacing, CRS validation, vertical datum, units, NoData constant, SHA-256). |
+| `GET /api/spatial/terrain/derivatives` | Computes the 13-layer `WindowedTerrainDerivativesReport` and `TerrainScaleObservabilityReport` over `[min_lat, max_lat, min_lon, max_lon]`. |
+| `POST /api/spatial/terrain/scale-comparison` | Compares overlapping DEMs (`HiRISE` vs `MOLA`) across scales (`MultiScaleTerrainComparisonResponse`, `never_interprets_scale_diff_as_temporal_change=True`). |
+| `POST /api/spatial/terrain/change-evaluation` | Evaluates 6 scientific gates (`evaluate_terrain_change`), returning `CHANGE_NOT_EVALUABLE` whenever registration, datum, epoch, resolution, or uncertainty gates fail. |
+| `GET /api/spatial/morphology/candidates` | Runs resolution-gated morphological candidate detection (`MorphologyDetectionResponse`) with 2-px NoData border artifact rejection (`rejected_nodata_border_candidates`). |
+| `GET /api/spatial/morphology/reviews` | Lists persisted human review records (`MorphologyReviewRecord`, `classification="USER_PROVIDED"`). |
+| `POST /api/spatial/morphology/review` | Submits an operator review (`accept`, `reject`, `annotate`) with fail-closed `X-Mars-Operator-Token` authentication (`403` when unset or mismatched). |
+| `GET /api/spatial/rover-associations` | Evaluates 7-state scale-aware rover-to-orbital associations (`RoverOrbitalAssociationRecord`, `confirms_entire_orbital_pixel=False`). |
+| `GET /api/spatial/delivery/pyramid-plan` | Computes `MultiResolutionPyramidPlan` for a viewport (`upsampling_prevented=True`). |
+| `GET /api/spatial/cache/status` & `GET /api/terrain/mesh/cache/status` | Returns `SpatialCacheStatus` including the 9-input cache key schema and active tile/memory cache counts. |
+| `POST /api/spatial/cache/invalidate` & `POST /api/terrain/mesh/cache/invalidate` | Invalidates spatial/mesh caches by dataset or globally (`X-Mars-Operator-Token` required, fail-closed `403`). |

@@ -644,8 +644,20 @@ class TerrainMeshService:
         Compute dataset/region-wide min/max elevation and 98th-percentile TRI so all
         adjacent LOD tiles render with identical color normalization across seams.
         """
-        cache_key = f"stats:{dataset_id}:{min_lat:.6f}:{max_lat:.6f}:{min_lon:.6f}:{max_lon:.6f}"
-        cached = self._cache_get(cache_key)
+        from app.geospatial.spatial_delivery import compute_dataset_metadata_hash, compute_spatial_cache_digest
+
+        ds_meta = self.catalog_service.get_dataset(dataset_id)
+        mhash = compute_dataset_metadata_hash(ds_meta) if ds_meta else "no_meta"
+        cache_key = compute_spatial_cache_digest(
+            dataset=ds_meta,
+            dataset_id=dataset_id,
+            algorithm="region_render_stats",
+            algorithm_version="mesh_v2",
+            parameters={},
+            resolution_m=(ds_meta.horizontal_resolution_meters if ds_meta else None),
+            bounds={"min_lat": min_lat, "max_lat": max_lat, "min_lon": min_lon, "max_lon": max_lon},
+        ).composite_key
+        cached = self._tracked_cache_get(cache_key)
         if cached is not None:
             return cached
 
@@ -681,7 +693,7 @@ class TerrainMeshService:
             "tri_metadata": tile.tri_metadata,
         }
         self._cache_put(cache_key, stats)
-        self._cache_put(f"stats_default:{dataset_id}", stats)
+        self._cache_put(f"stats_default:{dataset_id}:{mhash}", stats)
         return stats
 
     @staticmethod
@@ -1028,12 +1040,22 @@ class TerrainMeshService:
             manifest_origin_lat = float(origin_lat) if origin_lat is not None else manifest.origin["lat"]
             manifest_origin_lon = float(origin_lon_east) if origin_lon_east is not None else manifest.origin["lon_east"]
 
-        cache_key = (
-            f"tile:{ds.id}:{tile_id}:{tile_bounds['min_lat']:.7f}:{tile_bounds['max_lat']:.7f}:"
-            f"{tile_bounds['min_lon']:.7f}:{tile_bounds['max_lon']:.7f}:"
-            f"{manifest_origin_lat:.6f}:{manifest_origin_lon:.6f}:{grid_size}:{include_derivatives}"
-        )
-        cached = self._cache_get(cache_key)
+        from app.geospatial.spatial_delivery import compute_spatial_cache_digest
+
+        cache_key = compute_spatial_cache_digest(
+            dataset=ds,
+            algorithm="mesh_tile",
+            algorithm_version="mesh_v2",
+            parameters={
+                "tile_id": tile_id,
+                "origin_lat": round(manifest_origin_lat, 6),
+                "origin_lon_east": round(manifest_origin_lon, 6),
+                "grid_size": grid_size,
+                "include_derivatives": include_derivatives,
+            },
+            bounds=tile_bounds,
+        ).composite_key
+        cached = self._tracked_cache_get(cache_key)
         if cached is not None:
             return cached
 
@@ -1333,10 +1355,25 @@ class TerrainMeshService:
         if overlay_l not in {"ortho", "elevation", "slope", "roughness"}:
             raise ValueError(f"Unsupported texture overlay '{overlay}'.")
 
+        from app.geospatial.spatial_delivery import compute_dataset_metadata_hash, compute_spatial_cache_digest
+
         vmin_tag = f"{vmin:.4f}" if vmin is not None else "auto"
         vmax_tag = f"{vmax:.4f}" if vmax is not None else "auto"
-        cache_key = f"tex:{dataset_id}:{overlay_l}:{min_lat:.7f}:{max_lat:.7f}:{min_lon:.7f}:{max_lon:.7f}:{size}:{vmin_tag}:{vmax_tag}"
-        cached = self._cache_get(cache_key)
+        ds_meta = self.catalog_service.get_dataset(dataset_id)
+        cache_key = compute_spatial_cache_digest(
+            dataset=ds_meta,
+            dataset_id=dataset_id,
+            algorithm=f"texture_{overlay_l}",
+            algorithm_version="mesh_v2",
+            parameters={
+                "size": size,
+                "vmin": vmin_tag,
+                "vmax": vmax_tag,
+                "max_slope_deg": round(float(max_slope_deg), 3),
+            },
+            bounds={"min_lat": min_lat, "max_lat": max_lat, "min_lon": min_lon, "max_lon": max_lon},
+        ).composite_key
+        cached = self._tracked_cache_get(cache_key)
         if cached is not None:
             return cached
 
@@ -1449,7 +1486,9 @@ class TerrainMeshService:
             rgba_small = np.zeros((tex_grid, tex_grid, 4), dtype=np.uint8)
             fin = np.isfinite(arr)
             if np.any(fin):
-                default_stats = self._cache_get(f"stats_default:{ds.id}")
+                from app.geospatial.spatial_delivery import compute_dataset_metadata_hash
+
+                default_stats = self._tracked_cache_get(f"stats_default:{ds.id}:{compute_dataset_metadata_hash(ds)}")
                 if default_stats is None and (vmin is None or vmax is None):
                     b_ref = HIRISE_DEFAULT_FOCUS_BOUNDS.get(ds.id) or {
                         "min_lat": min_lat,
@@ -1502,3 +1541,46 @@ class TerrainMeshService:
         png_bytes = buf.getvalue()
         self._cache_put(cache_key, png_bytes)
         return png_bytes
+
+    def _tracked_cache_get(self, key: str) -> Optional[Any]:
+        val = self._cache_get(key)
+        if val is not None:
+            self._cache_hits = getattr(self, "_cache_hits", 0) + 1
+        else:
+            self._cache_misses = getattr(self, "_cache_misses", 0) + 1
+        return val
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        lock = getattr(self, "_cache_lock", None)
+        if lock is not None:
+            with lock:
+                keys = list(self._tile_cache.keys())
+        else:
+            keys = list(self._tile_cache.keys())
+        return {
+            "entries": len(keys),
+            "max_entries": self._max_cache_items,
+            "hits": int(getattr(self, "_cache_hits", 0)),
+            "misses": int(getattr(self, "_cache_misses", 0)),
+            "sample_keys": keys[-8:],
+        }
+
+    def invalidate_cache(self, dataset_id: Optional[str] = None) -> int:
+        if not dataset_id:
+            n = len(self._tile_cache)
+            self.clear_cache()
+            return n
+        lock = getattr(self, "_cache_lock", None)
+        removed = 0
+        if lock is not None:
+            with lock:
+                doomed = [k for k in self._tile_cache.keys() if f":{dataset_id}:" in k or k.endswith(f":{dataset_id}")]
+                for k in doomed:
+                    self._tile_cache.pop(k, None)
+                    removed += 1
+        else:
+            doomed = [k for k in list(self._tile_cache.keys()) if f":{dataset_id}:" in k or k.endswith(f":{dataset_id}")]
+            for k in doomed:
+                self._tile_cache.pop(k, None)
+                removed += 1
+        return removed

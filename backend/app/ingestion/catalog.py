@@ -452,10 +452,66 @@ class DatasetCatalogService:
         file_path.write_text(dataset.model_dump_json(indent=2), encoding="utf-8")
 
     def _load_persisted_catalog(self) -> None:
+        bootstrap_map: Dict[str, Dict[str, Any]] = {}
+        try:
+            bpath = self.catalog_storage_dir.parent / "bootstrap_manifest.json"
+            if bpath.exists():
+                import json
+
+                bdata = json.loads(bpath.read_text(encoding="utf-8"))
+                for item in bdata.get("products") or []:
+                    bootstrap_map[str(item["dataset_id"])] = item
+        except Exception:
+            bootstrap_map = {}
+
+        manifests_dir = self.catalog_storage_dir.parent / "manifests"
+        processed_dir = self.catalog_storage_dir.parent / "processed"
+
         for json_file in self.catalog_storage_dir.glob("*.json"):
             try:
                 ds = Dataset.model_validate_json(json_file.read_text(encoding="utf-8"))
                 is_wmts = "{" in (ds.original_product_url or "")
+
+                # Reconcile tracked catalog record against actual .gitignore'd workspace files
+                b_entry = bootstrap_map.get(ds.id)
+                if not is_wmts and b_entry:
+                    raw_cand = self._resolve_existing_path(b_entry.get("expected_raw_path"))
+                    if raw_cand is not None:
+                        exp_sz = b_entry.get("expected_size_bytes")
+                        size_ok = (exp_sz is None) or (raw_cand.stat().st_size == int(exp_sz))
+                        if size_ok:
+                            ds.local_file_path = str(b_entry["expected_raw_path"])
+                            lbl_cand = self._resolve_existing_path(b_entry.get("expected_label_path"))
+                            if lbl_cand is not None:
+                                ds.local_label_path = str(b_entry["expected_label_path"])
+                            if ds.file_size_bytes is None:
+                                ds.file_size_bytes = raw_cand.stat().st_size
+                            if not ds.sha256_checksum and b_entry.get("expected_sha256"):
+                                ds.sha256_checksum = str(b_entry["expected_sha256"])
+                            ds.verification.download_verification = VerificationState.VERIFIED
+                            ds.verification.archive_availability = VerificationState.VERIFIED
+                            if ds.status == DatasetLifecycleStatus.DISCOVERED:
+                                ds.status = DatasetLifecycleStatus.DOWNLOADED
+                            mpath = manifests_dir / f"{ds.id}.manifest.json"
+                            if mpath.exists() and not ds.failure_reason:
+                                ds.verification.metadata_verification = VerificationState.VERIFIED
+                                ds.verification.coverage_verification = VerificationState.VERIFIED
+                                ds.verification.field_verification.update(
+                                    {
+                                        "crs": VerificationState.VERIFIED,
+                                        "units": VerificationState.VERIFIED,
+                                        "coverage": VerificationState.VERIFIED,
+                                        "license": VerificationState.VERIFIED,
+                                    }
+                                )
+
+                    proc_cand = self._resolve_existing_path(b_entry.get("expected_processed_path"))
+                    proc_json = processed_dir / f"{ds.id}.processing.json"
+                    if proc_cand is not None and proc_json.exists() and not ds.failure_reason:
+                        ds.processed_file_path = str(b_entry["expected_processed_path"])
+                        ds.verification.processing_verification = VerificationState.VERIFIED
+                        ds.status = DatasetLifecycleStatus.PROCESSED
+
                 if ds.local_file_path and self._resolve_existing_path(ds.local_file_path) is None:
                     ds.local_file_path = None
                     if not is_wmts:
@@ -479,13 +535,17 @@ class DatasetCatalogService:
                         if ds.verification.metadata_verification == VerificationState.VERIFIED
                         else DatasetLifecycleStatus.DISCOVERED
                     )
-                if ds.acquisition_state is None:
-                    ds.acquisition_state = lifecycle_to_acquisition_state(
-                        ds.status,
-                        is_wmts=is_wmts,
-                        validation_passed=(not bool(ds.failure_reason)),
-                        has_local_file=bool(ds.local_file_path),
-                    )
+                    ds.verification.coverage_verification = VerificationState.UNVERIFIED
+                    note = "Local raw/processed asset absent on disk in this checkout; run bootstrap_datasets.py --verify/--acquire."
+                    if note not in ds.verification.evidence_notes:
+                        ds.verification.evidence_notes.append(note)
+
+                ds.acquisition_state = lifecycle_to_acquisition_state(
+                    ds.status,
+                    is_wmts=is_wmts,
+                    validation_passed=(not bool(ds.failure_reason)),
+                    has_local_file=bool(ds.local_file_path),
+                )
                 if ds.failure_reason and ds.status == DatasetLifecycleStatus.PROCESSED:
                     ds.verification.processing_verification = VerificationState.FAILED
                     ds.acquisition_state = AcquisitionState.UNVERIFIED

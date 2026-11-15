@@ -14,16 +14,25 @@ import {
   MapPin,
   Mountain,
   RefreshCw,
+  Ruler,
   Route as RouteIcon,
+  ShieldAlert,
   Target,
+  Columns2,
 } from "lucide-react";
 import { API_BASE_URL } from "@/lib/constants";
 import { useEvaOperationsStore } from "@/stores/useEvaOperationsStore";
 import { useEvidenceStore } from "@/stores/useEvidenceStore";
 import { useRoutingStore, type CameraPresetType } from "@/stores/useRoutingStore";
+import { useSpatialStore, type MeasurePoint } from "@/stores/useSpatialStore";
 import type {
+  GeoJsonGeometry,
+  MorphologicalFeatureCandidate,
   PickedSurfacePoint,
+  RoverOrbitalAssociationRecord,
   ScienceTarget,
+  SpatialFootprintRecord,
+  SpatialGapRegion,
   SurfacePickMode,
   TerrainMeshManifest,
   TerrainMeshTile,
@@ -121,6 +130,89 @@ export interface InvestigationPinMarker {
   evidence_state?: string;
 }
 
+function extractOuterRings3D(geom: GeoJsonGeometry | null | undefined): Array<Array<[number, number]>> {
+  if (!geom || !geom.coordinates) return [];
+  const toRing = (coords: unknown): Array<[number, number]> => {
+    if (!Array.isArray(coords)) return [];
+    const pts: Array<[number, number]> = [];
+    for (const c of coords) {
+      if (Array.isArray(c) && c.length >= 2 && typeof c[0] === "number" && typeof c[1] === "number") {
+        pts.push([c[0], c[1]]);
+      }
+    }
+    return pts;
+  };
+  if (geom.type === "Polygon" && Array.isArray(geom.coordinates)) {
+    const outer = toRing((geom.coordinates as unknown[])[0]);
+    return outer.length >= 3 ? [outer] : [];
+  }
+  if (geom.type === "MultiPolygon" && Array.isArray(geom.coordinates)) {
+    const rings: Array<Array<[number, number]>> = [];
+    for (const poly of geom.coordinates as unknown[]) {
+      if (Array.isArray(poly)) {
+        const outer = toRing(poly[0]);
+        if (outer.length >= 3) rings.push(outer);
+      }
+    }
+    return rings;
+  }
+  return [];
+}
+
+function buildComparisonTileCanvasTexture(
+  primaryTex: THREE.Texture,
+  secondaryTex: THREE.Texture,
+  tile: TerrainMeshTile,
+  manifest: TerrainMeshManifest,
+  mode: "swipe" | "blend",
+  swipeFraction: number,
+  blendOpacity: number
+): THREE.CanvasTexture | null {
+  const imgA = primaryTex.image as CanvasImageSource | undefined;
+  const imgB = secondaryTex.image as CanvasImageSource | undefined;
+  if (!imgA || !imgB || typeof document === "undefined") return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = TERRAIN_TEX_SIZE;
+  canvas.height = TERRAIN_TEX_SIZE;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+
+  ctx.drawImage(imgA, 0, 0, canvas.width, canvas.height);
+
+  if (mode === "blend") {
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(1, blendOpacity));
+    ctx.drawImage(imgB, 0, 0, canvas.width, canvas.height);
+    ctx.restore();
+  } else {
+    const gMinLon = manifest.requested_bounds.min_lon;
+    const gSpanLon = Math.max(1e-9, manifest.requested_bounds.max_lon - gMinLon);
+    const splitLon = gMinLon + swipeFraction * gSpanLon;
+    const tSpanLon = Math.max(1e-9, tile.bounds.max_lon - tile.bounds.min_lon);
+    const splitPx = Math.round(((splitLon - tile.bounds.min_lon) / tSpanLon) * canvas.width);
+    if (splitPx < canvas.width) {
+      const startX = Math.max(0, splitPx);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(startX, 0, canvas.width - startX, canvas.height);
+      ctx.clip();
+      ctx.drawImage(imgB, 0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+    if (splitPx > 0 && splitPx < canvas.width) {
+      ctx.fillStyle = "#22d3ee";
+      ctx.fillRect(Math.max(0, splitPx - 1), 0, 2, canvas.height);
+    }
+  }
+
+  const outTex = new THREE.CanvasTexture(canvas);
+  outTex.colorSpace = THREE.SRGBColorSpace;
+  outTex.wrapS = THREE.ClampToEdgeWrapping;
+  outTex.wrapT = THREE.ClampToEdgeWrapping;
+  outTex.needsUpdate = true;
+  return outTex;
+}
+
 interface LocalTerrain3DViewerProps {
   targets?: ScienceTarget[];
   investigationPins?: InvestigationPinMarker[];
@@ -133,6 +225,11 @@ interface LocalTerrain3DViewerProps {
   livePositionMarker?: LivePositionMarker | null;
   onSurfaceInspect?: (point: PickedSurfacePoint) => void;
   compact?: boolean;
+  spatialFootprints?: SpatialFootprintRecord[];
+  evidenceGaps?: SpatialGapRegion[];
+  morphologyCandidates?: MorphologicalFeatureCandidate[];
+  roverAssociations?: RoverOrbitalAssociationRecord[];
+  showSpatialTools?: boolean;
 }
 
 export function LocalTerrain3DViewer({
@@ -143,6 +240,11 @@ export function LocalTerrain3DViewer({
   livePositionMarker = null,
   onSurfaceInspect,
   compact = false,
+  spatialFootprints,
+  evidenceGaps,
+  morphologyCandidates,
+  roverAssociations,
+  showSpatialTools = false,
 }: LocalTerrain3DViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const hoverHudRef = useRef<HTMLDivElement | null>(null);
@@ -169,6 +271,7 @@ export function LocalTerrain3DViewer({
   } | null>(null);
   const tileCacheRef = useRef<Map<string, TerrainMeshTile>>(new Map());
   const textureCacheRef = useRef<Map<string, THREE.Texture>>(new Map());
+  const compositeTexturesRef = useRef<THREE.CanvasTexture[]>([]);
   const zoomAdaptiveMarkersRef = useRef<Array<{ obj: THREE.Object3D; weight: number }>>([]);
   const [overviewClusterMode, setOverviewClusterMode] = useState(false);
   const overviewClusterRef = useRef(false);
@@ -181,10 +284,53 @@ export function LocalTerrain3DViewer({
   const [showTileBoundaries, setShowTileBoundaries] = useState(false);
   const [lodMode, setLodMode] = useState<"auto" | "manual">("auto");
   const [renderedVertexTotal, setRenderedVertexTotal] = useState(0);
+  const [measureActive, setMeasureActive] = useState(false);
+  const measureActiveRef = useRef(false);
+  const [compareOverlayMode, setCompareOverlayMode] = useState<TextureOverlayMode>("elevation");
+  const [nodataPickMsg, setNodataPickMsg] = useState<string | null>(null);
   const [pendingPickConfirm, setPendingPickConfirm] = useState<{
     mode: "set_start" | "set_destination";
     point: PickedSurfacePoint;
   } | null>(null);
+
+  const comparisonMode = useSpatialStore((s) => s.comparisonMode);
+  const setComparisonMode = useSpatialStore((s) => s.setComparisonMode);
+  const swipeFraction = useSpatialStore((s) => s.swipeFraction);
+  const setSwipeFraction = useSpatialStore((s) => s.setSwipeFraction);
+  const blendOpacity = useSpatialStore((s) => s.blendOpacity);
+  const setBlendOpacity = useSpatialStore((s) => s.setBlendOpacity);
+  const showFootprintsOverlay = useSpatialStore((s) => s.showFootprintsOverlay);
+  const showGapsOverlay = useSpatialStore((s) => s.showGapsOverlay);
+  const showMorphologyOverlay = useSpatialStore((s) => s.showMorphologyOverlay);
+  const showRoverAssocOverlay = useSpatialStore((s) => s.showRoverAssocOverlay);
+  const storeFootprints = useSpatialStore((s) => s.intersectingFootprints);
+  const storeGaps = useSpatialStore((s) => s.coverageReport?.evidence_gaps);
+  const storeMorphology = useSpatialStore((s) => s.morphologyReport?.candidates);
+  const storeRoverAssoc = useSpatialStore((s) => s.roverAssociations);
+  const measurePoints = useSpatialStore((s) => s.measurePoints);
+  const clearMeasurePoints = useSpatialStore((s) => s.clearMeasurePoints);
+  const [measureSamples, setMeasureSamples] = useState<Array<{ frac: number; elev: number | null }>>([]);
+
+  const effectiveFootprints = useMemo(
+    () => spatialFootprints ?? (showFootprintsOverlay ? storeFootprints : []),
+    [spatialFootprints, showFootprintsOverlay, storeFootprints]
+  );
+  const effectiveGaps = useMemo(
+    () => evidenceGaps ?? (showGapsOverlay ? (storeGaps ?? []) : []),
+    [evidenceGaps, showGapsOverlay, storeGaps]
+  );
+  const effectiveMorphology = useMemo(
+    () => morphologyCandidates ?? (showMorphologyOverlay ? (storeMorphology ?? []) : []),
+    [morphologyCandidates, showMorphologyOverlay, storeMorphology]
+  );
+  const effectiveRoverAssoc = useMemo(
+    () => roverAssociations ?? (showRoverAssocOverlay ? storeRoverAssoc : []),
+    [roverAssociations, showRoverAssocOverlay, storeRoverAssoc]
+  );
+
+  useEffect(() => {
+    measureActiveRef.current = measureActive;
+  }, [measureActive]);
 
   const selectedDemDatasetId = useRoutingStore((s) => s.selectedDemDatasetId);
   const meshManifest = useRoutingStore((s) => s.meshManifest);
@@ -382,10 +528,19 @@ export function LocalTerrain3DViewer({
       pointerNdc.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointerNdc, camera);
 
-      // Check interactive 3D overlay markers first (science targets, route stops)
+      // Check interactive 3D overlay markers first (science targets, route stops, Prompt 19 spatial entities)
       const markerHits = raycaster.intersectObjects(overlayGroup.children, true);
       for (const hit of markerHits) {
-        const meta = hit.object.userData as { kind?: string; targetId?: string; waypointSeq?: number } | undefined;
+        const meta = hit.object.userData as
+          | {
+              kind?: string;
+              targetId?: string;
+              waypointSeq?: number;
+              candidateData?: MorphologicalFeatureCandidate;
+              gapData?: SpatialGapRegion;
+              roverData?: RoverOrbitalAssociationRecord;
+            }
+          | undefined;
         if (meta?.kind === "science_target" && meta.targetId) {
           useRoutingStore.getState().toggleTargetId(meta.targetId);
           return;
@@ -394,13 +549,78 @@ export function LocalTerrain3DViewer({
           useRoutingStore.getState().selectWaypoint(meta.waypointSeq, false);
           return;
         }
+        if (meta?.kind === "morphology_candidate" && meta.candidateData) {
+          useSpatialStore.getState().setSelectedEntity({ kind: "morphology", data: meta.candidateData });
+          return;
+        }
+        if (meta?.kind === "evidence_gap" && meta.gapData) {
+          useSpatialStore.getState().setSelectedEntity({ kind: "gap", data: meta.gapData });
+          return;
+        }
+        if (meta?.kind === "rover_assoc" && meta.roverData) {
+          useSpatialStore.getState().setSelectedEntity({ kind: "rover_assoc", data: meta.roverData });
+          return;
+        }
       }
 
       // Otherwise intersect DEM surface
       const hits = raycaster.intersectObjects(terrainGroup.children, false);
       if (hits.length === 0) return;
       const picked = sampleTileAtHit(hits[0]);
-      if (!picked) return;
+      if (!picked) {
+        setNodataPickMsg(
+          "UNAVAILABLE: Selected cell is NoData / outside valid swath mask — no elevation or slope fabricated."
+        );
+        return;
+      }
+      setNodataPickMsg(null);
+
+      if (measureActiveRef.current) {
+        useSpatialStore.getState().addMeasurePoint({
+          lat: picked.lat,
+          lon_east: picked.lon_east,
+          elevation_m: picked.elevation_m,
+          slope_deg: picked.slope_deg ?? null,
+        });
+        const nextPts = useSpatialStore.getState().measurePoints;
+        if (nextPts.length === 2) {
+          const [p0, p1] = nextPts;
+          const nextSamples: Array<{ frac: number; elev: number | null }> = [];
+          for (let i = 0; i <= 32; i += 1) {
+            const t = i / 32;
+            const sLat = p0.lat + t * (p1.lat - p0.lat);
+            const sLon = p0.lon_east + t * (p1.lon_east - p0.lon_east);
+            let foundElev: number | null = null;
+            for (const obj of terrainGroup.children) {
+              const ud = obj.userData as TileMeshUserData | undefined;
+              if (!ud?.tile) continue;
+              const b = ud.tile.bounds;
+              if (sLat >= b.min_lat && sLat <= b.max_lat && sLon >= b.min_lon && sLon <= b.max_lon) {
+                const row = Math.round(
+                  ((b.max_lat - sLat) / Math.max(1e-9, b.max_lat - b.min_lat)) *
+                    (ud.tile.grid_rows - 1)
+                );
+                const col = Math.round(
+                  ((sLon - b.min_lon) / Math.max(1e-9, b.max_lon - b.min_lon)) *
+                    (ud.tile.grid_cols - 1)
+                );
+                const idx =
+                  Math.max(0, Math.min(ud.tile.grid_rows - 1, row)) * ud.tile.grid_cols +
+                  Math.max(0, Math.min(ud.tile.grid_cols - 1, col));
+                const val = ud.tile.elevations_m[idx];
+                if (ud.tile.valid_mask[idx] === 1 && val != null && Number.isFinite(val)) {
+                  foundElev = val;
+                  break;
+                }
+              }
+            }
+            nextSamples.push({ frac: t, elev: foundElev });
+          }
+          setMeasureSamples(nextSamples);
+        } else {
+          setMeasureSamples([]);
+        }
+      }
 
       const st = useRoutingStore.getState();
       st.setPickedSurfacePoint(picked);
@@ -799,7 +1019,7 @@ export function LocalTerrain3DViewer({
     };
   }, [meshManifest, activeLod, lodDescriptors, animateCameraTo]);
 
-  // Hot-swap texture overlays cleanly without tearing down mesh geometry or resetting camera
+  // Hot-swap texture overlays & swipe/blend comparisons cleanly without tearing down mesh geometry
   useEffect(() => {
     const terrainGroup = terrainGroupRef.current;
     if (!terrainGroup || !meshManifest || tilesLoadedCount === 0) return;
@@ -807,55 +1027,105 @@ export function LocalTerrain3DViewer({
     let cancelled = false;
     const texLoader = new THREE.TextureLoader();
 
+    const disposeComposites = () => {
+      compositeTexturesRef.current.forEach((ct) => ct.dispose());
+      compositeTexturesRef.current = [];
+    };
+
+    const loadOrGetTex = (url: string): Promise<THREE.Texture | null> => {
+      const existing = textureCacheRef.current.get(url);
+      if (existing) return Promise.resolve(existing);
+      return new Promise((resolve) => {
+        texLoader.load(
+          url,
+          (loadedTex) => {
+            if (cancelled) {
+              loadedTex.dispose();
+              resolve(null);
+              return;
+            }
+            loadedTex.colorSpace = THREE.SRGBColorSpace;
+            loadedTex.wrapS = THREE.ClampToEdgeWrapping;
+            loadedTex.wrapT = THREE.ClampToEdgeWrapping;
+            loadedTex.anisotropy = Math.min(4, rendererRef.current?.capabilities.getMaxAnisotropy() || 1);
+            textureCacheRef.current.set(url, loadedTex);
+            if (textureCacheRef.current.size > 64) {
+              const oldest = textureCacheRef.current.keys().next().value;
+              if (oldest) {
+                textureCacheRef.current.get(oldest)?.dispose();
+                textureCacheRef.current.delete(oldest);
+              }
+            }
+            resolve(loadedTex);
+          },
+          undefined,
+          () => resolve(null)
+        );
+      });
+    };
+
+    const isCompareOverlay =
+      (comparisonMode === "swipe" || comparisonMode === "blend") &&
+      compareOverlayMode !== activeOverlayMode;
+
+    disposeComposites();
+
     terrainGroup.children.forEach((child) => {
       const mesh = child as THREE.Mesh;
       const ud = mesh.userData as TileMeshUserData | undefined;
       if (!ud?.tile) return;
       const mat = mesh.material as THREE.MeshStandardMaterial;
-      const texUrl = buildTileTextureUrl(ud.tile, meshManifest, activeOverlayMode);
+      const primaryUrl = buildTileTextureUrl(ud.tile, meshManifest, activeOverlayMode);
 
-      const cached = textureCacheRef.current.get(texUrl);
-      if (cached) {
-        mat.color.set("#ffffff");
-        mat.map = cached;
-        mat.needsUpdate = true;
-        return;
-      }
-
-      texLoader.load(
-        texUrl,
-        (loadedTex) => {
-          if (cancelled) {
-            loadedTex.dispose();
+      if (!isCompareOverlay) {
+        void loadOrGetTex(primaryUrl).then((tex) => {
+          if (cancelled || !tex) return;
+          mat.color.set("#ffffff");
+          mat.map = tex;
+          mat.needsUpdate = true;
+        });
+      } else {
+        const secondaryUrl = buildTileTextureUrl(ud.tile, meshManifest, compareOverlayMode);
+        void Promise.all([loadOrGetTex(primaryUrl), loadOrGetTex(secondaryUrl)]).then(([texA, texB]) => {
+          if (cancelled || !texA) return;
+          if (!texB) {
+            mat.color.set("#ffffff");
+            mat.map = texA;
+            mat.needsUpdate = true;
             return;
           }
-          loadedTex.colorSpace = THREE.SRGBColorSpace;
-          loadedTex.wrapS = THREE.ClampToEdgeWrapping;
-          loadedTex.wrapT = THREE.ClampToEdgeWrapping;
-          loadedTex.anisotropy = Math.min(4, rendererRef.current?.capabilities.getMaxAnisotropy() || 1);
-          textureCacheRef.current.set(texUrl, loadedTex);
-          if (textureCacheRef.current.size > 64) {
-            const oldest = textureCacheRef.current.keys().next().value;
-            if (oldest) {
-              textureCacheRef.current.get(oldest)?.dispose();
-              textureCacheRef.current.delete(oldest);
-            }
+          const comp = buildComparisonTileCanvasTexture(
+            texA,
+            texB,
+            ud.tile,
+            meshManifest,
+            comparisonMode,
+            swipeFraction,
+            blendOpacity
+          );
+          if (comp) {
+            compositeTexturesRef.current.push(comp);
+            mat.color.set("#ffffff");
+            mat.map = comp;
+            mat.needsUpdate = true;
           }
-          mat.color.set("#ffffff");
-          mat.map = loadedTex;
-          mat.needsUpdate = true;
-        },
-        undefined,
-        () => {
-          // Keep current shading if texture fails
-        }
-      );
+        });
+      }
     });
 
     return () => {
       cancelled = true;
+      disposeComposites();
     };
-  }, [activeOverlayMode, meshManifest, tilesLoadedCount]);
+  }, [
+    activeOverlayMode,
+    compareOverlayMode,
+    comparisonMode,
+    swipeFraction,
+    blendOpacity,
+    meshManifest,
+    tilesLoadedCount,
+  ]);
 
   // Diagnostic tile boundaries overlay (strictly OFF by default; toggleable for verification)
   useEffect(() => {
@@ -1509,6 +1779,152 @@ export function LocalTerrain3DViewer({
       overlayGroup.add(ponrGroup);
       zoomAdaptiveMarkersRef.current.push({ obj: ponrGroup, weight: 1.05 });
     }
+
+    // Prompt 19: Spatial Footprints, Evidence Gaps, Morphology Candidates, Rover Associations & 2-Point Measure Line
+    if (effectiveFootprints.length > 0) {
+      effectiveFootprints.slice(0, 8).forEach((fp) => {
+        const rings = extractOuterRings3D(fp.valid_data_geojson || fp.footprint_geojson);
+        rings.forEach((ring) => {
+          const step = Math.max(1, Math.floor(ring.length / 80));
+          const pts: THREE.Vector3[] = [];
+          for (let i = 0; i < ring.length; i += step) {
+            const [lon, lat] = ring[i];
+            const elev = lookupElevNear(lat, lon);
+            pts.push(toSceneVec(lat, lon, elev, 3.2));
+          }
+          if (pts.length >= 3) {
+            pts.push(pts[0].clone());
+            const geom = new THREE.BufferGeometry().setFromPoints(pts);
+            const mat = new THREE.LineBasicMaterial({
+              color: fp.is_approximate ? "#94a3b8" : "#22d3ee",
+              transparent: true,
+              opacity: fp.is_approximate ? 0.55 : 0.85,
+            });
+            overlayGroup.add(new THREE.Line(geom, mat));
+          }
+        });
+      });
+    }
+
+    if (effectiveGaps.length > 0) {
+      effectiveGaps.slice(0, 10).forEach((gap) => {
+        const rings = extractOuterRings3D(gap.geometry_geojson);
+        let sumLat = 0;
+        let sumLon = 0;
+        let cnt = 0;
+        rings.forEach((ring) => {
+          const step = Math.max(1, Math.floor(ring.length / 60));
+          const pts: THREE.Vector3[] = [];
+          for (let i = 0; i < ring.length; i += step) {
+            const [lon, lat] = ring[i];
+            sumLat += lat;
+            sumLon += lon;
+            cnt += 1;
+            const elev = lookupElevNear(lat, lon);
+            pts.push(toSceneVec(lat, lon, elev, 4.0));
+          }
+          if (pts.length >= 3) {
+            pts.push(pts[0].clone());
+            const geom = new THREE.BufferGeometry().setFromPoints(pts);
+            const mat = new THREE.LineBasicMaterial({
+              color: "#fb7185",
+              transparent: true,
+              opacity: 0.9,
+            });
+            overlayGroup.add(new THREE.Line(geom, mat));
+          }
+        });
+        if (cnt > 0) {
+          const cLat = sumLat / cnt;
+          const cLon = sumLon / cnt;
+          const cElev = lookupElevNear(cLat, cLon);
+          const gMesh = new THREE.Mesh(
+            new THREE.OctahedronGeometry(0.75, 0),
+            new THREE.MeshBasicMaterial({ color: "#fb7185" })
+          );
+          gMesh.position.copy(toSceneVec(cLat, cLon, cElev, 7.5));
+          gMesh.userData = { kind: "evidence_gap", gapData: gap };
+          overlayGroup.add(gMesh);
+          zoomAdaptiveMarkersRef.current.push({ obj: gMesh, weight: 0.95 });
+        }
+      });
+    }
+
+    if (effectiveMorphology.length > 0) {
+      effectiveMorphology.slice(0, 24).forEach((cand) => {
+        const elev = lookupElevNear(cand.centroid_lat, cand.centroid_lon_east);
+        const pos = toSceneVec(cand.centroid_lat, cand.centroid_lon_east, elev, 4.5);
+        const col =
+          cand.epistemic_state === "HUMAN_VALIDATED"
+            ? "#10b981"
+            : cand.epistemic_state === "HUMAN_REJECTED"
+            ? "#64748b"
+            : cand.epistemic_state === "EXPERT_INTERPRETATION"
+            ? "#a855f7"
+            : "#f59e0b";
+        const fc = cand.feature_class;
+        let geom: THREE.BufferGeometry;
+        if (fc === "crater") {
+          geom = new THREE.TorusGeometry(0.7, 0.22, 8, 18);
+        } else if (fc === "ridge" || fc === "scarp" || fc === "boxwork_ridge") {
+          geom = new THREE.ConeGeometry(0.65, 1.4, 5);
+        } else {
+          geom = new THREE.SphereGeometry(0.58, 12, 12);
+        }
+        const mesh = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({ color: col }));
+        mesh.position.copy(pos);
+        if (fc === "crater") mesh.rotation.x = Math.PI / 2;
+        mesh.userData = { kind: "morphology_candidate", candidateData: cand };
+        overlayGroup.add(mesh);
+        zoomAdaptiveMarkersRef.current.push({ obj: mesh, weight: 1.0 });
+      });
+    }
+
+    if (effectiveRoverAssoc.length > 0) {
+      effectiveRoverAssoc.slice(0, 20).forEach((ra) => {
+        const refPt = ra.location_components?.effective_reference_point;
+        if (!refPt || refPt.lat == null || refPt.lon_east == null) return;
+        const elev = lookupElevNear(refPt.lat, refPt.lon_east);
+        const pos = toSceneVec(refPt.lat, refPt.lon_east, elev, 5.0);
+        const col =
+          ra.association_state === "CONFIRMED_IN_FOOTPRINT"
+            ? "#22d3ee"
+            : ra.association_state === "REGIONAL_CONTEXT_ONLY"
+            ? "#38bdf8"
+            : "#f43f5e";
+        const mesh = new THREE.Mesh(
+          new THREE.BoxGeometry(0.95, 0.95, 0.95),
+          new THREE.MeshBasicMaterial({ color: col })
+        );
+        mesh.position.copy(pos);
+        mesh.userData = { kind: "rover_assoc", roverData: ra };
+        overlayGroup.add(mesh);
+        zoomAdaptiveMarkersRef.current.push({ obj: mesh, weight: 0.9 });
+      });
+    }
+
+    if (measurePoints.length >= 1) {
+      measurePoints.forEach((mp) => {
+        const elev = mp.elevation_m ?? lookupElevNear(mp.lat, mp.lon_east);
+        const pos = toSceneVec(mp.lat, mp.lon_east, elev, 3.0);
+        addBeaconPin(pos, "#34d399", 1.15, { kind: "measure_point" }, "waypoint");
+      });
+      if (measurePoints.length === 2) {
+        const [p0, p1] = measurePoints;
+        const segPts: THREE.Vector3[] = [];
+        for (let i = 0; i <= 32; i += 1) {
+          const t = i / 32;
+          const lat = p0.lat + t * (p1.lat - p0.lat);
+          const lon = p0.lon_east + t * (p1.lon_east - p0.lon_east);
+          const sampledElev = lookupElevNear(lat, lon);
+          const e = sampledElev ?? (p0.elevation_m ?? 0) * (1 - t) + (p1.elevation_m ?? 0) * t;
+          segPts.push(toSceneVec(lat, lon, e, 4.2));
+        }
+        const geom = new THREE.BufferGeometry().setFromPoints(segPts);
+        const mat = new THREE.LineBasicMaterial({ color: "#34d399" });
+        overlayGroup.add(new THREE.Line(geom, mat));
+      }
+    }
   }, [
     meshManifest,
     verticalExaggeration,
@@ -1535,6 +1951,11 @@ export function LocalTerrain3DViewer({
     selectedReturnAlternativeId,
     robustComparison,
     maxSlopeDeg,
+    effectiveFootprints,
+    effectiveGaps,
+    effectiveMorphology,
+    effectiveRoverAssoc,
+    measurePoints,
   ]);
 
   // Respond to external camera focus requests (e.g. clicking an instruction row or target)
@@ -1652,6 +2073,45 @@ export function LocalTerrain3DViewer({
     { id: "slope", label: "Slope (°)" },
     { id: "roughness", label: "TRI" },
   ];
+
+  const measureProfile = useMemo(() => {
+    if (measurePoints.length === 0 || !meshManifest) return null;
+    if (measurePoints.length === 1) {
+      return {
+        p1: measurePoints[0] as MeasurePoint,
+        p2: null as MeasurePoint | null,
+        horizDistM: 0,
+        elevDeltaM: null as number | null,
+        gradePct: null as number | null,
+        samples: [] as Array<{ frac: number; elev: number | null }>,
+        minElev: 0,
+        maxElev: 1,
+      };
+    }
+    const [p1, p2] = measurePoints;
+    const m1 = latLonToLocalMeters(p1.lat, p1.lon_east, meshManifest.origin.lat, meshManifest.origin.lon_east);
+    const m2 = latLonToLocalMeters(p2.lat, p2.lon_east, meshManifest.origin.lat, meshManifest.origin.lon_east);
+    const horizDistM = Math.hypot(m2.eastM - m1.eastM, m2.northM - m1.northM);
+    const elevDeltaM =
+      p1.elevation_m != null && p2.elevation_m != null ? p2.elevation_m - p1.elevation_m : null;
+    const gradePct =
+      elevDeltaM != null && horizDistM > 0.1 ? (elevDeltaM / horizDistM) * 100 : null;
+    let minElev = Infinity;
+    let maxElev = -Infinity;
+    for (const s of measureSamples) {
+      if (s.elev != null) {
+        minElev = Math.min(minElev, s.elev);
+        maxElev = Math.max(maxElev, s.elev);
+      }
+    }
+    if (!Number.isFinite(minElev)) {
+      minElev = 0;
+      maxElev = 1;
+    } else if (maxElev - minElev < 0.5) {
+      maxElev = minElev + 0.5;
+    }
+    return { p1, p2, horizDistM, elevDeltaM, gradePct, samples: measureSamples, minElev, maxElev };
+  }, [measurePoints, measureSamples, meshManifest]);
 
   return (
     <div className="relative w-full h-full min-h-[380px] bg-[#07090f] rounded-xl overflow-hidden border border-[#1e2638] select-none">
@@ -1775,6 +2235,82 @@ export function LocalTerrain3DViewer({
             </button>
           ))}
         </div>
+
+        {/* Prompt 19 Compare Mode (Swipe / Blend) & Measure Profile Toggle */}
+        {(!compact || showSpatialTools) && (
+          <div className="flex flex-wrap items-center gap-1 bg-[#0b101b]/95 border border-[#243047] rounded-lg p-0.5 text-[10px] font-mono">
+            <button
+              type="button"
+              onClick={() => setMeasureActive((v) => !v)}
+              className={`flex items-center gap-1 px-2 py-0.5 rounded transition-colors ${
+                measureActive
+                  ? "bg-emerald-600 text-white font-semibold"
+                  : "text-slate-300 hover:bg-[#182235]"
+              }`}
+              title="Click two valid DEM surface points to measure horizontal distance & elevation profile"
+            >
+              <Ruler className="w-3 h-3" />
+              <span>Measure{measurePoints.length > 0 ? ` (${measurePoints.length}/2)` : ""}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                setComparisonMode(
+                  comparisonMode === "single"
+                    ? "swipe"
+                    : comparisonMode === "swipe"
+                    ? "blend"
+                    : "single"
+                )
+              }
+              className={`flex items-center gap-1 px-2 py-0.5 rounded transition-colors ${
+                comparisonMode === "swipe" || comparisonMode === "blend"
+                  ? "bg-sky-600 text-white font-semibold"
+                  : "text-slate-300 hover:bg-[#182235]"
+              }`}
+              title="Cycle 3D layer comparison mode: Off -> Swipe -> Blend"
+            >
+              <Columns2 className="w-3 h-3" />
+              <span>
+                {comparisonMode === "swipe"
+                  ? "Swipe Compare"
+                  : comparisonMode === "blend"
+                  ? "Blend Compare"
+                  : "Compare"}
+              </span>
+            </button>
+            {(comparisonMode === "swipe" || comparisonMode === "blend") && (
+              <>
+                <select
+                  value={compareOverlayMode}
+                  onChange={(e) => setCompareOverlayMode(e.target.value as TextureOverlayMode)}
+                  className="bg-[#0f1625] border border-[#2d3b55] rounded px-1.5 py-0.5 text-[10px] text-sky-200"
+                  title="Secondary overlay layer to compare against active layer"
+                >
+                  <option value="elevation">vs Elevation</option>
+                  <option value="ortho">vs HiRISE Ortho</option>
+                  <option value="slope">vs Slope</option>
+                  <option value="roughness">vs TRI</option>
+                  <option value="uncertainty_status">vs Uncertainty</option>
+                </select>
+                <input
+                  type="range"
+                  min={comparisonMode === "swipe" ? 0.05 : 0}
+                  max={comparisonMode === "swipe" ? 0.95 : 1}
+                  step={0.05}
+                  value={comparisonMode === "swipe" ? swipeFraction : blendOpacity}
+                  onChange={(e) => {
+                    const v = Number.parseFloat(e.target.value);
+                    if (comparisonMode === "swipe") setSwipeFraction(v);
+                    else setBlendOpacity(v);
+                  }}
+                  className="w-16 accent-sky-400 h-1.5"
+                  title={comparisonMode === "swipe" ? "Swipe split position" : "Secondary blend opacity"}
+                />
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Pick Mode & Camera Controls */}
@@ -2071,6 +2607,106 @@ export function LocalTerrain3DViewer({
             </div>
           )}
 
+          {nodataPickMsg && (
+            <div className="flex items-center justify-between gap-2 bg-rose-950/92 border border-rose-500/50 rounded-lg px-2.5 py-1 text-[10px] font-mono text-rose-200 pointer-events-auto">
+              <span className="flex items-center gap-1.5">
+                <ShieldAlert className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                <span>{nodataPickMsg}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setNodataPickMsg(null)}
+                className="text-rose-300 hover:text-white underline ml-1"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {measureProfile && (
+            <div className="bg-[#0b101b]/95 border border-emerald-500/45 rounded-lg p-2 text-[10px] font-mono text-slate-200 pointer-events-auto space-y-1.5 min-w-[260px] max-w-[340px]">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-emerald-300 flex items-center gap-1">
+                  <Ruler className="w-3 h-3" />
+                  Distance &amp; Profile
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearMeasurePoints();
+                    setMeasureActive(false);
+                  }}
+                  className="text-[9px] text-slate-400 hover:text-white underline"
+                >
+                  Clear
+                </button>
+              </div>
+              {!measureProfile.p2 ? (
+                <div className="text-[9px] text-slate-300">
+                  P1 set at {measureProfile.p1.lat.toFixed(5)}°, {measureProfile.p1.lon_east.toFixed(5)}° E (
+                  {measureProfile.p1.elevation_m != null ? `${measureProfile.p1.elevation_m.toFixed(1)} m` : "NoData"}). Click second valid point.
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-3 gap-1.5 text-[9px]">
+                    <div className="bg-[#121929] rounded px-1.5 py-1">
+                      <div className="text-slate-400">Horiz</div>
+                      <div className="text-white font-semibold">
+                        {measureProfile.horizDistM >= 1000
+                          ? `${(measureProfile.horizDistM / 1000).toFixed(2)} km`
+                          : `${measureProfile.horizDistM.toFixed(1)} m`}
+                      </div>
+                    </div>
+                    <div className="bg-[#121929] rounded px-1.5 py-1">
+                      <div className="text-slate-400">ΔElev</div>
+                      <div className="text-white font-semibold">
+                        {measureProfile.elevDeltaM != null
+                          ? `${measureProfile.elevDeltaM >= 0 ? "+" : ""}${measureProfile.elevDeltaM.toFixed(1)} m`
+                          : "UNAVAIL"}
+                      </div>
+                    </div>
+                    <div className="bg-[#121929] rounded px-1.5 py-1">
+                      <div className="text-slate-400">Mean Grade</div>
+                      <div className="text-white font-semibold">
+                        {measureProfile.gradePct != null ? `${measureProfile.gradePct.toFixed(1)}%` : "—"}
+                      </div>
+                    </div>
+                  </div>
+                  <svg viewBox="0 0 240 44" className="w-full h-11 bg-[#070b14] rounded border border-[#1d273b]">
+                    {(() => {
+                      const segments: string[] = [];
+                      let curr: string[] = [];
+                      const spanE = Math.max(0.5, measureProfile.maxElev - measureProfile.minElev);
+                      measureProfile.samples.forEach((s) => {
+                        if (s.elev == null) {
+                          if (curr.length >= 2) segments.push(curr.join(" "));
+                          curr = [];
+                          return;
+                        }
+                        const x = 4 + s.frac * 232;
+                        const y = 38 - ((s.elev - measureProfile.minElev) / spanE) * 32;
+                        curr.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+                      });
+                      if (curr.length >= 2) segments.push(curr.join(" "));
+                      return segments.map((pts, i) => (
+                        <polyline
+                          key={i}
+                          fill="none"
+                          stroke="#34d399"
+                          strokeWidth="1.75"
+                          points={pts}
+                        />
+                      ));
+                    })()}
+                  </svg>
+                  <div className="text-[8px] text-slate-400">
+                    Raw loaded DEM cross-section ({measureProfile.minElev.toFixed(1)}..{measureProfile.maxElev.toFixed(1)} m; gaps show NoData)
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
           <div
             ref={hoverHudRef}
             className="bg-[#0b101b]/92 backdrop-blur border border-[#243047] rounded-lg px-2.5 py-1 text-[11px] font-mono text-slate-200 pointer-events-auto"
@@ -2172,10 +2808,22 @@ export function LocalTerrain3DViewer({
             );
           })()}
 
-          <div className="flex items-center gap-2 bg-[#0b101b]/92 backdrop-blur border border-[#243047] rounded-lg px-2.5 py-1 text-[10px] font-mono text-slate-400 pointer-events-auto">
+          <div className="flex flex-wrap items-center gap-2 bg-[#0b101b]/92 backdrop-blur border border-[#243047] rounded-lg px-2.5 py-1 text-[10px] font-mono text-slate-400 pointer-events-auto">
             <span className="text-slate-200">
               {meshManifest?.product_id || selectedDemDatasetId}
             </span>
+            <span className="text-cyan-300/90">IAU2000:49900</span>
+            {meshManifest?.native_resolution_m != null && (
+              <span>{meshManifest.native_resolution_m.toFixed(2)} m/px</span>
+            )}
+            {verticalExaggeration > 1 && (
+              <span
+                className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-200 font-semibold"
+                title="Vertical relief exaggeration is purely visual; calculations always use unexaggerated physical elevation."
+              >
+                EXAG {verticalExaggeration}x VISUAL ONLY
+              </span>
+            )}
             <span>|</span>
             <span>
               {meshManifest?.native_resolution_m

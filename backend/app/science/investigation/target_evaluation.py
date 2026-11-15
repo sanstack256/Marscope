@@ -196,13 +196,39 @@ def _evaluate_single_location(
                 eligibility_states.append(EvidenceEligibilityState.PRODUCT_UNVERIFIED)
             continue
         if _covers_point(ds, latitude, longitude_east) and (ds.local_file_path or ds.processed_file_path):
+            # Prompt 19 Part 12.2: verify point lies in true valid swath polygon, never oblique NoData bbox corner!
+            from pathlib import Path as _P
+            from app.geospatial.footprints import get_or_extract_dataset_footprint, point_intersects_footprint
+
+            ds_root = (
+                _P(catalog_service.catalog_storage_dir).parent
+                if getattr(catalog_service, "catalog_storage_dir", None)
+                else _P(__file__).resolve().parents[4] / "datasets"
+            )
+            in_valid_swath = True
+            swath_reason = "bbox_only"
+            try:
+                fp_rec = get_or_extract_dataset_footprint(ds, dataset_root_dir=ds_root)
+                in_valid_swath, swath_reason = point_intersects_footprint(
+                    fp_rec, latitude, longitude_east, require_valid_pixels_if_known=True
+                )
+            except Exception:
+                in_valid_swath = True
+
+            if not in_valid_swath and swath_reason == "bbox_only_outside_valid_swath_pixels":
+                eligibility_states.append(EvidenceEligibilityState.SPATIALLY_UNVERIFIED)
+                unknowns_gaps.append(
+                    f"Target lies in NoData corner of '{ds.id}' bounding box outside valid swath pixels — NOT counted as co-registered coverage."
+                )
+                continue
+
             covering_ds.append(ds.id)
             if inst_cls == "HIRISE_DTM":
                 has_highres_dtm = True
                 covering_dtms.append(ds)
                 eligibility_states.append(EvidenceEligibilityState.ELIGIBLE_WITH_LIMITATIONS)
                 known_facts.append(
-                    f"Co-registered local DEM coverage via '{ds.id}' ({ds.horizontal_resolution_meters or '1.0'} m/px)."
+                    f"Co-registered local DEM swath coverage via '{ds.id}' ({ds.horizontal_resolution_meters or '1.0'} m/px, check={swath_reason})."
                 )
             elif inst_cls in {"MOLA", "USGS_SIM3292_CONTEXT", "THEMIS", "CTX"}:
                 eligibility_states.append(EvidenceEligibilityState.SCALE_INCOMPATIBLE)

@@ -36,5 +36,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
 markers = [
+    "unit: deterministic offline unit tests independent of external archives or local NASA binaries",
+    "local_real_data: tests verifying authentic NASA PDS/JPL source products installed locally in datasets/raw/",
     "nasa_integration: live NASA archive or downloaded NASA product integration test",
 ]

@@ -36,29 +36,25 @@
   "data_format": "PDS3 ASCII Table (.TAB)",
   "file_size_bytes": 284812,
   "sha256_checksum": "518821b4cb80f85506cde0864bc8642716215601d6f195f06c1b9baf5086a04f",
-  "status": "downloaded",
+  "status": "discovered",
   "verification": {
-    "archive_availability": "verified",
+    "archive_availability": "unverified",
     "product_discovery": "verified",
-    "metadata_verification": "verified",
+    "metadata_verification": "unverified",
     "license_verification": "verified",
-    "coverage_verification": "verified",
-    "download_verification": "verified",
-    "processing_verification": "unverified",
+    "coverage_verification": "unverified",
+    "download_verification": "unverified",
+    "processing_verification": "not_applicable",
     "field_verification": {
-      "acquisition_timestamp": "unknown",
-      "coverage": "unverified",
-      "units": "unverified"
+      "license": "verified"
     },
     "evidence_notes": [
       "Catalog reference registered; download product & .LBL to parse spectra.",
-      "Companion label fetch warning: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1082)",
-      "Verified metadata from PDS3 label cl1_398380611psv_f0030000ccam04010p3.lbl",
-      "Downloaded 284812 bytes; SHA-256=518821b4cb80f855..."
+      "Verified metadata from PDS3 label cl1_398380611psv_f0030000ccam04010p3.lbl"
     ],
-    "last_checked_utc": "2026-11-14T05:07:23.888584Z"
+    "last_checked_utc": null
   },
-  "failure_reason": "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1082)",
+  "failure_reason": null,
   "quality_flags": [
     "Calibrated Emission Lines"
   ],
@@ -67,10 +63,9 @@
     "Surface dust coating can attenuate bedrock signal on initial laser shots."
   ],
   "processing_history": [
-    "Catalog record discovered via MslCuriositySourceAdapter",
-    "Downloaded 284812 bytes at 2026-11-14T05:07:23.887900+00:00 (SHA-256: 518821b4cb80...)"
+    "Catalog record discovered via MslCuriositySourceAdapter"
   ],
-  "local_file_path": "raw/cl1_398380611psv_f0030000ccam04010p3.tab",
-  "local_label_path": "raw/cl1_398380611psv_f0030000ccam04010p3.lbl",
+  "local_file_path": null,
+  "local_label_path": null,
   "processed_file_path": null
 }

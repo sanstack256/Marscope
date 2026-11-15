@@ -139,3 +139,35 @@ Product-level image records live alongside `DatasetCatalogService` in `datasets/
 - **17-Dimension Evidence Eligibility & Integrity Firewall (`app/science/investigation/eligibility.py`, `measurement_registry.py`, `service.py`):** Connects mission/instrument capability verification (`v2.0.0-p18`), inference firewall rules, 17-dimension eligibility checks, non-corroborating duplicate exclusion, contradiction preservation, target confidence/priority separation, and 5-state campaign feasibility + SHA-256 staleness tracking (`STALE_UPSTREAM_DEPENDENCY_CHANGED`).
 - **Security & Fail-Closed API Guards (`app/core/security.py`, `app/api/*.py`):** Enforces `X-Mars-Operator-Token` authentication (`401`/`403` fail-closed when `MARSCOPE_OPERATOR_TOKEN` is configured), path identifier sanitization (`validate_identifier`, HTTP `422`), and strict explicit query/body validation across mobility and investigation endpoints.
 - **Frontend Scientific Transparency (`frontend/src/app/{science-campaign,evidence,targets,terrain,explorer}/page.tsx`, `StatusBadge.tsx`, `useInvestigationStore.ts`):** Exposes Product Integrity drawers (`inspectProductDetail`), 17-dimension badges, competing hypotheses & contradiction panels, `feasibility_state` & `epistemic_classification` disclosures, JSON campaign dossier exports (`exportCampaignDossier`), session operator-token input, and removal of silent UI coordinate/priority fallbacks.
+
+
+---
+
+## Prompt 19: High-Fidelity Multi-Mission Spatial Intelligence Architecture
+
+Prompt 19 upgrades MARSCOPE into an uncertainty-aware, multi-resolution, provenance-preserving planetary spatial intelligence system:
+
+1. **Planetary Coordinate Intelligence (`backend/app/geospatial/models.py`, `backend/app/geospatial/crs.py`)**
+   - Authoritative `MARS_CRS_REGISTRY` (`mars_crs_registry_v2.0`) covering `IAU2000:49900` (oblate ellipsoid $a=3,396,190\,\text{m}$, $b=3,376,200\,\text{m}$), `IAU2000:MARS_SPHERE` ($R=3,396,190\,\text{m}$), `MARS:IAU2015_49900`, `MARS:GALE_EQUIRECTANGULAR`, and `MARS:HIRISE_LOCAL_EQC`.
+   - 8-state CRS validation (`CRS_VALIDATED`, `CRS_VALID_WITH_LIMITATIONS`, `CRS_UNVERIFIED`, `CRS_INCOMPATIBLE`, `CRS_UNSUPPORTED`, `COORDINATE_CONVENTION_UNVERIFIED`, `VERTICAL_DATUM_UNVERIFIED`, `TRANSFORMATION_FAILED`) with strict rejection of Earth (`EPSG:4326`), lunar (`IAU_2015:30100`), and screen-space systems.
+   - Exact Planetocentric $\leftrightarrow$ Planetographic conversion ($\tan\phi_c = (b^2/a^2)\tan\phi_g$), East/West longitude domain normalization, 5-kind `VerticalDatumKind` compatibility engine, and auditable step-by-step coordinate transformations (`transform_mars_coordinates`).
+
+2. **Multi-Mission Spatial Registration & Uncertainty Engine (`backend/app/geospatial/registration.py`)**
+   - 12-step spatial registration evaluation (`evaluate_product_pair_registration`) producing 9 explicit states (`VALIDATED_REGISTRATION` through `REGISTRATION_FAILED`).
+   - Evaluates 4 registration methods (`stereo_control_network_registration`, `authoritative_map_projection_alignment`, `control_point_registration` with breakdown-resistant median shift + OLS outlier rejection, and `feature_based_image_registration` with a strict modality guard refusing raw pixel correlation between elevation meters and optical reflectance DN).
+   - Preserves correlated error structure (`independence_assumption_valid=False` for shared HiRISE stereo bundles) and never fabricates horizontal geolocation sigma from pixel spacing.
+
+3. **Exact Spatial Footprints & 6-Category Coverage/Gap Engine (`backend/app/geospatial/footprints.py`, `backend/app/geospatial/coverage.py`)**
+   - `extract_dataset_footprint` extracts true rotated valid-pixel swath hulls (`AUTHORITATIVE_RASTER_VALID_MASK_HULL`) from local HiRISE/MOLA rasters rather than treating oblique stereo swaths as full rectangular bounding boxes (`hirise_dteec_009149_1750` valid swath = `70.9%` of outer bbox; `hirise_dteec_040770_1755` = `73.9%`).
+   - Computes areas using a centered Mars Lambert Azimuthal Equal-Area projection (`+proj=laea +R=3396190`) and indexes footprints in an `STRtree` (`SpatialFootprintIndex`) keyed by artifact checksums.
+   - `compute_multi_category_spatial_coverage` evaluates 6 observation categories (`elevation`, `optical`, `spectral`, `thermal`, `rover`, `environmental`) across 5 coverage stages (`product_footprint`, `valid_pixel`, `calibrated_data`, `spatially_registered`, `scientifically_eligible`), suppresses exact areal percentages when only approximate bounding boxes or point observations exist, and outputs explicit `SpatialGapRegion` polygons (`never_implies_feature_absence=True`).
+
+4. **Multi-Resolution Terrain Intelligence & Morphology Engine (`backend/app/terrain/spatial_terrain.py`, `backend/app/terrain/morphology.py`)**
+   - Computes 13 windowed terrain derivatives (`elevation`, `slope`, `aspect`, `profile_curvature`, `planform_curvature`, `tri`, `local_relief`, `tpi`, `multiscale_roughness`, `elevation_variability`, `surface_normals`, `terrain_observability`, `dem_uncertainty`) with strict 3×3 NoData propagation and Nyquist $2.5\times$ pixel-spacing observability classification.
+   - Multi-scale comparison (`compare_terrain_scales`) and 6-gate temporal terrain change evaluation (`evaluate_terrain_change`, returning `CHANGE_NOT_EVALUABLE` across incompatible resolutions, datums, or single-epoch pairs).
+   - Resolution-gated morphological candidate detection (`GeologicalMorphologyService`) with a 2-pixel binary dilation NoData border guard that rejects artificial swath-edge cliffs (`rejected_nodata_border_candidates`), strict epistemic separation (`MorphologyEpistemicState`), and atomic `USER_PROVIDED` human review persistence (`datasets/processed/morphology_reviews.json`).
+
+5. **Scale-Aware Rover Association & Scalable Spatial Delivery (`backend/app/science/rover_association.py`, `backend/app/geospatial/spatial_delivery.py`, `backend/app/api/spatial_intelligence.py`)**
+   - 7-state rover-to-orbital spatial association (`evaluate_rover_orbital_association`) preserving location semantics (`rover_chassis`, `instrument_target_location`, `drill_or_scoop_sample_site`, `waypoint_station`) and scale disparity (`confirms_entire_orbital_pixel=False`).
+   - 9-input SHA-256 deterministic cache key (`compute_spatial_cache_digest`), multi-resolution pyramid planner (`get_multi_resolution_pyramid_plan`, `upsampling_prevented=True`), and fail-closed `X-Mars-Operator-Token` cache invalidation.
+   - Cross-engine integration across `eligibility.py`, `target_evaluation.py`, `routing/service.py`, and `evidence_intelligence/report.py`, plus the synchronized `/spatial-intelligence` workbench and `/explorer` 3D/Globe overlays.

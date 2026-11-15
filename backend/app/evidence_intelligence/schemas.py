@@ -201,6 +201,11 @@ class AssociatedObservation(BaseModel):
     is_panorama: bool = False
     panorama_metadata: Optional[Dict[str, Any]] = None
     classification: ScientificDataClassification = ScientificDataClassification.DIRECTLY_MEASURED
+    rover_association_state: Optional[str] = None
+    location_semantic_type: Optional[str] = None
+    scale_disparity_ratio: Optional[float] = None
+    scale_disparity_statement: Optional[str] = None
+    confirms_entire_orbital_pixel: bool = False
     spatial_association_note: str = (
         "Nearby observation only; not a direct measurement of the exact route surface."
     )

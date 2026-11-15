@@ -137,3 +137,31 @@ Panorama eligibility defaults to `panorama_eligibility_unverified`. A product is
 | MSL Navcam Panoramas, ODYSSEY GRS, THEMIS Thermal, SAM, Mastcam/MAHLI | **UNVERIFIED / NOT ACQUIRED** | Zero acquired local product manifests; withheld cleanly from mineral/panorama claims |
 | Mars 2020 Perseverance (`PIXL_SHERLOC`, `SUPERCAM_MASTCAMZ`) | **EXCLUDED (MISSION_INCOMPATIBLE)** | Jezero Crater observations strictly quarantined from Gale Crater |
 | Earth CRS (`EPSG:4326` / WGS84), NASA Worldview | **EXCLUDED (`excluded_earth_only`)** | Rejected in CRS registration, geospatial validation, and `/api/sources/audit` |
+
+
+---
+
+## Prompt 19: Multi-Mission Spatial Intelligence Methodology
+
+### 1. Planetary Coordinate Reference Systems & Vertical Datums
+- **CRS Registry (`MARS_CRS_REGISTRY`):** Defines 5 Mars coordinate systems with explicit ellipsoid/sphere parameters ($a=3,396,190\,\text{m}$, $b=3,376,200\,\text{m}$ for `IAU2000:49900` / `MARS:IAU2015_49900`, and $R=3,396,190\,\text{m}$ for `IAU2000:MARS_SPHERE` / `MARS:GALE_EQUIRECTANGULAR` / `MARS:HIRISE_LOCAL_EQC`).
+- **Latitude & Longitude Conventions:** Planetocentric ($\phi_c$) and Planetographic ($\phi_g$) latitudes differ by up to $\sim 0.34^\circ$ ($\sim 20\,\text{km}$) at mid-latitudes due to Mars polar flattening ($a-b = 19,990\,\text{m}$) and are converted via $\tan\phi_c = (b^2/a^2)\tan\phi_g$.
+- **Vertical Datum Separation (`VerticalDatumKind`):** Distinguishes `AREOID_RELATIVE_ELEVATION` (MOLA equipotential gravity surface), `ELLIPSOID_RELATIVE_ELEVATION`, `REFERENCE_SPHERE_ELEVATION`, `PRODUCT_SPECIFIC_VERTICAL_DATUM`, and `UNKNOWN_VERTICAL_REFERENCE`. Direct elevation subtraction across incompatible vertical datums is blocked (`requires_validated_transformation=True`) unless a validated offset is supplied. Optical reflectance DN/I/F values are never treated as elevation.
+
+### 2. 12-Step Multi-Mission Spatial Registration & Uncertainty
+- Evaluates 12 ordered steps (`verify_product_metadata`, `validate_mars_crs`, `evaluate_vertical_datum`, `extract_exact_spatial_footprints`, `compute_spatial_overlap`, `assess_pixel_grid_alignment`, `assess_resolution_compatibility`, `assess_temporal_compatibility`, `execute_applicable_registration_methods`, `quantify_registration_error_honestly`, `preserve_transformation_provenance`, `determine_analysis_suitability`).
+- **Physics Modality Guard:** Raw image cross-correlation (`feature_based_image_registration`) between a DEM (elevation meters) and an optical orthoimage (radiometric reflectance DN) is skipped as physically invalid (`skipped_incompatible_physics`).
+- **Correlated Error Honesty:** Products derived from the same HiRISE stereo bundle (`DTEEC_009149_1750` and `PSP_009149_1750_ORTHO`) share bundle tie-points (`independence_assumption_valid=False`). Horizontal 1-sigma geolocation accuracy is never fabricated from pixel GSD (`total_uncertainty_computable=False` when source headers omit horizontal sigma).
+
+### 3. True Swath Footprints, 6-Category Coverage & Explicit Evidence Gaps
+- **Swath vs. Bounding Box:** Oblique orbital stereo pairs leave triangular NoData regions inside their axis-aligned bounding boxes (`hirise_dteec_009149_1750` valid swath = `70.9%` of outer bbox). `point_intersects_footprint(..., require_valid_pixels_if_known=True)` excludes oblique NoData corners (`bbox_only_outside_valid_swath_pixels`) from target evaluation, routing DEM selection, and co-registered coverage claims.
+- **Equal-Area Calculation:** Footprint and overlap areas are computed in a centered Mars Lambert Azimuthal Equal-Area projection (`+proj=laea +R=3396190`).
+- **5-Stage Coverage & Gap Polygons:** Coverage is tracked across 6 categories (`elevation`, `optical`, `spectral`, `thermal`, `rover`, `environmental`) and 5 stages (`product_footprint`, `valid_pixel`, `calibrated_data`, `spatially_registered`, `scientifically_eligible`). Exact areal coverage percentages are suppressed when only approximate catalog bounding boxes or point rover records exist. Every `SpatialGapRegion` enforces `never_implies_feature_absence=True`.
+
+### 4. Multi-Resolution Terrain, Temporal Change Gating & Morphology Review
+- **Nyquist Observability:** Features smaller than $2.5\times$ native pixel spacing (and 3×3 Horn slopes below $3\times$ pixel spacing) are classified as `below_effective_resolution`. Unknown/NoData terrain is never classified as traversable, and coarse MOLA DEMs ($463\,\text{m/px}$) never imply the absence of meter-scale obstacles.
+- **6-Gate Temporal Change Assessment:** `evaluate_terrain_change` requires passing all 6 gates (spatial registration, vertical datum compatibility, distinct acquisition epochs, resolution compatibility $\le 4\times$, valid pixel overlap, and propagated vertical uncertainty threshold); otherwise it returns `CHANGE_NOT_EVALUABLE`.
+- **Morphology Candidates & Human Review:** Candidate landforms (`LINEAR_RIDGE`, `POLYGONAL_RIDGE_NETWORK`, `FRACTURE_LIKE_LINEAMENT`, `SCARP`, `DEPRESSION`, `CRATER_RIM`, etc.) require resolution gating (`BOULDER` blocked at $1.0\,\text{m/px}$ since it requires $\le 0.35\,\text{m/px}$) and a 2-pixel binary dilation NoData border guard (`rejected_nodata_border_candidates`). Human reviews are persisted atomically with `classification="USER_PROVIDED"` and `updated_epistemic_state="EXPERT_INTERPRETATION"` (never as confirmed mineralogy).
+
+### 5. Scale-Aware Rover-to-Orbital Association
+- `evaluate_rover_orbital_association` separates `rover_position`, `camera_pointing`, `target_location`, `instrument_footprint_m` (e.g., APXS $\sim 17\,\text{mm}$, ChemCam LIBS $\sim 0.4\,\text{mm}$), and `sample_location`. Because a millimeter/centimeter rover spot samples a minute fraction of a $1\,\text{m}$ HiRISE or $18\,\text{m}$ CRISM pixel (`scale_disparity_ratio = 59.4x` for APXS vs HiRISE), `confirms_entire_orbital_pixel` is strictly `False`.

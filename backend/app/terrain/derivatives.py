@@ -64,6 +64,10 @@ class MultiScaleTerrainResponse(BaseModel):
     aspect_deg: Optional[float] = None
     profile_curvature_inv_m: Optional[float] = None
     planform_curvature_inv_m: Optional[float] = None
+    surface_normal_enu: Optional[Dict[str, float]] = None
+    elevation_variability_m: Optional[MultiScaleMetricEntry] = None
+    terrain_observability: Optional[str] = None
+    native_resolution_m: Optional[float] = None
     tri_fine_m: Optional[MultiScaleMetricEntry] = None
     tri_medium_m: Optional[MultiScaleMetricEntry] = None
     tpi_m: Optional[MultiScaleMetricEntry] = None
@@ -198,9 +202,11 @@ def analyze_multiscale_terrain_point(
         a_raw = float(aspect_arr[lr, lc]) if np.isfinite(aspect_arr[lr, lc]) else None
         aspect_val = None if (a_raw is None or a_raw == -1.0) else round(a_raw, 3)
 
-        # Evans (1979) 3x3 curvature when all 9 cells are valid
+        # Evans (1979) 3x3 curvature + ENU surface normal + local elevation variability when 3x3 valid
         prof_curv: Optional[float] = None
         plan_curv: Optional[float] = None
+        surf_normal: Optional[Dict[str, float]] = None
+        elev_var_entry: Optional[MultiScaleMetricEntry] = None
         if 1 <= lr < patch_clean.shape[0] - 1 and 1 <= lc < patch_clean.shape[1] - 1:
             nb = patch_clean[lr - 1 : lr + 2, lc - 1 : lc + 2]
             if np.all(np.isfinite(nb)):
@@ -210,6 +216,22 @@ def analyze_multiscale_terrain_point(
                 L = 0.5 * (dx_m + dy_m)
                 p = ((z3 + z6 + z9) - (z1 + z4 + z7)) / (6.0 * L)
                 q = ((z1 + z2 + z3) - (z7 + z8 + z9)) / (6.0 * L)
+                n_den = math.sqrt(p * p + q * q + 1.0)
+                surf_normal = {
+                    "nx_east": round(float(-p / n_den), 5),
+                    "ny_north": round(float(-q / n_den), 5),
+                    "nz_up": round(float(1.0 / n_den), 5),
+                }
+                elev_var_entry = MultiScaleMetricEntry(
+                    metric_name="Elevation Variability (3x3 std)",
+                    value=round(float(np.std(nb)), 4),
+                    units="meters",
+                    classification=ScientificDataClassification.MARSCOPE_DERIVED,
+                    actual_window_dimensions_m={"width_m": round(3.0 * dx_m, 3), "height_m": round(3.0 * dy_m, 3)},
+                    native_resolution_m=round(native_res_m, 3),
+                    processing_resolution_m=round(0.5 * (dx_m + dy_m), 3),
+                    status="valid",
+                )
                 r_c = (z1 + z3 + z4 + z6 + z7 + z9 - 2.0 * (z2 + z5 + z8)) / (3.0 * L * L)
                 t_c = (z1 + z2 + z3 + z7 + z8 + z9 - 2.0 * (z4 + z5 + z6)) / (3.0 * L * L)
                 s_c = (z3 + z7 - z1 - z9) / (4.0 * L * L)
@@ -416,6 +438,11 @@ def analyze_multiscale_terrain_point(
             ],
         )
 
+        obs_cls = (
+            "partial_boundary_or_nodata"
+            if slope_val is None
+            else ("coarse_regional_only_subpixel_features_unresolved" if native_res_m > 50.0 else "resolvable_at_native_scale")
+        )
         return MultiScaleTerrainResponse(
             available=True,
             dataset_id=ds.id,
@@ -428,6 +455,10 @@ def analyze_multiscale_terrain_point(
             aspect_deg=aspect_val,
             profile_curvature_inv_m=prof_curv,
             planform_curvature_inv_m=plan_curv,
+            surface_normal_enu=surf_normal,
+            elevation_variability_m=elev_var_entry,
+            terrain_observability=obs_cls,
+            native_resolution_m=round(native_res_m, 3),
             tri_fine_m=tri_fine,
             tri_medium_m=tri_med,
             tpi_m=tpi_entry,

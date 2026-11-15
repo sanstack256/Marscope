@@ -3,11 +3,12 @@ MARSCOPE 3D Terrain Mesh & Ortho/Overlay Texture Endpoints
 Serves LOD heightfield mesh tiles, Cesium heightgrids, and georeferenced ortho/derivative PNGs.
 """
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 
-from app.services.container import terrain_mesh_service
+from app.core.security import validate_identifier, verify_operator_auth
+from app.services.container import spatial_delivery_service, terrain_mesh_service
 from app.terrain.mesh import (
     HeightGridResponse,
     TerrainMeshManifestResponse,
@@ -139,3 +140,27 @@ async def get_terrain_texture(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/mesh/cache/status")
+async def get_mesh_cache_status() -> Dict[str, Any]:
+    return spatial_delivery_service.get_cache_status()
+
+
+@router.post("/mesh/cache/invalidate")
+async def invalidate_mesh_cache(
+    request: Request,
+    dataset_id: Optional[str] = Query(None),
+    reason: str = Query("mesh_operator_invalidation", max_length=200),
+) -> Dict[str, Any]:
+    verify_operator_auth(
+        request,
+        fail_closed_when_unconfigured=True,
+        operation_name="mesh cache invalidation",
+    )
+    did = validate_identifier(dataset_id, field_name="dataset_id") if dataset_id else None
+    return spatial_delivery_service.invalidate_cache(
+        dataset_id=did,
+        reason=reason,
+        operator="operator",
+    ).model_dump()

@@ -32,6 +32,7 @@ import { API_BASE_URL } from "../../lib/constants";
 import { useLayerStore } from "../../stores/useLayerStore";
 import { useMissionStore } from "../../stores/useMissionStore";
 import { useRoutingStore } from "../../stores/useRoutingStore";
+import { useSpatialStore } from "../../stores/useSpatialStore";
 import {
   type MultiScaleTerrainResponse,
   type OpticalAnalysisResponse,
@@ -46,7 +47,7 @@ import {
   SpeciesRecord,
 } from "../../types";
 
-type ExplorerTab = "layers" | "inspect" | "minerals";
+type ExplorerTab = "layers" | "inspect" | "minerals" | "spatial";
 
 export default function SurfaceExplorerPage() {
   const [activeTab, setActiveTab] = useState<ExplorerTab>("layers");
@@ -256,6 +257,41 @@ export default function SurfaceExplorerPage() {
   const targetsLoaded = useRoutingStore((s) => s.targetsLoaded);
   const fetchAvailableTargets = useRoutingStore((s) => s.fetchAvailableTargets);
 
+  const footprints = useSpatialStore((s) => s.footprints);
+  const intersectingFootprints = useSpatialStore((s) => s.intersectingFootprints);
+  const coverageReport = useSpatialStore((s) => s.coverageReport);
+  const activeRegistration = useSpatialStore((s) => s.activeRegistration);
+  const morphologyReport = useSpatialStore((s) => s.morphologyReport);
+  const roverAssociations = useSpatialStore((s) => s.roverAssociations);
+  const selectedEntity = useSpatialStore((s) => s.selectedEntity);
+  const setSelectedEntity = useSpatialStore((s) => s.setSelectedEntity);
+  const showFootprintsOverlay = useSpatialStore((s) => s.showFootprintsOverlay);
+  const showGapsOverlay = useSpatialStore((s) => s.showGapsOverlay);
+  const showMorphologyOverlay = useSpatialStore((s) => s.showMorphologyOverlay);
+  const showRoverAssocOverlay = useSpatialStore((s) => s.showRoverAssocOverlay);
+  const setOverlayFlag = useSpatialStore((s) => s.setOverlayFlag);
+  const comparisonMode = useSpatialStore((s) => s.comparisonMode);
+  const setComparisonMode = useSpatialStore((s) => s.setComparisonMode);
+  const fetchFootprints = useSpatialStore((s) => s.fetchFootprints);
+  const fetchIntersectingFootprints = useSpatialStore((s) => s.fetchIntersectingFootprints);
+  const evaluateCoverage = useSpatialStore((s) => s.evaluateCoverage);
+  const evaluateRegistration = useSpatialStore((s) => s.evaluateRegistration);
+  const detectMorphology = useSpatialStore((s) => s.detectMorphology);
+  const submitMorphologyReview = useSpatialStore((s) => s.submitMorphologyReview);
+  const fetchRoverAssociations = useSpatialStore((s) => s.fetchRoverAssociations);
+  const loadingMorphology = useSpatialStore((s) => s.loadingMorphology);
+  const loadingRegistration = useSpatialStore((s) => s.loadingRegistration);
+  const loadingCoverage = useSpatialStore((s) => s.loadingCoverage);
+  const spatialError = useSpatialStore((s) => s.error);
+  const spatialStatusBanner = useSpatialStore((s) => s.statusBanner);
+
+  useEffect(() => {
+    void fetchFootprints();
+    void fetchIntersectingFootprints();
+    void evaluateCoverage();
+    void fetchRoverAssociations();
+  }, [fetchFootprints, fetchIntersectingFootprints, evaluateCoverage, fetchRoverAssociations]);
+
   useEffect(() => {
     if (!targetsLoaded) {
       void fetchAvailableTargets();
@@ -420,11 +456,18 @@ export default function SurfaceExplorerPage() {
             <span>Sync Layers</span>
           </button>
           <Link
+            href="/spatial-intelligence"
+            className="flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1.5 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-cyan-200 transition-colors"
+          >
+            <Layers className="w-3.5 h-3.5 text-cyan-300" />
+            <span>Spatial Workbench →</span>
+          </Link>
+          <Link
             href="/evidence"
             className="flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1.5 rounded-lg bg-[#161c2b] hover:bg-[#1e263a] border border-[#252f44] text-slate-300 transition-colors"
           >
             <Database className="w-3.5 h-3.5 text-[#38bdf8]" />
-            <span>Evidence & Ingestion</span>
+            <span>Evidence &amp; Ingestion</span>
           </Link>
         </div>
       </div>
@@ -434,42 +477,55 @@ export default function SurfaceExplorerPage() {
         {/* Side Workbench Drawer */}
         <div className="lg:col-span-4 xl:col-span-3 bg-[#121622] border border-[#1e2638] rounded-xl flex flex-col min-h-0 overflow-hidden">
           {/* Workbench Tabs */}
-          <div className="grid grid-cols-3 border-b border-[#1e2638] bg-[#0e121b]">
+          <div className="grid grid-cols-4 border-b border-[#1e2638] bg-[#0e121b]">
             <button
               type="button"
               onClick={() => setActiveTab("layers")}
-              className={`py-2.5 px-2 text-[11px] font-semibold flex items-center justify-center gap-1.5 border-b-2 transition-colors ${
+              className={`py-2.5 px-1.5 text-[11px] font-semibold flex items-center justify-center gap-1 border-b-2 transition-colors ${
                 activeTab === "layers"
                   ? "border-[#e25b38] text-slate-100 bg-[#141927]"
                   : "border-transparent text-slate-400 hover:text-slate-200"
               }`}
             >
-              <Layers className="w-3.5 h-3.5" />
+              <Layers className="w-3 h-3" />
               <span>Layers ({availableLayers.length})</span>
             </button>
             <button
               type="button"
               onClick={() => setActiveTab("inspect")}
-              className={`py-2.5 px-2 text-[11px] font-semibold flex items-center justify-center gap-1.5 border-b-2 transition-colors ${
+              className={`py-2.5 px-1.5 text-[11px] font-semibold flex items-center justify-center gap-1 border-b-2 transition-colors ${
                 activeTab === "inspect"
                   ? "border-[#e25b38] text-slate-100 bg-[#141927]"
                   : "border-transparent text-slate-400 hover:text-slate-200"
               }`}
             >
-              <Crosshair className="w-3.5 h-3.5" />
+              <Crosshair className="w-3 h-3" />
               <span>Inspect</span>
             </button>
             <button
               type="button"
               onClick={() => setActiveTab("minerals")}
-              className={`py-2.5 px-2 text-[11px] font-semibold flex items-center justify-center gap-1.5 border-b-2 transition-colors ${
+              className={`py-2.5 px-1.5 text-[11px] font-semibold flex items-center justify-center gap-1 border-b-2 transition-colors ${
                 activeTab === "minerals"
                   ? "border-[#e25b38] text-slate-100 bg-[#141927]"
                   : "border-transparent text-slate-400 hover:text-slate-200"
               }`}
             >
-              <FlaskConical className="w-3.5 h-3.5" />
+              <FlaskConical className="w-3 h-3" />
               <span>Minerals</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("spatial")}
+              data-testid="explorer-spatial-tab"
+              className={`py-2.5 px-1.5 text-[11px] font-semibold flex items-center justify-center gap-1 border-b-2 transition-colors ${
+                activeTab === "spatial"
+                  ? "border-cyan-500 text-cyan-200 bg-[#141927]"
+                  : "border-transparent text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              <Compass className="w-3 h-3" />
+              <span>Spatial</span>
             </button>
           </div>
 
@@ -509,6 +565,7 @@ export default function SurfaceExplorerPage() {
                       const visible = state?.visible ?? false;
                       const opacity = state?.opacity ?? layer.default_opacity;
                       const errCount = state?.tileErrorCount ?? 0;
+                      const fp = footprints.find((f) => f.dataset_id === layer.source_dataset_id);
 
                       return (
                         <div
@@ -520,12 +577,37 @@ export default function SurfaceExplorerPage() {
                           }`}
                         >
                           <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0">
+                            <div className="min-w-0 space-y-1">
                               <div className="text-xs font-semibold text-slate-100 truncate">
                                 {layer.display_name}
                               </div>
                               <div className="text-[10px] font-mono text-slate-400">
                                 {layer.source_product_id} · {layer.spatial_resolution_m ? `${layer.spatial_resolution_m} m/px` : layer.crs}
+                              </div>
+                              <div className="flex flex-wrap items-center gap-1 text-[9px] font-mono">
+                                <span className="px-1.5 py-0.5 rounded bg-[#0d111a] border border-[#243047] text-cyan-300">
+                                  {fp?.coordinate_validation?.validation_state || layer.crs}
+                                </span>
+                                {layer.processing_level && (
+                                  <span className="px-1.5 py-0.5 rounded bg-[#0d111a] border border-[#243047] text-slate-300">
+                                    {layer.processing_level}
+                                  </span>
+                                )}
+                                {fp?.valid_data_fraction != null ? (
+                                  <span
+                                    className="px-1.5 py-0.5 rounded bg-[#0d111a] border border-[#243047] text-emerald-300"
+                                    title={`Swath-to-BBox ratio: ${(fp.swath_to_bbox_ratio! * 100).toFixed(1)}%`}
+                                  >
+                                    Valid {(fp.valid_data_fraction * 100).toFixed(1)}%
+                                  </span>
+                                ) : layer.valid_data_coverage_pct != null ? (
+                                  <span className="px-1.5 py-0.5 rounded bg-[#0d111a] border border-[#243047] text-emerald-300">
+                                    Valid {layer.valid_data_coverage_pct.toFixed(1)}%
+                                  </span>
+                                ) : null}
+                                {layer.acquisition_date && (
+                                  <span className="text-slate-500">{layer.acquisition_date.slice(0, 10)}</span>
+                                )}
                               </div>
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
@@ -1629,6 +1711,277 @@ export default function SurfaceExplorerPage() {
                 )}
               </div>
             )}
+
+            {activeTab === "spatial" && (
+              <div className="space-y-3 text-xs">
+                <div className="p-2.5 rounded-lg bg-[#0d111a] border border-cyan-500/30 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-cyan-200 uppercase text-[10px] tracking-wider">
+                      3D &amp; Globe Spatial Overlays
+                    </span>
+                    <Link
+                      href="/spatial-intelligence"
+                      className="text-[10px] font-mono text-cyan-300 underline hover:text-white"
+                    >
+                      Full Workbench →
+                    </Link>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5 text-[10px] font-mono">
+                    <button
+                      type="button"
+                      onClick={() => setOverlayFlag("showFootprintsOverlay", !showFootprintsOverlay)}
+                      className={`px-2 py-1 rounded border text-left ${
+                        showFootprintsOverlay
+                          ? "bg-cyan-950/60 border-cyan-500/60 text-cyan-200"
+                          : "bg-[#121622] border-[#243047] text-slate-400"
+                      }`}
+                    >
+                      Swaths ({intersectingFootprints.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setOverlayFlag("showGapsOverlay", !showGapsOverlay)}
+                      className={`px-2 py-1 rounded border text-left ${
+                        showGapsOverlay
+                          ? "bg-rose-950/60 border-rose-500/60 text-rose-200"
+                          : "bg-[#121622] border-[#243047] text-slate-400"
+                      }`}
+                    >
+                      Gaps ({coverageReport?.evidence_gaps?.length ?? 0})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setOverlayFlag("showMorphologyOverlay", !showMorphologyOverlay)}
+                      className={`px-2 py-1 rounded border text-left ${
+                        showMorphologyOverlay
+                          ? "bg-amber-950/60 border-amber-500/60 text-amber-200"
+                          : "bg-[#121622] border-[#243047] text-slate-400"
+                      }`}
+                    >
+                      Morphology ({morphologyReport?.candidates?.length ?? 0})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setOverlayFlag("showRoverAssocOverlay", !showRoverAssocOverlay)}
+                      className={`px-2 py-1 rounded border text-left ${
+                        showRoverAssocOverlay
+                          ? "bg-sky-950/60 border-sky-500/60 text-sky-200"
+                          : "bg-[#121622] border-[#243047] text-slate-400"
+                      }`}
+                    >
+                      Rover Assoc ({roverAssociations.length})
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between pt-1 border-t border-[#1e2638] text-[10px] font-mono">
+                    <span className="text-slate-400">Layer Compare:</span>
+                    <div className="flex gap-1">
+                      {(["single", "swipe", "blend"] as const).map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => setComparisonMode(m)}
+                          className={`px-2 py-0.5 rounded uppercase ${
+                            comparisonMode === m
+                              ? "bg-sky-600 text-white font-semibold"
+                              : "bg-[#161c2b] text-slate-400"
+                          }`}
+                        >
+                          {m}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {spatialError && (
+                  <div className="p-2 rounded bg-rose-950/40 border border-rose-800/50 text-[10px] text-rose-200">
+                    {spatialError}
+                  </div>
+                )}
+                {spatialStatusBanner && (
+                  <div className="p-2 rounded bg-emerald-950/40 border border-emerald-700/50 text-[10px] text-emerald-200">
+                    {spatialStatusBanner}
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    disabled={loadingRegistration}
+                    onClick={() =>
+                      void evaluateRegistration({
+                        dataset_a_id: "hirise_dteec_009149_1750",
+                        dataset_b_id: "hirise_psp_009149_1750_ortho",
+                        intended_analysis: "spatial_overlay",
+                      })
+                    }
+                    className="flex-1 py-1.5 px-2 rounded bg-[#161c2b] hover:bg-[#1e263b] border border-[#2a3650] text-[10px] font-mono text-cyan-200 disabled:opacity-50"
+                  >
+                    {loadingRegistration ? "Checking Reg..." : "Check HiRISE Reg"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={loadingMorphology}
+                    onClick={() => {
+                      setOverlayFlag("showMorphologyOverlay", true);
+                      void detectMorphology("hirise_dteec_009149_1750");
+                    }}
+                    className="flex-1 py-1.5 px-2 rounded bg-[#161c2b] hover:bg-[#1e263b] border border-[#2a3650] text-[10px] font-mono text-amber-200 disabled:opacity-50"
+                  >
+                    {loadingMorphology ? "Detecting..." : "Detect Morphology"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={loadingCoverage}
+                    onClick={() => void evaluateCoverage()}
+                    className="py-1.5 px-2 rounded bg-[#161c2b] hover:bg-[#1e263b] border border-[#2a3650] text-[10px] font-mono text-slate-300 disabled:opacity-50"
+                  >
+                    Sync Gaps
+                  </button>
+                </div>
+
+                {selectedEntity && (
+                  <div className="p-2.5 rounded-lg bg-[#151c2c] border border-cyan-500/50 space-y-1.5 text-[10px] font-mono">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-cyan-300 uppercase">
+                        Selected {selectedEntity.kind}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedEntity(null)}
+                        className="text-slate-400 hover:text-white underline"
+                      >
+                        Close
+                      </button>
+                    </div>
+                    {selectedEntity.kind === "footprint" && (
+                      <div className="space-y-1 text-slate-300">
+                        <div className="font-semibold text-white">{selectedEntity.data.product_id}</div>
+                        <div>Method: {selectedEntity.data.extraction_method}</div>
+                        <div>
+                          Valid Fraction:{" "}
+                          {selectedEntity.data.valid_data_fraction != null
+                            ? `${(selectedEntity.data.valid_data_fraction * 100).toFixed(1)}%`
+                            : "Approximate BBox"}
+                        </div>
+                        <div>CRS: {selectedEntity.data.coordinate_validation.validation_state}</div>
+                      </div>
+                    )}
+                    {selectedEntity.kind === "gap" && (
+                      <div className="space-y-1 text-slate-300">
+                        <div className="font-semibold text-rose-300">
+                          {selectedEntity.data.category} · {selectedEntity.data.gap_cause}
+                        </div>
+                        <div>{selectedEntity.data.summary}</div>
+                        <div className="text-amber-300">{selectedEntity.data.interpretation_warning}</div>
+                      </div>
+                    )}
+                    {selectedEntity.kind === "morphology" && (
+                      <div className="space-y-1.5 text-slate-300">
+                        <div className="font-semibold text-amber-200">
+                          {selectedEntity.data.feature_class} ({selectedEntity.data.epistemic_state})
+                        </div>
+                        <div>{selectedEntity.data.descriptive_summary}</div>
+                        <div className="text-[9px] text-amber-300/90">
+                          {selectedEntity.data.geological_interpretation_warning}
+                        </div>
+                        <div className="flex gap-1.5 pt-1">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void submitMorphologyReview({
+                                candidate_id: selectedEntity.data.candidate_id,
+                                dataset_id: selectedEntity.data.source_dataset_ids[0] || "hirise_dteec_009149_1750",
+                                action: "accept",
+                                reviewer_id: "explorer_operator",
+                                annotation_note: "Accepted via Explorer Spatial Inspector",
+                              })
+                            }
+                            className="px-2 py-1 rounded bg-emerald-700/60 hover:bg-emerald-600 text-white"
+                          >
+                            Accept (USER_PROVIDED)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void submitMorphologyReview({
+                                candidate_id: selectedEntity.data.candidate_id,
+                                dataset_id: selectedEntity.data.source_dataset_ids[0] || "hirise_dteec_009149_1750",
+                                action: "reject",
+                                reviewer_id: "explorer_operator",
+                                annotation_note: "Rejected via Explorer Spatial Inspector",
+                              })
+                            }
+                            className="px-2 py-1 rounded bg-rose-800/60 hover:bg-rose-700 text-white"
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {selectedEntity.kind === "rover_assoc" && (
+                      <div className="space-y-1 text-slate-300">
+                        <div className="font-semibold text-sky-200">
+                          {selectedEntity.data.instrument} ({selectedEntity.data.association_state})
+                        </div>
+                        <div>Semantic: {selectedEntity.data.location_semantic_type}</div>
+                        <div>
+                          Confirms entire pixel:{" "}
+                          <strong className="text-amber-300">
+                            {String(selectedEntity.data.confirms_entire_orbital_pixel)}
+                          </strong>
+                        </div>
+                        <div className="text-[9px] text-slate-400">
+                          {selectedEntity.data.scale_disparity_statement}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {activeRegistration && (
+                  <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1e2638] space-y-1 text-[10px] font-mono">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-400">Registration Pair</span>
+                      <span className="px-1.5 py-0.5 rounded bg-cyan-950/60 border border-cyan-700/50 text-cyan-200">
+                        {activeRegistration.overall_state}
+                      </span>
+                    </div>
+                    <div className="text-slate-200">
+                      {activeRegistration.dataset_a_id} ↔ {activeRegistration.dataset_b_id}
+                    </div>
+                    <div className="text-slate-400">
+                      Overlap: {activeRegistration.footprint_overlap_status} · Rel σ:{" "}
+                      {activeRegistration.uncertainty_breakdown.relative_alignment_uncertainty_m != null
+                        ? `±${activeRegistration.uncertainty_breakdown.relative_alignment_uncertainty_m.toFixed(2)} m`
+                        : "Withheld"}
+                    </div>
+                  </div>
+                )}
+
+                {coverageReport && (
+                  <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1e2638] space-y-1.5 text-[10px] font-mono">
+                    <div className="text-slate-300 font-semibold">
+                      6-Category Coverage &amp; Gaps ({coverageReport.evidence_gaps.length})
+                    </div>
+                    {coverageReport.evidence_gaps.slice(0, 4).map((g) => (
+                      <button
+                        key={g.gap_id}
+                        type="button"
+                        onClick={() => setSelectedEntity({ kind: "gap", data: g })}
+                        className="w-full text-left p-1.5 rounded bg-[#141a29] hover:bg-[#1a2236] border border-[#243047] space-y-0.5"
+                      >
+                        <div className="flex items-center justify-between text-rose-300">
+                          <span>{g.category}</span>
+                          <span>{g.gap_cause}</span>
+                        </div>
+                        <div className="text-[9px] text-slate-400 truncate">{g.summary}</div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
@@ -1681,7 +2034,7 @@ export default function SurfaceExplorerPage() {
           >
             {(viewportMode === "local3d" || viewportMode === "split") && (
               <div className="min-h-[380px] h-full">
-                <LocalTerrain3DViewer targets={storeTargets} />
+                <LocalTerrain3DViewer targets={storeTargets} showSpatialTools={true} />
               </div>
             )}
             {(viewportMode === "globe" || viewportMode === "split") && (

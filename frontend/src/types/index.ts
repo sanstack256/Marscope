@@ -2936,3 +2936,510 @@ export interface CampaignDossierExport {
   recorded_field_observations: Array<Record<string, unknown>>;
   archive_comparisons: Array<Record<string, unknown>>;
 }
+
+// --- Prompt 19: High-Fidelity Multi-Mission Spatial Intelligence Types ---
+
+export interface CrsValidationResult {
+  input_crs: string | null;
+  canonical_identifier: string | null;
+  valid: boolean;
+  validation_state: string;
+  crs_category: string;
+  planetary_body: string;
+  shape_type: string | null;
+  semi_major_axis_m: number | null;
+  semi_minor_axis_m: number | null;
+  latitude_convention: string;
+  longitude_convention: string;
+  vertical_reference: string;
+  is_projected: boolean;
+  blockers: string[];
+  warnings: string[];
+  limitations: string[];
+  verified_event_method: string | null;
+  verified_at_utc: string | null;
+}
+
+export interface VerticalDatumComparisonResult {
+  compatible: boolean;
+  validation_state: string;
+  datum_a: string;
+  datum_b: string;
+  is_absolute_elevation_a: boolean;
+  is_absolute_elevation_b: boolean;
+  requires_validated_transformation: boolean;
+  explanation: string;
+  warnings: string[];
+}
+
+export interface CoordinateTransformationResult {
+  success: boolean;
+  validation_state: string;
+  source_crs: string;
+  target_crs: string;
+  algorithm: string;
+  library: string;
+  library_version: string;
+  input_coordinates: Record<string, number>;
+  output_coordinates: Record<string, number> | null;
+  axis_order: string;
+  longitude_normalization: string;
+  latitude_convention_in: string;
+  latitude_convention_out: string;
+  ellipsoid_assumptions: string;
+  vertical_reference_in: string;
+  vertical_reference_out: string;
+  vertical_compatible: boolean;
+  known_error_or_limitation: string | null;
+  failure_reason: string | null;
+  provenance_steps: string[];
+}
+
+export interface GeoJsonGeometry {
+  type: string;
+  coordinates: unknown;
+}
+
+export interface SpatialFootprintRecord {
+  dataset_id: string;
+  product_id: string;
+  mission: string;
+  instrument: string;
+  category: string;
+  crs: string;
+  coordinate_validation: CrsValidationResult;
+  extraction_method: string;
+  is_approximate: boolean;
+  geometry_valid: boolean;
+  repair_applied: boolean;
+  antimeridian_split: boolean;
+  original_bounds: Record<string, number> | null;
+  footprint_geojson: GeoJsonGeometry | null;
+  valid_data_geojson: GeoJsonGeometry | null;
+  invalid_nodata_geojson: GeoJsonGeometry | null;
+  product_footprint_area_m2: number | null;
+  valid_data_area_m2: number | null;
+  invalid_nodata_area_m2: number | null;
+  valid_data_fraction: number | null;
+  bbox_area_m2: number | null;
+  swath_to_bbox_ratio: number | null;
+  area_calculation_method: string;
+  horizontal_resolution_m: number | null;
+  vertical_resolution_m: number | null;
+  pixel_grid_shape: number[] | null;
+  data_quality_coverage: string;
+  has_local_artifact: boolean;
+  source_sha256: string | null;
+  processing_history: string[];
+  limitations: string[];
+  classification: string;
+}
+
+export interface PixelAlignmentMetrics {
+  evaluated_locally: boolean;
+  crs_exact_string_match: boolean;
+  transform_origin_offset_m: number | null;
+  subpixel_phase_offset_px: number | null;
+  resolution_a_m: number | null;
+  resolution_b_m: number | null;
+  resolution_ratio: number | null;
+  grid_alignment_status: string;
+  note: string;
+}
+
+export interface RegistrationMethodExecution {
+  method_name: string;
+  algorithm: string;
+  input_data: string;
+  control_points_count: number;
+  valid_correspondences: number;
+  rejected_correspondences: number;
+  residual_error_px: number | null;
+  residual_error_m: number | null;
+  spatial_distribution_of_residuals: string | null;
+  transformation_model: string | null;
+  validation_result: string;
+  failure_reason: string | null;
+}
+
+export interface RegistrationUncertaintyBreakdown {
+  source_geolocation_uncertainty_a_m: number | null;
+  source_geolocation_uncertainty_b_m: number | null;
+  control_point_uncertainty_m: number | null;
+  transformation_residual_m: number | null;
+  pixel_quantization_half_px_a_m: number | null;
+  pixel_quantization_half_px_b_m: number | null;
+  resampling_effect_note: string | null;
+  relative_alignment_uncertainty_m: number | null;
+  independence_assumption_valid: boolean;
+  independence_rationale: string;
+  total_uncertainty_computable: boolean;
+  uncertainty_gap_reason: string | null;
+}
+
+export interface RegistrationStepTrace {
+  step_number: number;
+  step_name: string;
+  status: string;
+  detail: string;
+}
+
+export interface SpatialRegistrationAssessment {
+  assessment_version: string;
+  crs_registry_version: string;
+  dataset_a_id: string;
+  dataset_b_id: string;
+  product_a_id: string;
+  product_b_id: string;
+  intended_analysis: string;
+  overall_state: string;
+  suitable_for_intended_analysis: boolean;
+  crs_compatible: boolean;
+  crs_a_validation: CrsValidationResult;
+  crs_b_validation: CrsValidationResult;
+  vertical_datum_comparison: VerticalDatumComparisonResult | null;
+  footprint_overlap_status: string;
+  overlap_area_m2: number | null;
+  overlap_fraction_of_a: number | null;
+  overlap_fraction_of_b: number | null;
+  bbox_overlapped_while_valid_pixels_disjoint: boolean;
+  pixel_alignment: PixelAlignmentMetrics;
+  resolution_compatibility: string;
+  temporal_compatibility: string;
+  absolute_geolocation_accuracy: string;
+  relative_registration_accuracy: string;
+  registration_methods_attempted: RegistrationMethodExecution[];
+  uncertainty_breakdown: RegistrationUncertaintyBreakdown;
+  workflow_steps: RegistrationStepTrace[];
+  limitations: string[];
+  required_corrective_actions: string[];
+  classification: string;
+}
+
+export interface CategorySpatialCoverage {
+  category: string;
+  matching_product_ids: string[];
+  local_verified_product_ids: string[];
+  best_native_resolution_m: number | null;
+  study_area_m2: number;
+  product_footprint_area_m2: number;
+  valid_pixel_area_m2: number;
+  calibrated_data_area_m2: number;
+  spatially_registered_area_m2: number;
+  scientifically_eligible_area_m2: number;
+  product_footprint_fraction: number | null;
+  valid_pixel_fraction: number | null;
+  calibrated_data_fraction: number | null;
+  spatially_registered_fraction: number | null;
+  scientifically_eligible_fraction: number | null;
+  has_approximate_footprints: boolean;
+  only_approximate_footprints: boolean;
+  percentage_reporting_policy: string;
+  rover_point_observation_count: number;
+  footprint_union_geojson: GeoJsonGeometry | null;
+  valid_pixel_union_geojson: GeoJsonGeometry | null;
+  limitations: string[];
+}
+
+export interface SpatialGapRegion {
+  gap_id: string;
+  category: string;
+  gap_cause: string;
+  area_m2: number;
+  area_fraction_of_study_region: number;
+  contributing_product_ids: string[];
+  summary: string;
+  never_implies_feature_absence: boolean;
+  interpretation_warning: string;
+  recommended_action: string;
+  geometry_geojson: GeoJsonGeometry | null;
+}
+
+export interface MultiCategorySpatialCoverageReport {
+  study_bounds: Record<string, number>;
+  study_area_m2: number;
+  area_calculation_method: string;
+  reference_dataset_id: string | null;
+  intended_resolution_threshold_m: number;
+  question_focus: string | null;
+  categories: Record<string, CategorySpatialCoverage>;
+  evidence_gaps: SpatialGapRegion[];
+  overall_limitations: string[];
+  classification: string;
+}
+
+export interface NativeDemMetadataRecord {
+  dataset_id: string;
+  product_id: string;
+  native_pixel_spacing_m: number | null;
+  horizontal_crs: string;
+  crs_validation: CrsValidationResult;
+  vertical_datum: string;
+  vertical_datum_description: string;
+  elevation_units: string;
+  nodata_value: number | null;
+  source_uncertainty_vertical_m: number | null;
+  pixel_registration: string;
+  processing_level: string;
+  source_provenance: string;
+  source_sha256: string | null;
+  raster_dimensions: number[] | null;
+  has_overviews: boolean;
+  overview_factors: number[];
+}
+
+export interface TerrainScaleObservabilityReport {
+  dataset_id: string;
+  native_resolution_m: number | null;
+  nyquist_resolvable_feature_m: number | null;
+  min_3x3_slope_baseline_m: number | null;
+  resolvable_features: string[];
+  below_effective_resolution: string[];
+  noise_or_interpolation_affected: string[];
+  unavailable_due_to_nodata_or_resolution: string[];
+  unknown_terrain_policy: string;
+  coarse_absence_policy: string;
+}
+
+export interface TerrainDerivativeMetadata {
+  derivative_name: string;
+  available: boolean;
+  valid_reason: string | null;
+  input_dem_id: string;
+  input_product_id: string;
+  native_resolution_m: number;
+  processing_resolution_m: number;
+  resampling_applied: boolean;
+  resampling_method: string | null;
+  window_or_physical_scale: string;
+  algorithm: string;
+  algorithm_version: string;
+  edge_treatment: string;
+  nodata_handling: string;
+  units: string;
+  uncertainty_treatment: string;
+  processing_provenance: string[];
+  stats: Record<string, number | null>;
+}
+
+export interface WindowedTerrainDerivativesReport {
+  dataset_metadata: NativeDemMetadataRecord;
+  requested_bounds: Record<string, number>;
+  grid_shape: number[];
+  valid_pixel_count: number;
+  nodata_pixel_count: number;
+  valid_coverage_fraction: number;
+  resampling_applied: boolean;
+  resampling_method: string | null;
+  observability: TerrainScaleObservabilityReport;
+  derivatives: Record<string, TerrainDerivativeMetadata>;
+  observability_class_counts: Record<string, number>;
+  classification: string;
+}
+
+export interface ScaleComparisonEntry {
+  dataset_id: string;
+  product_id: string;
+  scale_category: string;
+  native_resolution_m: number;
+  vertical_datum: string;
+  valid_pixel_count: number;
+  valid_coverage_fraction: number;
+  elevation_min_m: number | null;
+  elevation_max_m: number | null;
+  elevation_mean_m: number | null;
+  slope_mean_deg: number | null;
+  slope_p95_deg: number | null;
+  tri_mean_m: number | null;
+  smoothing_attenuation_note: string;
+}
+
+export interface MultiScaleTerrainComparisonResponse {
+  study_bounds: Record<string, number>;
+  compared_datasets: ScaleComparisonEntry[];
+  pairwise_cross_scale_deltas: Array<Record<string, unknown>>;
+  never_interprets_scale_diff_as_temporal_change: boolean;
+  scientific_explanation: string;
+  limitations: string[];
+}
+
+export interface ChangeGateStatus {
+  gate_name: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface TerrainChangeEvaluationResult {
+  dataset_a_id: string;
+  dataset_b_id: string;
+  study_bounds: Record<string, number>;
+  status: string;
+  evaluable: boolean;
+  gates: ChangeGateStatus[];
+  failure_reasons: string[];
+  propagated_vertical_uncertainty_1sigma_m: number | null;
+  observed_mean_delta_m: number | null;
+  observed_max_abs_delta_m: number | null;
+  significant_change_pixel_fraction: number | null;
+  limitations: string[];
+}
+
+export interface MorphologyReviewRecord {
+  candidate_id: string;
+  dataset_id: string;
+  action: string;
+  reviewer_id: string;
+  reviewed_at_utc: string;
+  updated_epistemic_state: string;
+  classification: string;
+  origin_note: string;
+  annotation_note: string | null;
+  assigned_feature_class: string | null;
+}
+
+export interface MorphologicalFeatureCandidate {
+  candidate_id: string;
+  feature_class: string;
+  epistemic_state: string;
+  classification: string;
+  source_dataset_ids: string[];
+  source_product_ids: string[];
+  supporting_evidence_modalities: string[];
+  centroid_lat: number;
+  centroid_lon_east: number;
+  bounds: Record<string, number>;
+  geometry_geojson: GeoJsonGeometry;
+  measurable_geometry: Record<string, number | null>;
+  min_required_resolution_m: number;
+  observed_resolution_m: number;
+  detection_method: string;
+  descriptive_summary: string;
+  geological_interpretation_warning: string;
+  nodata_border_rejected: boolean;
+  rejection_reason: string | null;
+  review_status: string;
+  human_review: MorphologyReviewRecord | null;
+}
+
+export interface ResolutionGatedFeatureClassNotice {
+  feature_class: string;
+  detectable: boolean;
+  required_max_resolution_m: number;
+  available_resolution_m: number | null;
+  reason: string;
+}
+
+export interface MorphologyDetectionResponse {
+  dataset_id: string;
+  ortho_dataset_id: string | null;
+  bounds: Record<string, number>;
+  engine_version: string;
+  dem_resolution_m: number | null;
+  ortho_resolution_m: number | null;
+  valid_dem_coverage_fraction: number;
+  valid_ortho_coverage_fraction: number;
+  nodata_border_guard_px: number;
+  candidates: MorphologicalFeatureCandidate[];
+  rejected_nodata_border_candidates: MorphologicalFeatureCandidate[];
+  resolution_gating: ResolutionGatedFeatureClassNotice[];
+  limitations: string[];
+  persisted_review_count: number;
+}
+
+export interface RoverLocationComponents {
+  rover_position: Record<string, unknown> | null;
+  camera_pointing: Record<string, unknown> | null;
+  target_location: Record<string, unknown> | null;
+  instrument_footprint_m: number | null;
+  sample_location: Record<string, unknown> | null;
+  effective_reference_point: Record<string, number> | null;
+}
+
+export interface RoverOrbitalAssociationRecord {
+  association_version: string;
+  observation_id: string;
+  mission: string;
+  instrument: string;
+  product_id: string;
+  orbital_dataset_id: string;
+  orbital_product_id: string;
+  target_or_feature_id: string | null;
+  association_state: string;
+  location_components: RoverLocationComponents;
+  rover_location_provenance: string;
+  location_semantic_type: string;
+  rover_localization_uncertainty_m: number | null;
+  orbital_registration_uncertainty_m: number | null;
+  spatial_distance_to_feature_m: number | null;
+  acquisition_sol: number | null;
+  acquisition_time: string | null;
+  instrument_measurement_type: string;
+  observation_footprint_m: number | null;
+  orbital_pixel_footprint_m: number | null;
+  scale_disparity_ratio: number | null;
+  confirms_entire_orbital_pixel: boolean;
+  scale_disparity_statement: string;
+  limitations: string[];
+  classification: string;
+}
+
+export interface ScalePyramidTier {
+  tier_name: string;
+  dataset_id: string;
+  product_id: string;
+  modality: string;
+  native_resolution_m: number;
+  min_viewport_span_m: number;
+  max_viewport_span_m: number;
+  recommended_grid_dim: number;
+  intersects_viewport: boolean;
+  has_overviews: boolean;
+  overview_factors: number[];
+  resampling_warning: string | null;
+}
+
+export interface SourceTransitionWarning {
+  from_dataset_id: string;
+  to_dataset_id: string;
+  transition_span_m: number;
+  resolution_jump_factor: number;
+  vertical_datum_warning: string | null;
+}
+
+export interface MultiResolutionPyramidPlan {
+  bounds: Record<string, number>;
+  viewport_span_m: number;
+  requested_viewport_px: number;
+  target_pixel_size_m: number;
+  selected_dem_dataset_id: string | null;
+  selected_optical_dataset_id: string | null;
+  selected_native_resolution_m: number | null;
+  upsampling_prevented: boolean;
+  available_tiers: ScalePyramidTier[];
+  source_transitions: SourceTransitionWarning[];
+  delivery_constraints: string[];
+  cache_digest_preview: string | null;
+}
+
+export interface CacheInvalidationEvent {
+  invalidated_at_utc: string;
+  scope: string;
+  dataset_id: string | null;
+  cleared_entries: number;
+  reason: string;
+  operator: string;
+}
+
+export interface SpatialCacheStatus {
+  engine_version: string;
+  key_dimensions: string[];
+  mesh_tile_cache: {
+    entries: number;
+    max_entries: number;
+    hits: number;
+    misses: number;
+    [key: string]: unknown;
+  };
+  recent_invalidations: CacheInvalidationEvent[];
+}
+

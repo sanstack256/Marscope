@@ -167,19 +167,33 @@ class ScienceAwareRoutingService:
                 )
             return ds
 
-        # Automatically select highest-resolution local DEM whose footprint covers ALL requested stops
-        for ds in local_dems:
-            cov = ds.coverage
-            if all(
-                cov.min_latitude <= lat <= cov.max_latitude and cov.min_longitude <= lon <= cov.max_longitude
-                for lat, lon in points
-            ):
-                return ds
+        # Automatically select highest-resolution local DEM whose true valid swath footprint covers ALL requested stops
+        from app.geospatial.footprints import get_or_extract_dataset_footprint, point_intersects_footprint
 
-        # Fallback: best DEM overlapping the bounding box centroid
+        ds_root = Path(self.raw_dir).parent
+        for ds in local_dems:
+            try:
+                fp = get_or_extract_dataset_footprint(ds, dataset_root_dir=ds_root)
+                if all(point_intersects_footprint(fp, lat, lon, require_valid_pixels_if_known=True)[0] for lat, lon in points):
+                    return ds
+            except Exception:
+                cov = ds.coverage
+                if all(
+                    cov.min_latitude <= lat <= cov.max_latitude and cov.min_longitude <= lon <= cov.max_longitude
+                    for lat, lon in points
+                ):
+                    return ds
+
+        # Fallback: best DEM overlapping the bounding box / valid swath centroid
         c_lat = sum(p[0] for p in points) / float(len(points))
         c_lon = sum(p[1] for p in points) / float(len(points))
         for ds in local_dems:
+            try:
+                fp = get_or_extract_dataset_footprint(ds, dataset_root_dir=ds_root)
+                if point_intersects_footprint(fp, c_lat, c_lon, require_valid_pixels_if_known=True)[0]:
+                    return ds
+            except Exception:
+                pass
             cov = ds.coverage
             if cov.min_latitude <= c_lat <= cov.max_latitude and cov.min_longitude <= c_lon <= cov.max_longitude:
                 return ds

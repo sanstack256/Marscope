@@ -651,6 +651,7 @@ _INSTRUMENTS: Dict[str, InstrumentCapabilityRecord] = {
             }
         ],
         unresolved_fields=[
+            "Local workspace holds Sol 10 sample (RME_398334213ADR...); continuous multi-sol meteorological time-series is not acquired locally",
             "MODRDR6.FMT boom wind sensor degradation limits horizontal wind validity on later sols",
             "Strictly non-composition instrument; excluded at Stage 2 of mineral chemistry index",
         ],

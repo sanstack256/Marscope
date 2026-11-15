@@ -18,6 +18,7 @@ import {
   ChevronRight,
   ClipboardCheck,
   FlaskConical,
+  Layers,
 } from "lucide-react";
 import { APP_NAME, API_BASE_URL } from "../lib/constants";
 import { useLayerStore } from "../stores/useLayerStore";
@@ -25,6 +26,7 @@ import { useLayerStore } from "../stores/useLayerStore";
 const ICON_MAP: Record<string, React.ElementType> = {
   "/": LayoutDashboard,
   "/explorer": Globe2,
+  "/spatial-intelligence": Layers,
   "/terrain": Mountain,
   "/targets": Telescope,
   "/science-campaign": FlaskConical,
@@ -40,6 +42,7 @@ const ICON_MAP: Record<string, React.ElementType> = {
 const NAV_LINKS = [
   { name: "Mission Overview", href: "/" },
   { name: "Surface Explorer", href: "/explorer", badge: "3D" },
+  { name: "Spatial Intelligence", href: "/spatial-intelligence", badge: "P19" },
   { name: "Terrain Intelligence", href: "/terrain" },
   { name: "Target Explorer", href: "/targets" },
   { name: "Science Campaign", href: "/science-campaign", badge: "SCI" },
