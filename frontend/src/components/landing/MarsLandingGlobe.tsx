@@ -41,19 +41,20 @@ export function MarsLandingGlobe() {
     container.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(36, width / height, 0.1, 100);
-    camera.position.set(0, 0.15, 4.1);
+    const camera = new THREE.PerspectiveCamera(32, width / height, 0.1, 100);
+    camera.position.set(0, 0, 5.15);
+    camera.lookAt(0, 0, 0);
 
-    // Subtle directional solar illumination with dark planetary terminator
-    const sunLight = new THREE.DirectionalLight(0xfff1e0, 2.4);
-    sunLight.position.set(4.5, 1.8, 3.2);
+    // Realistic solar illumination with natural Martian terminator
+    const sunLight = new THREE.DirectionalLight(0xfff7ed, 2.2);
+    sunLight.position.set(4.5, 1.8, 3.4);
     scene.add(sunLight);
 
-    const rimFill = new THREE.DirectionalLight(0xff6a1a, 0.32);
+    const rimFill = new THREE.DirectionalLight(0x6b7280, 0.12);
     rimFill.position.set(-4.0, -1.2, -2.5);
     scene.add(rimFill);
 
-    const ambientLight = new THREE.AmbientLight(0x2a140d, 0.35);
+    const ambientLight = new THREE.AmbientLight(0x292320, 0.28);
     scene.add(ambientLight);
 
     const globeGroup = new THREE.Group();
@@ -65,65 +66,18 @@ export function MarsLandingGlobe() {
     marsTexture.colorSpace = THREE.SRGBColorSpace;
     marsTexture.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
 
-    const sphereGeom = new THREE.SphereGeometry(1.28, 64, 64);
+    const sphereGeom = new THREE.SphereGeometry(1.18, 64, 64);
     const sphereMat = new THREE.MeshStandardMaterial({
       map: marsTexture,
-      roughness: 0.88,
-      metalness: 0.04,
+      roughness: 0.92,
+      metalness: 0.02,
       bumpMap: marsTexture,
-      bumpScale: 0.025,
+      bumpScale: 0.02,
     });
     const marsMesh = new THREE.Mesh(sphereGeom, sphereMat);
     // Start facing Valles Marineris / Tharsis region
     marsMesh.rotation.y = 2.15;
     globeGroup.add(marsMesh);
-
-    // Restrained atmospheric Fresnel rim
-    const atmosGeom = new THREE.SphereGeometry(1.315, 64, 64);
-    const atmosMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: THREE.BackSide,
-      blending: THREE.AdditiveBlending,
-      uniforms: {
-        uColor: { value: new THREE.Color(0xff6a1a) },
-      },
-      vertexShader: `
-        varying vec3 vNormal;
-        varying vec3 vViewPos;
-        void main() {
-          vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-          vNormal = normalize(normalMatrix * normal);
-          vViewPos = -mvPos.xyz;
-          gl_Position = projectionMatrix * mvPos;
-        }
-      `,
-      fragmentShader: `
-        uniform vec3 uColor;
-        varying vec3 vNormal;
-        varying vec3 vViewPos;
-        void main() {
-          float ndotv = clamp(dot(normalize(vNormal), normalize(vViewPos)), -1.0, 1.0);
-          float rim = pow(clamp(0.65 - ndotv, 0.0, 1.0), 3.6);
-          gl_FragColor = vec4(uColor, rim * 0.48);
-        }
-      `,
-    });
-    const atmosMesh = new THREE.Mesh(atmosGeom, atmosMat);
-    globeGroup.add(atmosMesh);
-
-    // Fine orbital ring accent
-    const ringGeom = new THREE.RingGeometry(1.56, 1.572, 128);
-    const ringMat = new THREE.MeshBasicMaterial({
-      color: 0xff6a1a,
-      transparent: true,
-      opacity: 0.24,
-      side: THREE.DoubleSide,
-    });
-    const ringMesh = new THREE.Mesh(ringGeom, ringMat);
-    ringMesh.rotation.x = Math.PI * 0.42;
-    ringMesh.rotation.y = Math.PI * 0.08;
-    globeGroup.add(ringMesh);
 
     // Pointer & touch damped interaction state
     let pointerActive = false;
@@ -199,7 +153,6 @@ export function MarsLandingGlobe() {
 
       marsMesh.rotation.y = idleRotation + currentYawOffset;
       globeGroup.rotation.x = currentPitchOffset;
-      ringMesh.rotation.z += prefersReducedMotion ? 0 : dt * 0.04;
 
       renderer.render(scene, camera);
     };
@@ -216,10 +169,6 @@ export function MarsLandingGlobe() {
 
       sphereGeom.dispose();
       sphereMat.dispose();
-      atmosGeom.dispose();
-      atmosMat.dispose();
-      ringGeom.dispose();
-      ringMat.dispose();
       marsTexture.dispose();
       renderer.dispose();
       if (renderer.domElement.parentNode === container) {
@@ -230,24 +179,19 @@ export function MarsLandingGlobe() {
 
   if (webglUnavailable) {
     return (
-      <div className="relative w-full aspect-square max-w-[500px] mx-auto flex items-center justify-center rounded-full border border-[#242424] bg-[#0B0B0B] overflow-hidden">
+      <div className="relative w-full aspect-square max-w-[460px] mx-auto flex items-center justify-center rounded-full border border-[#242424] bg-[#0B0B0B] overflow-hidden">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/landing/mars-globe.jpg"
           alt="Mars MOLA global terrain map"
-          className="w-full h-full object-cover opacity-85"
+          className="w-full h-full object-cover opacity-90"
         />
-        <div className="absolute inset-0 bg-gradient-to-tr from-[#050505]/80 via-transparent to-[#FF6A1A]/15" />
       </div>
     );
   }
 
   return (
-    <div className="relative w-full aspect-square max-w-[520px] mx-auto select-none">
-      <div
-        className="pointer-events-none absolute inset-6 rounded-full bg-[#FF6A1A]/10 blur-3xl"
-        aria-hidden="true"
-      />
+    <div className="relative w-full aspect-square max-w-[460px] mx-auto select-none">
       <div
         ref={containerRef}
         aria-label="Interactive 3D Mars globe"

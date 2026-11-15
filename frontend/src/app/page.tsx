@@ -3,7 +3,7 @@
 import React, { useState } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
-import { ArrowRight, Check, Compass, Menu, X } from "lucide-react";
+import { ArrowRight, Check, Menu, X } from "lucide-react";
 import { useAuthMissionStore } from "../stores/useAuthMissionStore";
 
 const MarsLandingGlobe = dynamic(
@@ -29,9 +29,12 @@ export default function LandingPage() {
       <header className="sticky top-0 z-40 border-b border-[#242424] bg-[#050505]/90 backdrop-blur-md">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
           <Link href="/" className="flex items-center gap-3 min-w-0">
-            <div className="w-8 h-8 rounded-[6px] bg-[#FF6A1A]/15 border border-[#FF6A1A]/50 flex items-center justify-center shrink-0">
-              <Compass className="w-4 h-4 text-[#FF6A1A]" />
-            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/icon.png"
+              alt="MARSCOPE"
+              className="w-8 h-8 rounded-[6px] object-cover border border-[#242424] shrink-0"
+            />
             <div className="min-w-0">
               <div className="text-sm font-bold tracking-[0.14em] text-white leading-none">MARSCOPE</div>
               <div className="text-[10px] font-mono tracking-[0.14em] text-[#A1A1AA] mt-1 truncate">

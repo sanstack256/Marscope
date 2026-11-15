@@ -17,8 +17,20 @@ function extractGlobeOuterRings(geom: GeoJsonGeometry | null | undefined): Array
     if (!Array.isArray(coords)) return [];
     const pts: Array<[number, number]> = [];
     for (const c of coords) {
-      if (Array.isArray(c) && c.length >= 2 && typeof c[0] === "number" && typeof c[1] === "number") {
-        pts.push([c[0], c[1]]);
+      if (
+        Array.isArray(c) &&
+        c.length >= 2 &&
+        typeof c[0] === "number" &&
+        typeof c[1] === "number" &&
+        Number.isFinite(c[0]) &&
+        Number.isFinite(c[1])
+      ) {
+        const lon = c[0];
+        const lat = Math.max(-89.9999, Math.min(89.9999, c[1]));
+        const prev = pts[pts.length - 1];
+        if (!prev || Math.abs(prev[0] - lon) > 1e-7 || Math.abs(prev[1] - lat) > 1e-7) {
+          pts.push([lon, lat]);
+        }
       }
     }
     return pts;
@@ -888,8 +900,23 @@ export function MarsGlobeViewer() {
     const entities = spatialSource.entities;
     entities.removeAll();
     const toLon180 = (lonEast: number) => (lonEast > 180 ? lonEast - 360 : lonEast);
+    const isFiniteCoord = (lon: unknown, lat: unknown, h: unknown = 0): boolean =>
+      typeof lon === "number" &&
+      Number.isFinite(lon) &&
+      typeof lat === "number" &&
+      Number.isFinite(lat) &&
+      typeof h === "number" &&
+      Number.isFinite(h);
 
-    if (showLandingSiteOverlay && landingSiteBundle?.landing_site) {
+    if (
+      showLandingSiteOverlay &&
+      landingSiteBundle?.landing_site &&
+      isFiniteCoord(
+        landingSiteBundle.landing_site.longitude_east,
+        landingSiteBundle.landing_site.latitude,
+        landingSiteBundle.landing_site.elevation_m ?? 0
+      )
+    ) {
       const ls = landingSiteBundle.landing_site;
       entities.add({
         id: `mission:landing-site:${ls.landing_site_id}`,
@@ -902,7 +929,6 @@ export function MarsGlobeViewer() {
           color: Cesium.Color.fromCssColorString("#1F9D68"),
           outlineColor: Cesium.Color.WHITE,
           outlineWidth: 2,
-          heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
         },
         label: {
           text: `LANDING SITE: ${ls.name}`,
@@ -933,7 +959,7 @@ export function MarsGlobeViewer() {
               material: Cesium.Color.fromCssColorString("#22B8CF").withAlpha(0.18),
               outline: true,
               outlineColor: Cesium.Color.fromCssColorString("#22B8CF"),
-              heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+              height: 20,
             },
           });
         });
@@ -942,6 +968,7 @@ export function MarsGlobeViewer() {
 
     if (showCrewOverlay && crewPositions.length > 0) {
       crewPositions.forEach((cp) => {
+        if (!isFiniteCoord(cp.longitude_east, cp.latitude, cp.elevation_m ?? 0)) return;
         entities.add({
           id: `mission:crew:${cp.astronaut_id}`,
           name: cp.display_name || cp.astronaut_id,
@@ -953,7 +980,6 @@ export function MarsGlobeViewer() {
             color: Cesium.Color.fromCssColorString(cp.is_stale ? "#D98A1F" : "#22B8CF"),
             outlineColor: Cesium.Color.WHITE,
             outlineWidth: 2,
-            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
           },
           label: {
             text: `${cp.display_name || "Crew"}${cp.is_stale ? " (STALE)" : ""}`,
@@ -969,26 +995,25 @@ export function MarsGlobeViewer() {
 
     if (showFieldObservationsOverlay && fieldObservations.length > 0) {
       fieldObservations.slice(0, 40).forEach((obs) => {
-        if (obs.latitude == null || obs.longitude_east == null) return;
+        if (!isFiniteCoord(obs.longitude_east, obs.latitude, obs.elevation_m ?? 0)) return;
         entities.add({
           id: `mission:obs:${obs.observation_id}`,
           name: `${obs.category}: ${obs.species_display_name || obs.description}`,
           position: marsEllipsoid.cartographicToCartesian(
-            Cesium.Cartographic.fromDegrees(toLon180(obs.longitude_east), obs.latitude, (obs.elevation_m ?? 0) + 60)
+            Cesium.Cartographic.fromDegrees(toLon180(obs.longitude_east!), obs.latitude!, (obs.elevation_m ?? 0) + 60)
           ),
           point: {
             pixelSize: 9,
             color: Cesium.Color.fromCssColorString("#E25B38"),
             outlineColor: Cesium.Color.WHITE,
             outlineWidth: 1.5,
-            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
           },
         });
       });
     }
 
     sosEvents
-      .filter((s) => s.status !== "RESOLVED" && s.status !== "CANCELLED" && s.latitude != null && s.longitude_east != null)
+      .filter((s) => s.status !== "RESOLVED" && s.status !== "CANCELLED" && isFiniteCoord(s.longitude_east, s.latitude, s.elevation_m ?? 0))
       .forEach((sos) => {
         entities.add({
           id: `mission:sos:${sos.sos_id}`,
@@ -1001,7 +1026,6 @@ export function MarsGlobeViewer() {
             color: Cesium.Color.fromCssColorString("#DC3545"),
             outlineColor: Cesium.Color.WHITE,
             outlineWidth: 2.5,
-            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
           },
           label: {
             text: `SOS: ${sos.astronaut_display_name}`,
@@ -1028,7 +1052,7 @@ export function MarsGlobeViewer() {
               material: Cesium.Color.fromCssColorString(isApprox ? "#64748b" : "#22d3ee").withAlpha(0.08),
               outline: true,
               outlineColor: Cesium.Color.fromCssColorString(isApprox ? "#94a3b8" : "#22d3ee"),
-              heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+              height: 10,
             },
           });
         });
@@ -1048,7 +1072,7 @@ export function MarsGlobeViewer() {
               material: Cesium.Color.fromCssColorString("#f59e0b").withAlpha(0.14),
               outline: true,
               outlineColor: Cesium.Color.fromCssColorString("#fb7185"),
-              heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+              height: 15,
             },
           });
         });

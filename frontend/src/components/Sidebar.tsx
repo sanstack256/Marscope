@@ -100,9 +100,12 @@ export function Sidebar() {
       {/* Brand + Collapse Toggle */}
       <div className="h-[56px] px-3.5 flex items-center justify-between border-b border-[var(--border-subtle)] shrink-0">
         <Link href="/mission-control" onClick={() => setMobileOpen(false)} className="flex items-center gap-2.5 min-w-0">
-          <div className="w-8 h-8 rounded-[6px] bg-[var(--accent-mars)]/15 border border-[var(--accent-mars)]/45 flex items-center justify-center shrink-0">
-            <Compass className="w-[18px] h-[18px] text-[var(--accent-mars)]" />
-          </div>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/icon.png"
+            alt="MARSCOPE"
+            className="w-8 h-8 rounded-[6px] object-cover border border-[var(--border-strong)] shrink-0"
+          />
           {(!collapsed || isMobile) && (
             <div className="min-w-0">
               <div className="text-sm font-bold tracking-wider text-[var(--text-primary)] leading-none">

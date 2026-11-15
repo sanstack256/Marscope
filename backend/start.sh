@@ -24,6 +24,18 @@ from app.ingestion.bootstrap import seed_catalog_metadata_if_empty
 seed_catalog_metadata_if_empty(Path(os.environ["MARSCOPE_DATASETS_DIR"]))
 PY
 
+# Auto-acquire mandatory Gale DEMs on empty persistent volumes without blocking healthchecks
+if [ ! -f "${DATASETS_DIR}/raw/dteec_009149_1750_009294_1750_u01.img" ]; then
+  echo "[MARSCOPE] Mandatory HiRISE DEM missing in ${DATASETS_DIR}/raw; starting background NASA PDS acquisition..."
+  (
+    python3 scripts/bootstrap_datasets.py --acquire \
+      --dataset hirise_dteec_009149_1750 \
+      --dataset mola_megt90n000cb \
+      --dataset mola_megt00n090hb \
+      >/tmp/marscope_bootstrap.log 2>&1 || true
+  ) &
+fi
+
 exec uvicorn app.main:app \
   --host 0.0.0.0 \
   --port "${PORT:-8000}" \
