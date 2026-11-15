@@ -102,9 +102,9 @@ export function Sidebar() {
         <Link href="/mission-control" onClick={() => setMobileOpen(false)} className="flex items-center gap-2.5 min-w-0">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
-            src="/icon.png"
+            src="/brand-icon.png"
             alt="MARSCOPE"
-            className="w-8 h-8 rounded-[6px] object-cover border border-[var(--border-strong)] shrink-0"
+            className="w-9 h-9 rounded-[6px] object-contain bg-black border border-[var(--border-strong)] shrink-0"
           />
           {(!collapsed || isMobile) && (
             <div className="min-w-0">

@@ -451,12 +451,13 @@ export function MarsGlobeViewer() {
         }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
         const scc = viewer.scene.screenSpaceCameraController;
-        scc.minimumZoomDistance = 80;
+        scc.minimumZoomDistance = 5;
+        scc.minimumCollisionTerrainHeight = 5;
         scc.maximumZoomDistance = 25000000;
         scc.inertiaSpin = 0.45;
         scc.inertiaTranslate = 0.45;
         scc.inertiaZoom = 0.35;
-        scc.zoomFactor = 3.5;
+        scc.zoomFactor = 5.0;
         scc.enableCollisionDetection = true;
         scc.enableTilt = true;
         scc.enableLook = true;
@@ -1102,9 +1103,9 @@ export function MarsGlobeViewer() {
     if (!viewer || !marsEllipsoid) return;
     const carto = marsEllipsoid.cartesianToCartographic(viewer.camera.position);
     if (!carto) return;
-    const height = Math.max(80, carto.height);
+    const height = Math.max(5, carto.height);
     if (factor < 1) {
-      const step = Math.min(height - 80, Math.max(25, height * (1.0 - factor)));
+      const step = Math.min(height - 5, Math.max(25, height * (1.0 - factor)));
       if (step > 0) viewer.camera.zoomIn(step);
     } else {
       const step = Math.min(25000000 - height, Math.max(50, height * (factor - 1.0)));
@@ -1248,109 +1249,110 @@ export function MarsGlobeViewer() {
         </div>
       )}
 
-      {/* Top-Left View & Perspective Controls */}
-      <div className="absolute top-3 left-3 z-10 flex flex-wrap items-center gap-1.5">
-        <div className="flex bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] rounded-lg p-0.5 text-[11px] font-mono">
-          {(["3D", "2D", "2.5D"] as SceneViewMode[]).map((m) => (
+      {/* Responsive Non-Overlapping Top Controls */}
+      <div className="absolute top-2.5 left-2.5 right-2.5 z-10 flex flex-wrap items-start justify-between gap-2 pointer-events-none">
+        <div className="flex flex-wrap items-center gap-1.5 pointer-events-auto">
+          <div className="flex bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] rounded-lg p-0.5 text-[11px] font-mono">
+            {(["3D", "2D", "2.5D"] as SceneViewMode[]).map((m) => (
+              <button
+                key={m}
+                onClick={() => handleSwitchMode(m)}
+                className={`px-2.5 py-1 rounded transition-colors ${
+                  viewMode === m
+                    ? "bg-[#e25b38] text-white font-semibold"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+
+          <button
+            onClick={handleFocusDestination}
+            disabled={!selectedDestination}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] text-[11px] font-mono text-cyan-300 hover:bg-[#161c2b] transition-colors disabled:opacity-40"
+            title="Center camera on the selected destination"
+          >
+            <Crosshair className="w-3.5 h-3.5" />
+            <span>Focus destination</span>
+          </button>
+
+          <button
+            onClick={handleFocusRouteOrRegion}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] text-[11px] font-mono text-emerald-300 hover:bg-[#161c2b] transition-colors"
+            title="Fly camera obliquely into Gale Crater / Active Route DEM zone"
+          >
+            <RouteIcon className="w-3.5 h-3.5" />
+            <span>{activeRoute ? "Focus Route" : "Focus Gale DEM"}</span>
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-end gap-1.5 pointer-events-auto ml-auto">
+          <div className="flex items-center gap-1 bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] rounded-lg p-1">
             <button
-              key={m}
-              onClick={() => handleSwitchMode(m)}
-              className={`px-2.5 py-1 rounded transition-colors ${
-                viewMode === m
-                  ? "bg-[#e25b38] text-white font-semibold"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
+              onClick={() => handleZoom(0.6)}
+              data-testid="globe-zoom-in"
+              className="p-1.5 rounded text-slate-300 hover:bg-[#161c2b]"
+              title="Zoom in"
             >
-              {m}
+              <Plus className="w-3.5 h-3.5" />
             </button>
-          ))}
-        </div>
+            <button
+              onClick={() => handleZoom(1.6)}
+              data-testid="globe-zoom-out"
+              className="p-1.5 rounded text-slate-300 hover:bg-[#161c2b]"
+              title="Zoom out"
+            >
+              <Minus className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={handleResetNorth}
+              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono text-slate-300 hover:bg-[#161c2b]"
+              title="Reset camera North-up (Camera heading, distinct from route bearing)"
+            >
+              <Compass
+                className="w-3.5 h-3.5 text-[#e25b38]"
+                style={{ transform: `rotate(${-cameraTelemetry.headingDeg}deg)` }}
+              />
+              <span>CAM {Math.round(cameraTelemetry.headingDeg)}° N</span>
+            </button>
+            <button
+              onClick={() => handleGlobeCameraPreset("global")}
+              data-testid="globe-reset"
+              className="p-1.5 rounded text-slate-300 hover:bg-[#161c2b]"
+              title="Return to global Mars view"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+          </div>
 
-        <button
-          onClick={handleFocusDestination}
-          disabled={!selectedDestination}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] text-[11px] font-mono text-cyan-300 hover:bg-[#161c2b] transition-colors disabled:opacity-40"
-          title="Center camera on the selected destination"
-        >
-          <Crosshair className="w-3.5 h-3.5" />
-          <span>Focus destination</span>
-        </button>
-
-        <button
-          onClick={handleFocusRouteOrRegion}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] text-[11px] font-mono text-emerald-300 hover:bg-[#161c2b] transition-colors"
-          title="Fly camera obliquely into Gale Crater / Active Route DEM zone"
-        >
-          <RouteIcon className="w-3.5 h-3.5" />
-          <span>{activeRoute ? "Focus Route" : "Focus Gale DEM"}</span>
-        </button>
-      </div>
-
-      {/* Top-Right Compass & Zoom Controls */}
-      <div className="absolute top-3 right-3 z-10 flex flex-col items-end gap-2">
-        <div className="flex items-center gap-1 bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] rounded-lg p-1">
-          <button
-            onClick={() => handleZoom(0.6)}
-            data-testid="globe-zoom-in"
-            className="p-1.5 rounded text-slate-300 hover:bg-[#161c2b]"
-            title="Zoom in"
-          >
-            <Plus className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={() => handleZoom(1.6)}
-            data-testid="globe-zoom-out"
-            className="p-1.5 rounded text-slate-300 hover:bg-[#161c2b]"
-            title="Zoom out"
-          >
-            <Minus className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={handleResetNorth}
-            className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-mono text-slate-300 hover:bg-[#161c2b]"
-            title="Reset camera North-up (Camera heading, distinct from route bearing)"
-          >
-            <Compass
-              className="w-3.5 h-3.5 text-[#e25b38]"
-              style={{ transform: `rotate(${-cameraTelemetry.headingDeg}deg)` }}
-            />
-            <span>CAM {Math.round(cameraTelemetry.headingDeg)}° N</span>
-          </button>
-          <button
-            onClick={() => handleGlobeCameraPreset("global")}
-            data-testid="globe-reset"
-            className="p-1.5 rounded text-slate-300 hover:bg-[#161c2b]"
-            title="Return to global Mars view"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-          </button>
-        </div>
-
-        <div className="flex items-center gap-1 bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] rounded-lg p-1 text-[10px] font-mono">
-          <button
-            onClick={() => handleGlobeCameraPreset("global")}
-            className="px-2 py-0.5 rounded text-slate-300 hover:bg-[#161c2b]"
-          >
-            Global
-          </button>
-          <button
-            onClick={() => handleGlobeCameraPreset("regional")}
-            className="px-2 py-0.5 rounded text-slate-300 hover:bg-[#161c2b]"
-          >
-            Regional
-          </button>
-          <button
-            onClick={() => handleGlobeCameraPreset("approach")}
-            className="px-2 py-0.5 rounded text-slate-300 hover:bg-[#161c2b]"
-          >
-            Approach
-          </button>
-          <button
-            onClick={() => handleGlobeCameraPreset("local")}
-            className="px-2 py-0.5 rounded text-cyan-300 hover:bg-[#161c2b]"
-          >
-            Local DEM
-          </button>
+          <div className="flex items-center gap-1 bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] rounded-lg p-1 text-[10px] font-mono">
+            <button
+              onClick={() => handleGlobeCameraPreset("global")}
+              className="px-2 py-0.5 rounded text-slate-300 hover:bg-[#161c2b]"
+            >
+              Global
+            </button>
+            <button
+              onClick={() => handleGlobeCameraPreset("regional")}
+              className="px-2 py-0.5 rounded text-slate-300 hover:bg-[#161c2b]"
+            >
+              Regional
+            </button>
+            <button
+              onClick={() => handleGlobeCameraPreset("approach")}
+              className="px-2 py-0.5 rounded text-slate-300 hover:bg-[#161c2b]"
+            >
+              Approach
+            </button>
+            <button
+              onClick={() => handleGlobeCameraPreset("local")}
+              className="px-2 py-0.5 rounded text-cyan-300 hover:bg-[#161c2b]"
+            >
+              Local DEM
+            </button>
+          </div>
         </div>
       </div>
 

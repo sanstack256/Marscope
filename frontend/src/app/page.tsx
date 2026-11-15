@@ -31,9 +31,9 @@ export default function LandingPage() {
           <Link href="/" className="flex items-center gap-3 min-w-0">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src="/icon.png"
+              src="/brand-icon.png"
               alt="MARSCOPE"
-              className="w-8 h-8 rounded-[6px] object-cover border border-[#242424] shrink-0"
+              className="w-9 h-9 rounded-[6px] object-contain bg-black border border-[#242424] shrink-0"
             />
             <div className="min-w-0">
               <div className="text-sm font-bold tracking-[0.14em] text-white leading-none">MARSCOPE</div>

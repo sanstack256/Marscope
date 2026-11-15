@@ -28,11 +28,20 @@ PY
 if [ ! -f "${DATASETS_DIR}/raw/dteec_009149_1750_009294_1750_u01.img" ]; then
   echo "[MARSCOPE] Mandatory HiRISE DEM missing in ${DATASETS_DIR}/raw; starting background NASA PDS acquisition..."
   (
-    python3 scripts/bootstrap_datasets.py --acquire \
-      --dataset hirise_dteec_009149_1750 \
-      --dataset mola_megt90n000cb \
-      --dataset mola_megt00n090hb \
-      >/tmp/marscope_bootstrap.log 2>&1 || true
+    PYTHONPATH="${PYTHONPATH:-/app/backend}" python3 - <<'PY'
+import asyncio, json
+from app.ingestion.bootstrap import acquire_bootstrap_datasets
+from app.services.container import acquisition_service, catalog_service
+
+res = asyncio.run(
+    acquire_bootstrap_datasets(
+        catalog_service=catalog_service,
+        acquisition_service=acquisition_service,
+        dataset_ids=["hirise_dteec_009149_1750", "mola_megt90n000cb", "mola_megt00n090hb"],
+    )
+)
+print("[MARSCOPE] Background DEM acquisition finished:", json.dumps(res))
+PY
   ) &
 fi
 

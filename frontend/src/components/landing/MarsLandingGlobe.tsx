@@ -41,8 +41,8 @@ export function MarsLandingGlobe() {
     container.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(32, width / height, 0.1, 100);
-    camera.position.set(0, 0, 5.15);
+    const camera = new THREE.PerspectiveCamera(34, width / height, 0.1, 100);
+    camera.position.set(0, 0, 4.35);
     camera.lookAt(0, 0, 0);
 
     // Realistic solar illumination with natural Martian terminator
@@ -66,7 +66,7 @@ export function MarsLandingGlobe() {
     marsTexture.colorSpace = THREE.SRGBColorSpace;
     marsTexture.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
 
-    const sphereGeom = new THREE.SphereGeometry(1.18, 64, 64);
+    const sphereGeom = new THREE.SphereGeometry(1.22, 64, 64);
     const sphereMat = new THREE.MeshStandardMaterial({
       map: marsTexture,
       roughness: 0.92,
@@ -179,7 +179,7 @@ export function MarsLandingGlobe() {
 
   if (webglUnavailable) {
     return (
-      <div className="relative w-full aspect-square max-w-[460px] mx-auto flex items-center justify-center rounded-full border border-[#242424] bg-[#0B0B0B] overflow-hidden">
+      <div className="relative w-full aspect-square max-w-[540px] mx-auto flex items-center justify-center rounded-full border border-[#242424] bg-[#0B0B0B] overflow-hidden">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/landing/mars-globe.jpg"
@@ -191,7 +191,7 @@ export function MarsLandingGlobe() {
   }
 
   return (
-    <div className="relative w-full aspect-square max-w-[460px] mx-auto select-none">
+    <div className="relative w-full aspect-square max-w-[540px] mx-auto select-none">
       <div
         ref={containerRef}
         aria-label="Interactive 3D Mars globe"

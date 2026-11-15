@@ -11,19 +11,21 @@ export interface DemoTourStep {
   route: string;
   summary: string;
   checklist: string[];
+  positionClass: string;
 }
 
 export const DEMO_TOUR_STEPS: DemoTourStep[] = [
   {
     step: 1,
-    title: "Mission Overview",
+    title: "Mission Overview & SOS Console",
     route: "/mission-control",
     summary:
-      "Review the Gale Crater demonstration mission, its three demo astronauts, active SOS alert, and available scientific context.",
+      "Review the Gale Crater demonstration mission, its three demo astronauts, active SOS alert, and the bottom-right SOS trigger.",
     checklist: [
       "Verify DEMO MODE badge and 3 demo crew members",
-      "Notice Alpha's active SOS banner and mission activity feed",
+      "Notice Alpha's active SOS alert and bottom-right SOS button",
     ],
+    positionClass: "bottom-4 left-4 right-4 sm:right-auto sm:left-4 lg:left-[264px] sm:w-[380px]",
   },
   {
     step: 2,
@@ -35,6 +37,7 @@ export const DEMO_TOUR_STEPS: DemoTourStep[] = [
       "Inspect Alpha & Bravo coordinates inside Gale Crater",
       "Verify USER_PROVIDED provenance and connection status",
     ],
+    positionClass: "bottom-4 left-4 right-4 sm:left-auto sm:right-20 sm:w-[390px]",
   },
   {
     step: 3,
@@ -46,6 +49,7 @@ export const DEMO_TOUR_STEPS: DemoTourStep[] = [
       "Inspect Alpha's SOS location and authenticated-channel notice",
       "Click Acknowledge or Resolve to persist a real transition",
     ],
+    positionClass: "top-28 left-4 right-4 sm:left-auto sm:right-6 sm:w-[390px]",
   },
   {
     step: 4,
@@ -57,6 +61,7 @@ export const DEMO_TOUR_STEPS: DemoTourStep[] = [
       "Select Alpha's sulfate veinlet report or Bravo's basaltic float report",
       "Use Focus on Map / 3D View to synchronize spatial focus",
     ],
+    positionClass: "bottom-4 left-4 right-4 sm:left-auto sm:right-20 sm:w-[390px]",
   },
   {
     step: 5,
@@ -68,6 +73,7 @@ export const DEMO_TOUR_STEPS: DemoTourStep[] = [
       "Switch between 3D Terrain DEM, Split View, and Mars Globe",
       "Verify coordinates use IAU2000:49900 planetocentric frame",
     ],
+    positionClass: "bottom-4 left-4 right-4 sm:right-auto sm:left-4 lg:left-[264px] sm:w-[370px]",
   },
   {
     step: 6,
@@ -79,6 +85,7 @@ export const DEMO_TOUR_STEPS: DemoTourStep[] = [
       "Review dataset resolution suitability and NoData boundaries",
       "Verify missing local terrain is never fabricated",
     ],
+    positionClass: "top-28 left-4 right-4 sm:left-auto sm:right-6 sm:w-[390px]",
   },
   {
     step: 7,
@@ -90,6 +97,7 @@ export const DEMO_TOUR_STEPS: DemoTourStep[] = [
       "Inspect APXS/ChemCam/CheMin archive evidence provenance",
       "Confirm unavailable instrument data stays explicitly unavailable",
     ],
+    positionClass: "bottom-4 left-4 right-4 sm:left-auto sm:right-20 sm:w-[390px]",
   },
   {
     step: 8,
@@ -101,6 +109,7 @@ export const DEMO_TOUR_STEPS: DemoTourStep[] = [
       "Inspect slope limits, climb work, and configured assumptions",
       "Also visit /eva-operations or /active-navigation for live execution",
     ],
+    positionClass: "top-28 left-4 right-4 sm:left-auto sm:right-6 sm:w-[390px]",
   },
 ];
 
@@ -188,7 +197,7 @@ export function DemoTourOverlay() {
   return (
     <aside
       aria-label="Guided Demo Tour"
-      className="fixed bottom-4 left-4 right-4 sm:left-auto sm:right-20 sm:w-[390px] z-40 rounded-[8px] border border-[#FF6A1A]/60 bg-[#0B0B0B]/95 shadow-2xl p-4 text-xs text-white"
+      className={`fixed ${current.positionClass} z-40 rounded-[8px] border border-[#FF6A1A]/60 bg-[#0B0B0B]/95 shadow-2xl p-4 text-xs text-white transition-all duration-200`}
     >
       <div className="flex items-center justify-between gap-2 mb-2">
         <div className="flex items-center gap-2">
