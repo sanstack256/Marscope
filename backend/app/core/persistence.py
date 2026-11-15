@@ -11,13 +11,17 @@ Provides:
 from __future__ import annotations
 
 from contextlib import contextmanager
-import fcntl
 import json
 import os
 from pathlib import Path
 import tempfile
 import threading
 from typing import Any, Iterator
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    fcntl = None  # type: ignore[assignment]
 
 _THREAD_LOCKS_GUARD = threading.Lock()
 _THREAD_LOCKS: dict[str, threading.RLock] = {}
@@ -37,6 +41,10 @@ def _get_thread_lock(lock_path: Path) -> threading.RLock:
 @contextmanager
 def locked_resource(lock_path: Path) -> Iterator[None]:
     """Acquire an in-process RLock and re-entrant-safe POSIX flock around state mutations."""
+    if fcntl is None:
+        raise RuntimeError(
+            "POSIX file locking (fcntl) is required for safe persistent store writes on this platform."
+        )
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     key = str(lock_path.resolve())
     tlock = _get_thread_lock(lock_path)

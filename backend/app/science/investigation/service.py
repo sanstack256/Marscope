@@ -272,12 +272,16 @@ class ScienceInvestigationService:
             )
         return plan
 
-    def list_campaigns(self) -> List[CampaignSummary]:
+    def list_campaigns(self, *, include_freshness: bool = True) -> List[CampaignSummary]:
         summaries: List[CampaignSummary] = []
         for path in sorted(self.campaigns_dir.glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
             try:
                 plan = self._read_campaign_file(path)
-                fresh = self.check_campaign_freshness(plan.campaign_id, plan=plan)
+                freshness_state = (
+                    self.check_campaign_freshness(plan.campaign_id, plan=plan).freshness_state
+                    if include_freshness
+                    else plan.freshness_state
+                )
                 tot_dist: Optional[float] = None
                 out_m = plan.outbound_route_summary.get("surface_distance_m")
                 ret_m = plan.return_plan.return_surface_distance_m if plan.return_plan else None
@@ -296,7 +300,7 @@ class ScienceInvestigationService:
                         operator_approved=plan.operator_approved,
                         plan_status=plan.plan_status,
                         feasibility_state=plan.feasibility_state,
-                        freshness_state=fresh.freshness_state,
+                        freshness_state=freshness_state,
                         stop_count=len(plan.stop_plans),
                         total_distance_m=tot_dist,
                         total_duration_s=tot_dur,
@@ -909,11 +913,19 @@ class ScienceInvestigationService:
                 "reason": f"Archive comparison '{cmp.outcome.value}' on {obs.observation_id}",
             }
         ]
+        existing_reass = list(plan.hypothesis_reassessments)
+        reass_id = reassess_entry["reassessment_id"]
+        idx = next((i for i, r in enumerate(existing_reass) if r.get("reassessment_id") == reass_id), None)
+        if idx is not None:
+            existing_reass[idx] = reassess_entry
+        else:
+            existing_reass.append(reassess_entry)
+
         plan = plan.model_copy(
             update={
                 "stop_plans": updated_stops,
                 "integrated_lifecycle_state": new_state,
-                "hypothesis_reassessments": list(plan.hypothesis_reassessments) + [reassess_entry],
+                "hypothesis_reassessments": existing_reass,
                 "lifecycle_transitions": transitions,
             }
         )

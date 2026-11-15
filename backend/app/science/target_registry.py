@@ -60,7 +60,7 @@ def _classify_evidence_state_from_records(records: List[Any], fallback_source: s
             return InvestigationTargetEvidenceState.CONFIRMED_LOCAL_OBSERVATION
         if instruments & _ORBITAL_SPECTRAL_INSTRUMENTS:
             return InvestigationTargetEvidenceState.ORBITAL_DETECTION_ONLY
-        return InvestigationTargetEvidenceState.CONFIRMED_LOCAL_OBSERVATION
+        return InvestigationTargetEvidenceState.INFERRED_REGIONAL_CONTEXT_ONLY
     if "co_located_context_only" in ev_types or "regional" in fallback_source.lower():
         return InvestigationTargetEvidenceState.INFERRED_REGIONAL_CONTEXT_ONLY
     return InvestigationTargetEvidenceState.DATA_GAP_UNASSESSED
@@ -126,6 +126,7 @@ class TargetRegistryService:
 
         evidence_summary = dict(target.scientific_evidence_summary or {})
         if not evidence_summary:
+            verified_ids = [r.evidence_id for r in verified_records]
             evidence_summary = {
                 "instrument_source": target.instrument_source,
                 "geology_type": target.geology_type,

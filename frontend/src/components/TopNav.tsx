@@ -65,8 +65,8 @@ export function TopNav() {
     <header className="h-16 bg-[#0d111a]/90 backdrop-blur border-b border-[#1e2638] px-6 flex items-center justify-between shrink-0 z-10">
       {/* System Status Banner */}
       <div className="flex items-center gap-3">
-        <div className="flex items-center gap-2 px-2.5 py-1 rounded bg-[#161c2b] border border-[#252f44]">
-          <span className={`w-2 h-2 rounded-full ${dotClass}`}></span>
+        <div role="status" aria-live="polite" className="flex items-center gap-2 px-2.5 py-1 rounded bg-[#161c2b] border border-[#252f44]">
+          <span aria-hidden="true" className={`w-2 h-2 rounded-full ${dotClass}`}></span>
           <span className="text-xs font-mono font-medium text-slate-300">{backendLabel}</span>
         </div>
         <div className="hidden md:flex items-center gap-2 text-xs text-slate-400">
@@ -116,7 +116,7 @@ export function TopNav() {
 
         <div className="hidden sm:flex items-center gap-2 px-3 py-1 rounded bg-[#131722] border border-[#1e2638] text-slate-300">
           <Database className="w-3.5 h-3.5 text-cyan-400" />
-          <span className="text-slate-400">CATALOG:</span>
+          <span className="text-slate-400">API:</span>
           <span className="font-bold text-slate-200">{health ? `v${health.version}` : "--"}</span>
         </div>
       </div>

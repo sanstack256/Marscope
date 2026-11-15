@@ -7,6 +7,7 @@ persistent SQLite spatial index, computes Mars ellipsoidal distances from astron
 coordinates, clusters hits into candidate geological sites, and returns full provenance.
 """
 
+from collections import defaultdict
 import hashlib
 from typing import Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
@@ -445,7 +446,7 @@ class CompositionSearchService:
                 nearby_count=len(peer_items),
                 distance_m=dist_m,
                 config=rank_cfg,
-                cohort_uncertainty_types=cohort_unc_types,
+                cohort_uncertainty_types=distinct_unc_types,
             )
             hits.append(
                 RankedCompositionHit(
@@ -502,10 +503,15 @@ class CompositionSearchService:
             )
 
         # Build clustered Candidate Discovery Locations (for map markers & destination evaluation)
+        hits_by_cluster: Dict[str, List[RankedCompositionHit]] = defaultdict(list)
+        for h in hits:
+            hkey = f"{round(float(h.evidence.latitude), 3):.3f}_{round(float(h.evidence.longitude_east), 3):.3f}"
+            hits_by_cluster[hkey].append(h)
+
         cand_locs: List[CandidateDiscoveryLocation] = []
         for ckey, items in clusters.items():
             # Pick best ranked hit in cluster as cluster representative
-            cluster_hits = [h for h in hits if f"{round(float(h.evidence.latitude), 3):.3f}_{round(float(h.evidence.longitude_east), 3):.3f}" == ckey]
+            cluster_hits = hits_by_cluster.get(ckey, [])
             cluster_hits.sort(key=lambda h: -(h.ranking.composite_rank_score if h.ranking.composite_rank_score is not None else -1.0))
             best = cluster_hits[0]
             rep = best.evidence

@@ -9,6 +9,7 @@ and enforces strict comparability guards so heterogeneous statistical metrics
 are never merged into a single misleading "quality" or "confidence" score.
 """
 
+from functools import lru_cache
 from typing import Dict, List, Optional, Sequence, Tuple
 from pydantic import BaseModel, Field
 
@@ -129,6 +130,7 @@ _UNCERTAINTY_ALIASES: Dict[str, str] = {
 }
 
 
+@lru_cache(maxsize=256)
 def canonicalize_uncertainty_type(raw_type: Optional[str]) -> str:
     """Normalize legacy or raw uncertainty type identifiers to canonical registry keys."""
     if not raw_type:

@@ -7,6 +7,7 @@ and mission duration. Never invents oxygen, battery, CO2 scrubber, or cooling co
 
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Optional, Tuple
 
 from app.eva_operations.schemas import (
@@ -139,8 +140,42 @@ def evaluate_eva_resource_budget(
     any_fail = False
     any_unavailable = False
 
+    if exposure_duration_s is not None and (
+        not math.isfinite(float(exposure_duration_s)) or float(exposure_duration_s) < 0.0
+    ):
+        return ResourceBudgetReport(
+            overall_status="UNAVAILABLE",
+            entries=[],
+            category_coverage=category_coverage,
+            missing_inputs=["valid_exposure_duration_s"],
+            limitations=[
+                f"Invalid exposure duration '{exposure_duration_s}': must be finite and non-negative."
+            ],
+        )
+
     for spec in resources:
         cat_key = _infer_category(spec.resource_name, spec.category)
+        if (
+            not math.isfinite(float(spec.initial_quantity))
+            or spec.initial_quantity < 0.0
+            or not math.isfinite(float(spec.consumption_rate))
+            or spec.consumption_rate < 0.0
+        ):
+            any_unavailable = True
+            category_coverage[cat_key] = "UNAVAILABLE_INVALID_INPUT"
+            entries.append(
+                ResourceEvaluationEntry(
+                    resource_name=spec.resource_name,
+                    category=cat_key,
+                    status="UNAVAILABLE",
+                    initial_quantity=round(spec.initial_quantity, 4) if math.isfinite(float(spec.initial_quantity)) else None,
+                    unit=spec.unit,
+                    exposure_duration_s=exposure_duration_s,
+                    explanation="Resource initial_quantity and consumption_rate must be finite and non-negative.",
+                )
+            )
+            continue
+
         rate_per_s, err = _convert_rate_to_quantity_per_second(
             spec.consumption_rate, spec.rate_unit, spec.unit
         )
@@ -188,7 +223,14 @@ def evaluate_eva_resource_budget(
         if spec.phase_rates and phase_durations_s:
             phase_rate_map: Dict[str, float] = {}
             unit_err: Optional[str] = None
+            invalid_phase_err: Optional[str] = None
             for pr in spec.phase_rates:
+                if pr.phase in phase_rate_map:
+                    invalid_phase_err = f"Duplicate phase rate configuration for phase '{pr.phase}'."
+                    break
+                if not math.isfinite(float(pr.consumption_rate)) or pr.consumption_rate < 0.0:
+                    invalid_phase_err = f"Phase '{pr.phase}' consumption_rate must be finite and non-negative."
+                    break
                 p_rate_s, p_err = _convert_rate_to_quantity_per_second(
                     pr.consumption_rate, pr.rate_unit, spec.unit
                 )
@@ -197,18 +239,19 @@ def evaluate_eva_resource_budget(
                     break
                 phase_rate_map[pr.phase] = p_rate_s
 
-            if unit_err is not None:
+            if unit_err is not None or invalid_phase_err is not None:
                 any_unavailable = True
-                category_coverage[cat_key] = "UNIT_MISMATCH"
+                status_str = "UNIT_MISMATCH" if unit_err is not None else "UNAVAILABLE"
+                category_coverage[cat_key] = status_str if unit_err is not None else "UNAVAILABLE_INVALID_INPUT"
                 entries.append(
                     ResourceEvaluationEntry(
                         resource_name=spec.resource_name,
                         category=cat_key,
-                        status="UNIT_MISMATCH",
+                        status=status_str,
                         initial_quantity=round(spec.initial_quantity, 4),
                         unit=spec.unit,
                         exposure_duration_s=exposure_duration_s,
-                        explanation=unit_err,
+                        explanation=unit_err or invalid_phase_err or "Invalid phase rate.",
                     )
                 )
                 continue
@@ -216,12 +259,36 @@ def evaluate_eva_resource_budget(
             integration_mode = "PHASE_INTEGRATED_Q_DOT_T"
             equation_str = "Q_used = sum_phase(Q_dot_phase * dt_phase)"
             accounted_s = 0.0
+            phase_err: Optional[str] = None
             for ph_name, ph_dur_s in phase_durations_s.items():
+                val_s = float(ph_dur_s)
+                if not math.isfinite(val_s) or val_s < 0.0:
+                    phase_err = f"Invalid duration {ph_dur_s} s for phase '{ph_name}': must be finite and non-negative."
+                    break
                 r_s = phase_rate_map.get(ph_name, rate_per_s)
-                q_p = r_s * max(0.0, float(ph_dur_s))
+                q_p = r_s * val_s
                 phase_breakdown[ph_name] = round(q_p, 4)
                 consumed += q_p
-                accounted_s += max(0.0, float(ph_dur_s))
+                accounted_s += val_s
+            if phase_err is None and accounted_s > float(exposure_duration_s) + 1e-6:
+                phase_err = (
+                    f"Phase durations sum to {accounted_s:.2f} s, exceeding total exposure duration {float(exposure_duration_s):.2f} s."
+                )
+            if phase_err is not None:
+                any_unavailable = True
+                category_coverage[cat_key] = "UNAVAILABLE_INVALID_INPUT"
+                entries.append(
+                    ResourceEvaluationEntry(
+                        resource_name=spec.resource_name,
+                        category=cat_key,
+                        status="UNAVAILABLE",
+                        initial_quantity=round(spec.initial_quantity, 4),
+                        unit=spec.unit,
+                        exposure_duration_s=exposure_duration_s,
+                        explanation=phase_err,
+                    )
+                )
+                continue
             rem_s = max(0.0, float(exposure_duration_s) - accounted_s)
             if rem_s > 0.0:
                 q_rem = rate_per_s * rem_s

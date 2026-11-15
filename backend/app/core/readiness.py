@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 def evaluate_system_readiness(
@@ -27,6 +27,8 @@ def evaluate_system_readiness(
     target_registry: Any,
     settings: Any,
     verify_checksums: bool = False,
+    dataset_id: Optional[str] = None,
+    question_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     checked_at = datetime.now(timezone.utc).isoformat()
     degraded_reasons: List[str] = []
@@ -75,14 +77,20 @@ def evaluate_system_readiness(
     }
 
     # ── 2. Science Readiness ────────────────────────────────────────────────────
-    questions_count = len(science_investigation_service.list_questions())
+    questions = list(science_investigation_service.list_questions())
+    questions_count = len(questions)
     instruments_count = len(science_investigation_service.list_instruments())
     targets_count = len(list(target_registry.list_targets()))
     science_store_errors: List[str] = []
     campaigns_count = 0
     observations_count = 0
     try:
-        campaigns_count = len(science_investigation_service.list_campaigns())
+        campaigns_count = len(science_investigation_service.list_campaigns(include_freshness=False))
+    except TypeError:
+        try:
+            campaigns_count = len(science_investigation_service.list_campaigns())
+        except Exception as exc:
+            science_store_errors.append(f"Campaign store error: {exc}")
     except Exception as exc:
         science_store_errors.append(f"Campaign store error: {exc}")
     try:
@@ -92,8 +100,11 @@ def evaluate_system_readiness(
     if science_store_errors:
         degraded_reasons.extend(science_store_errors)
 
+    science_definition_store_ok = questions_count > 0 and instruments_count > 0 and not science_store_errors
     science_pillar = {
-        "ready": questions_count > 0 and instruments_count > 0 and not science_store_errors,
+        "ready": science_definition_store_ok and comp_ok,
+        "definition_store_ready": science_definition_store_ok,
+        "evidence_index_ready": comp_ok,
         "instruments_registered": instruments_count,
         "questions_registered": questions_count,
         "targets_registered": targets_count,
@@ -123,8 +134,14 @@ def evaluate_system_readiness(
             morph_store_ok = False
             degraded_reasons.append(f"Morphology store corrupted: {exc}")
 
+    if proc_dem_ready_count == 0:
+        data_gaps.append(
+            "No locally verified processed DEM is ready; spatial terrain analysis and route planning cannot execute until a DEM is ingested or acquired."
+        )
+
     spatial_pillar = {
-        "ready": geospatial_deps_ok and morph_store_ok,
+        "ready": geospatial_deps_ok and morph_store_ok and proc_dem_ready_count > 0,
+        "libraries_ready": geospatial_deps_ok,
         "geospatial_libraries_available": geospatial_deps_ok,
         "geospatial_error": geospatial_error,
         "processed_dem_ready_count": proc_dem_ready_count,
@@ -154,18 +171,74 @@ def evaluate_system_readiness(
         or str(getattr(settings, "OPERATOR_ACTION_TOKEN", "") or "").strip()
     )
     mission_pillar = {
-        "ready": physics_ok and eva_store_ok,
+        "ready": physics_ok and eva_store_ok and proc_dem_ready_count > 0,
+        "physics_model_ready": physics_ok,
         "physics_parameters_count": len(physics_params),
         "routing_executable_with_local_dem": proc_dem_ready_count > 0,
+        "live_telemetry_connected": False,
         "eva_store_readable": eva_store_ok,
         "eva_sessions_count": eva_sessions_count,
         "operator_token_configured": op_token_configured,
         "environment": str(getattr(settings, "ENVIRONMENT", "unknown")),
     }
 
-    if degraded_reasons or not (science_pillar["ready"] and spatial_pillar["ready"] and mission_pillar["ready"]):
+    # ── 5. Optional Contextual Checks (dataset_id / question_id) ────────────────
+    context_info: Optional[Dict[str, Any]] = None
+    if dataset_id is not None or question_id is not None:
+        contextual_blockers: List[str] = []
+        ds_ready_flag: Optional[bool] = None
+        ds_state: Optional[str] = None
+        if dataset_id is not None:
+            matched_ds = next((r for r in ds_rows if r.get("dataset_id") == dataset_id), None)
+            if matched_ds is None:
+                ds_ready_flag = False
+                ds_state = "NOT_IN_CATALOG"
+                contextual_blockers.append(f"Requested dataset '{dataset_id}' is not registered in the catalog.")
+            else:
+                ds_state = matched_ds.get("lifecycle_state")
+                ds_ready_flag = bool(
+                    matched_ds.get("processed_artifact_exists")
+                    and matched_ds.get("processing_manifest_valid") is True
+                    and ds_state != "CORRUPT"
+                )
+                if not ds_ready_flag:
+                    contextual_blockers.append(
+                        f"Dataset '{dataset_id}' is in state '{ds_state}' and is not ready for local terrain/routing execution."
+                    )
+
+        q_ready_flag: Optional[bool] = None
+        if question_id is not None:
+            matched_q = next((q for q in questions if q.question_id == question_id), None)
+            if matched_q is None:
+                q_ready_flag = False
+                contextual_blockers.append(f"Requested science question '{question_id}' is not registered.")
+            else:
+                q_ready_flag = bool(science_definition_store_ok and comp_ok)
+                if not comp_ok:
+                    contextual_blockers.append(
+                        f"Science question '{question_id}' requires a verified composition spatial index for candidate evaluation."
+                    )
+
+        context_info = {
+            "dataset_id": dataset_id,
+            "dataset_lifecycle_state": ds_state,
+            "dataset_ready": ds_ready_flag,
+            "question_id": question_id,
+            "question_ready": q_ready_flag,
+            "contextual_ready": len(contextual_blockers) == 0,
+            "contextual_blockers": contextual_blockers,
+        }
+
+    # Distinguish application/runtime health from data gaps and mission execution availability
+    stores_readable = (not science_store_errors) and morph_store_ok and eva_store_ok
+    app_healthy = geospatial_deps_ok and physics_ok and stores_readable and (not corrupt_ids)
+
+    if (
+        degraded_reasons
+        or not (science_definition_store_ok and geospatial_deps_ok and morph_store_ok and physics_ok and eva_store_ok)
+    ):
         overall_state = "DEGRADED_OR_CORRUPT"
-    elif data_gaps or not data_pillar["ready"]:
+    elif data_gaps or not (data_pillar["ready"] and science_pillar["ready"] and spatial_pillar["ready"] and mission_pillar["ready"]):
         overall_state = "READY_WITH_DATA_GAPS"
     else:
         overall_state = "READY_FULL_WORKFLOW"
@@ -174,6 +247,24 @@ def evaluate_system_readiness(
         "checked_at_utc": checked_at,
         "system_readiness_state": overall_state,
         "operational_safety_certified": False,
+        "application_health": {
+            "healthy": app_healthy,
+            "status": "HEALTHY" if app_healthy else "DEGRADED",
+            "stores_readable": stores_readable,
+            "geospatial_libraries_available": geospatial_deps_ok,
+            "physics_registry_ready": physics_ok,
+        },
+        "execution_readiness": {
+            "ready": False,
+            "status": "UNAVAILABLE",
+            "telemetry_connected": False,
+            "operational_safety_certified": False,
+            "reason": (
+                "No live astronaut physiological sensors, suit avionics telemetry, "
+                "or certified Mars EVA flight safety loop is connected."
+            ),
+        },
+        "context": context_info,
         "degraded_reasons": degraded_reasons,
         "data_gaps": data_gaps,
         "pillars": {

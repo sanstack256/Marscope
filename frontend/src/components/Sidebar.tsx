@@ -91,7 +91,7 @@ export function Sidebar() {
       </Link>
 
       {/* Navigation List */}
-      <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
+      <nav aria-label="Primary navigation" className="flex-1 overflow-y-auto px-3 py-4 space-y-1">
         <div className="px-3 pb-2 text-[10px] font-mono uppercase tracking-wider text-slate-500">
           Navigation Systems
         </div>
@@ -102,6 +102,7 @@ export function Sidebar() {
             <Link
               key={link.href}
               href={link.href}
+              aria-current={isActive ? "page" : undefined}
               className={`flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-medium transition-all group ${
                 isActive
                   ? "bg-[#e25b38]/15 text-[#f16f4d] border border-[#e25b38]/30 shadow-[0_0_12px_rgba(226,91,56,0.15)]"

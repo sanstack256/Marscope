@@ -14,8 +14,33 @@ import {
 
 type ModelKey = "weight" | "potential_energy" | "atmospheric_density" | "drag" | "uphill_force";
 
+interface ReadinessAuditPayload {
+  system_readiness_state: string;
+  operational_safety_certified: boolean;
+  application_health?: {
+    healthy: boolean;
+    status: string;
+  };
+  execution_readiness?: {
+    ready: boolean;
+    status: string;
+    telemetry_connected: boolean;
+    reason?: string;
+  };
+  data_gaps?: string[];
+  degraded_reasons?: string[];
+  pillars?: Record<
+    string,
+    {
+      ready: boolean;
+      [key: string]: unknown;
+    }
+  >;
+}
+
 export default function SettingsAssumptionsPage() {
   const [health, setHealth] = useState<SystemHealth | null>(null);
+  const [readiness, setReadiness] = useState<ReadinessAuditPayload | null>(null);
   const [parameters, setParameters] = useState<PhysicsParameter[]>([]);
   const [models, setModels] = useState<PhysicsModelDescriptor[]>([]);
   const [localization, setLocalization] = useState<LocalizationStatusResponse | null>(null);
@@ -39,13 +64,15 @@ export default function SettingsAssumptionsPage() {
     setLoading(true);
     setError(null);
     try {
-      const [hRes, pRes, mRes, lRes] = await Promise.all([
+      const [hRes, rRes, pRes, mRes, lRes] = await Promise.all([
         fetch(`${API_BASE_URL}/health`, { cache: "no-store" }),
+        fetch(`${API_BASE_URL}/health/readiness?verify_checksums=false`, { cache: "no-store" }),
         fetch(`${API_BASE_URL}/parameters`, { cache: "no-store" }),
         fetch(`${API_BASE_URL}/physics/models`, { cache: "no-store" }),
         fetch(`${API_BASE_URL}/localization/status`, { cache: "no-store" }),
       ]);
       if (hRes.ok) setHealth(await hRes.json());
+      if (rRes.ok) setReadiness(await rRes.json());
       if (pRes.ok) setParameters(await pRes.json());
       if (mRes.ok) setModels(await mRes.json());
       if (lRes.ok) setLocalization(await lRes.json());
@@ -60,14 +87,16 @@ export default function SettingsAssumptionsPage() {
     let active = true;
     async function init() {
       try {
-        const [hRes, pRes, mRes, lRes] = await Promise.all([
+        const [hRes, rRes, pRes, mRes, lRes] = await Promise.all([
           fetch(`${API_BASE_URL}/health`, { cache: "no-store" }),
+          fetch(`${API_BASE_URL}/health/readiness?verify_checksums=false`, { cache: "no-store" }),
           fetch(`${API_BASE_URL}/parameters`, { cache: "no-store" }),
           fetch(`${API_BASE_URL}/physics/models`, { cache: "no-store" }),
           fetch(`${API_BASE_URL}/localization/status`, { cache: "no-store" }),
         ]);
         if (!active) return;
         if (hRes.ok) setHealth(await hRes.json());
+        if (rRes.ok) setReadiness(await rRes.json());
         if (pRes.ok) setParameters(await pRes.json());
         if (mRes.ok) setModels(await mRes.json());
         if (lRes.ok) setLocalization(await lRes.json());
@@ -226,6 +255,82 @@ export default function SettingsAssumptionsPage() {
           )}
         </div>
       </div>
+
+      {/* 4-Pillar System Readiness vs Execution Readiness Audit */}
+      {readiness && (
+        <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-5 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#1e2638] pb-3">
+            <div className="flex items-center gap-2 text-sm font-bold text-slate-100">
+              <ShieldCheck className="w-4 h-4 text-amber-400" />
+              <span>System Readiness &amp; Operational Boundaries</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono">
+              <span className="px-2 py-0.5 rounded bg-emerald-950/60 border border-emerald-700/50 text-emerald-300">
+                APP: {readiness.application_health?.status ?? "UNKNOWN"}
+              </span>
+              <span className="px-2 py-0.5 rounded bg-amber-950/60 border border-amber-700/50 text-amber-300">
+                READINESS: {readiness.system_readiness_state}
+              </span>
+              <span className="px-2 py-0.5 rounded bg-red-950/60 border border-red-800/50 text-red-300">
+                EXECUTION: {readiness.execution_readiness?.status ?? "UNAVAILABLE"}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs font-mono">
+            {["data", "science", "spatial", "mission"].map((key) => {
+              const p = readiness.pillars?.[key];
+              const ok = Boolean(p?.ready);
+              return (
+                <div key={key} className="p-3 rounded bg-[#0d111a] border border-[#1d2536] space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="uppercase text-slate-400">{key} pillar</span>
+                    <span className={ok ? "text-emerald-300" : "text-amber-300"}>
+                      {ok ? "READY" : "GAPS / NOT READY"}
+                    </span>
+                  </div>
+                  {key === "data" && p && (
+                    <div className="text-[10px] text-slate-400">
+                      DEMs ready: {String(p.processed_dem_ready_count ?? 0)} | Comp Index:{" "}
+                      {p.composition_index_available ? "verified" : "unavailable"}
+                    </div>
+                  )}
+                  {key === "science" && p && (
+                    <div className="text-[10px] text-slate-400">
+                      Questions: {String(p.questions_registered ?? 0)} | Instruments: {String(p.instruments_registered ?? 0)}
+                    </div>
+                  )}
+                  {key === "spatial" && p && (
+                    <div className="text-[10px] text-slate-400">
+                      Libs: {p.geospatial_libraries_available ? "ok" : "missing"} | DEMs:{" "}
+                      {String(p.processed_dem_ready_count ?? 0)}
+                    </div>
+                  )}
+                  {key === "mission" && p && (
+                    <div className="text-[10px] text-slate-400">
+                      Routing DEM: {p.routing_executable_with_local_dem ? "yes" : "no"} | Telemetry: offline
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {readiness.execution_readiness?.reason && (
+            <div className="text-[11px] text-amber-200/90 bg-amber-950/30 border border-amber-800/40 rounded px-3 py-2">
+              {readiness.execution_readiness.reason}
+            </div>
+          )}
+
+          {readiness.data_gaps && readiness.data_gaps.length > 0 && (
+            <ul className="text-[11px] text-slate-300 list-disc list-inside space-y-0.5">
+              {readiness.data_gaps.map((gap, i) => (
+                <li key={i}>{gap}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {/* Interactive Physics Calculation Workbench */}
       <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-5 space-y-4">

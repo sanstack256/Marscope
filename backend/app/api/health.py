@@ -6,7 +6,7 @@ Verifies actual subsystem initialization and dependency health.
 """
 
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from fastapi import APIRouter, Query
 from app.core.config import settings
 from app.core.readiness import evaluate_system_readiness
@@ -84,6 +84,14 @@ async def get_system_readiness(
         False,
         description="Recompute SHA-256 checksums for all local raw/processed assets during inspection.",
     ),
+    dataset_id: Optional[str] = Query(
+        None,
+        description="Optional dataset_id to check contextual readiness for terrain/routing execution.",
+    ),
+    question_id: Optional[str] = Query(
+        None,
+        description="Optional science question_id to check contextual investigation readiness.",
+    ),
 ) -> Dict[str, Any]:
     """Return Prompt 22 Section 12 4-pillar operational & data readiness audit."""
     return evaluate_system_readiness(
@@ -95,4 +103,6 @@ async def get_system_readiness(
         target_registry=target_registry,
         settings=settings,
         verify_checksums=verify_checksums,
+        dataset_id=dataset_id,
+        question_id=question_id,
     )
