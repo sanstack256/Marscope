@@ -72,9 +72,20 @@ def _resolve_raw_dem_open_path(dataset: Dataset, raw_dir: Path) -> Tuple[Path, O
         if p.exists():
             raw_file = p
     if raw_file is None:
-        cand = raw_dir / dataset.product_id.lower()
-        if cand.exists():
-            raw_file = cand
+        for cand in (
+            raw_dir / dataset.product_id.lower(),
+            raw_dir / dataset.product_id,
+            raw_dir / dataset.product_id.upper(),
+        ):
+            if cand.exists():
+                raw_file = cand
+                break
+    if raw_file is None and raw_dir.exists():
+        target_lower = dataset.product_id.lower()
+        for entry in raw_dir.iterdir():
+            if entry.is_file() and entry.name.lower() == target_lower:
+                raw_file = entry
+                break
     if raw_file is None or not raw_file.exists():
         raise FileNotFoundError(f"Raw DEM file for '{dataset.id}' is not present in {raw_dir}.")
 

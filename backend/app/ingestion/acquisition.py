@@ -237,7 +237,7 @@ class AcquisitionService:
     async def download_product(
         self,
         dataset: Dataset,
-        timeout_seconds: float = 120.0,
+        timeout_seconds: float = 600.0,
         chunk_size: int = 65536,
         max_bytes: Optional[int] = 1_500_000_000,
         overwrite: bool = False,
@@ -267,8 +267,12 @@ class AcquisitionService:
         label_rel_path: Optional[str] = None
         dataset.acquisition_state = AcquisitionState.DOWNLOAD_PENDING
 
-        # Download companion PDS3/PDS4 label atomically first when available
-        if dataset.original_label_url:
+        # Download companion PDS3/PDS4 label atomically first when available as a separate label file
+        if (
+            dataset.original_label_url
+            and dataset.original_label_url != source_url
+            and not dataset.original_label_url.lower().split("?")[0].endswith(".img")
+        ):
             lbl_name = Path(dataset.original_label_url.split("?")[0]).name
             if lbl_name:
                 if lbl_name.lower().endswith(".lbl"):

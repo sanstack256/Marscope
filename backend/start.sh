@@ -25,7 +25,7 @@ seed_catalog_metadata_if_empty(Path(os.environ["MARSCOPE_DATASETS_DIR"]))
 PY
 
 # Auto-acquire mandatory Gale DEMs on empty persistent volumes without blocking healthchecks
-if [ ! -f "${DATASETS_DIR}/raw/dteec_009149_1750_009294_1750_u01.img" ]; then
+if [ ! -f "${DATASETS_DIR}/raw/dteec_009149_1750_009294_1750_u01.img" ] && [ ! -f "${DATASETS_DIR}/raw/DTEEC_009149_1750_009294_1750_U01.IMG" ]; then
   echo "[MARSCOPE] Mandatory HiRISE DEM missing in ${DATASETS_DIR}/raw; starting background NASA PDS acquisition..."
   (
     PYTHONPATH="${PYTHONPATH:-/app/backend}" python3 - <<'PY'
