@@ -76,7 +76,8 @@ Marscope/
 │   ├── physics-models.md
 │   ├── api-contracts.md
 │   ├── validation-plan.md
-│   └── demo-script.md
+│   ├── demo-script.md
+│   └── MISSION_FOUNDATION.md   # Multi-astronaut auth, RBAC, SOS, landing-site & offline spec
 ├── datasets/               # Planetary dataset catalogs and manifests
 │   ├── catalog/
 │   ├── manifests/
@@ -196,7 +197,7 @@ Marscope/
 | Tier | Command | Network / Data Requirement | Scope |
 | :--- | :--- | :--- | :--- |
 | **Tier 1: Offline Code & Synthetic Contract Tests** | `cd backend && pytest tests -q` | **Offline** (real-data tests skip cleanly if local binaries absent; set `MARSCOPE_REQUIRE_REAL_DATA=1` to fail instead of skip) | Canonical hashing, persistence/locking, invalidation propagation, physics, CRS, auth/path traversal, API contracts |
-| **Tier 2: Frontend Static + Store Race Suite** | `cd frontend && npx tsc --noEmit && npm run lint && npm run build && node --test tests/test_store_race_and_sync.mjs` | **Offline** | TypeScript strictness, ESLint, Next.js production build, monotonic `AbortController` race guards, HTTP 409/401/403/422 classification |
+| **Tier 2: Frontend Static + Unit Suite** | `cd frontend && npx tsc --noEmit && npm run lint && npm run build && node --test tests/test_store_race_and_sync.mjs` | **Offline** | TypeScript strictness, ESLint, Next.js production build, store race guards, and offline queue contract (`src/lib/__tests__/offlineQueue.test.ts`) |
 | **Tier 3: Live NASA Archive Integration** | `cd backend && NASA_INTEGRATION=1 pytest -m nasa_integration -q -s` | **Live Internet + Optional Real Assets** | Live NASA PDS ODE / Atlas / HiRISE / Mars Trek endpoint reachability (opt-in) |
 
 ### Prompt 22 Reproducibility, Persistence & Security Architecture
@@ -235,7 +236,11 @@ MARSCOPE strictly enforces an anti-fabrication standard:
 
 ## 7. Current Project Status & Reproducible Build
 
-- **Phase:** Prompt 21 Integrated Science-to-Mission Orchestration, End-to-End Unification & Loose-End Closure is implemented alongside Prompt 20 Advanced Human Marswalk Intelligence (`app/eva_operations/`, `app/mobility/`), Prompt 19 Multi-Mission Spatial Intelligence (`app/geospatial/`, `app/terrain/spatial_terrain.py`, `app/terrain/morphology.py`), and Prompt 17–18 Scientific Investigation & Real NASA Data Integrity (`app/science/investigation/`, `app/ingestion/`).
+- **Phase:** **Prompt 1 Mission Foundation & Multi-Astronaut Platform** ([docs/MISSION_FOUNDATION.md](docs/MISSION_FOUNDATION.md)) integrated cleanly atop **Prompt 21–23** Science-to-Mission Orchestration, **Prompt 20** Advanced Human Marswalk Intelligence (`app/eva_operations/`, `app/mobility/`), **Prompt 19** Multi-Mission Spatial Intelligence (`app/geospatial/`, `app/terrain/spatial_terrain.py`, `app/terrain/morphology.py`), and **Prompt 17–18** Scientific Investigation & Real NASA Data Integrity (`app/science/investigation/`, `app/ingestion/`).
+- **Prompt 1 Multi-Astronaut Mission Foundation:**
+  - **Relational Persistence & Auth:** 14-table SQLite WAL / SQL migration schema (`backend/app/db/migrations/0001_mission_foundation.sql`), `scrypt` authentication with `HttpOnly` cookies + double-submit CSRF, rate-limited auth endpoints, session management, and strictly nullable `USER_ASSUMED` astronaut mass fields (`body_mass_kg`, `suit_mass_kg`, `equipment_mass_kg`).
+  - **Collaboration, Emergency SOS & Field Science:** Mission-isolated RBAC (`MISSION_LEAD`, `ASTRONAUT`, `MISSION_OPERATOR`), hashed invitations, `IAU2000:49900` position validation, isolated per-mission SSE streams, persistent 1.2s press-and-hold SOS trigger, private out-of-webroot voice-note storage with HMAC signed playback, `species.py`-validated crew field observations with optimistic versioning, and IndexedDB offline queueing (`marscope_offline_v1`).
+  - **Landing-Site Intelligence & Interface Unification:** Explicit unconfigured default landing-site policy (`LANDING_SITE_UNCONFIGURED`, zero Gale Crater silent fallback), catalog gazetteer search, algorithmic 8-connected DEM BFS 3D planning perimeter (`CURRENTLY EVALUATED PLANNING BOUNDARY — NOT A CERTIFIED SAFETY LIMIT`), operator approval, unified CSS design system tokens, and synchronized Cesium + Three.js mission overlays.
 - **Prompt 21 Integrated Science-to-Mission Orchestration:**
   - **Single Shared Calculation & Provenance Backbone:** Unifies epistemic vocabulary to `ScientificDataClassification` (`DIRECTLY_MEASURED`, `ARCHIVE_DERIVED`, `MARSCOPE_DERIVED`, `MODELLED`, `USER_ASSUMED`, `UNVERIFIED`, `UNAVAILABLE`), eliminates parallel EVA budget/return calculations in `science/investigation/campaign.py` by delegating primary stop envelopes directly into `EvaOperationsService.evaluate_precomputed_route_envelope(...)` (persisting linked `MissionOperationalSession` records), and enriches `CandidateTargetEvaluation` with real HiRISE DEM terrain metrics, Prompt 19 pair registration states, spatial coverage categories, and morphology review linkage.
   - **Bidirectional Cross-Domain Orchestration & Optimistic Concurrency:** Introduces the 18-state `IntegratedMissionLifecycleState` and 8-state `ObservationLifecycleState` pipelines, explicit MSL rover vs. human EVA platform compatibility disclosures, optimistic `expected_plan_version` HTTP 409 conflict checks, idempotent observation/event ingestion, bidirectional invalidation across EVA hazard events, dataset download/reprocessing, morphology reviews, and archive-comparison hypothesis reassessments, fail-closed `POST /api/science-investigation/orchestration/invalidate`, and unified SHA-256 checksummed scientific + EVA + morphology dossiers (`GET /api/science-investigation/campaigns/{campaign_id}/unified-dossier`).

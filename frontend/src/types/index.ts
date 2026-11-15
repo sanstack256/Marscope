@@ -3829,3 +3829,317 @@ export interface SpatialCacheStatus {
   recent_invalidations: CacheInvalidationEvent[];
 }
 
+// ============================================================================
+// Prompt 1: Multi-Astronaut Mission Foundation, Auth, SOS, Observations,
+// Landing-Site Intelligence & Offline Sync Contracts
+// ============================================================================
+
+export type MissionRole = "MISSION_LEAD" | "ASTRONAUT" | "MISSION_OPERATOR";
+export type CrewConnectionStatus =
+  | "CONNECTED"
+  | "DISCONNECTED"
+  | "POSITION_STALE"
+  | "POSITION_UNAVAILABLE"
+  | "LOCATION_SHARING_DISABLED"
+  | "UNKNOWN";
+
+export type ObservationCategory =
+  | "MINERAL_DISCOVERY"
+  | "HAZARD_REPORT"
+  | "SAMPLE_NOTE"
+  | "TERRAIN_ANOMALY"
+  | "SCIENCE_NOTE";
+
+export type ObservationEpistemicState =
+  | "USER_REPORTED"
+  | "UNVERIFIED"
+  | "CORROBORATED_BY_EVIDENCE"
+  | "CONTESTED"
+  | "RETRACTED";
+
+export type SosStatus =
+  | "ACTIVE"
+  | "DELIVERED_TO_CREW_DEVICE"
+  | "ACKNOWLEDGED_BY_CREW"
+  | "RESOLVED"
+  | "CANCELLED";
+
+export interface OperationalAssumedField {
+  value: number | null;
+  unit: string;
+  classification: "USER_ASSUMED" | "NOT_PROVIDED";
+  updated_at_utc?: string | null;
+  source?: string | null;
+}
+
+export interface AstronautProfile {
+  astronaut_id: string;
+  email: string;
+  display_name: string;
+  is_active: boolean;
+  body_mass_kg: number | null;
+  body_mass_meta: OperationalAssumedField;
+  suit_mass_kg: number | null;
+  suit_mass_meta: OperationalAssumedField;
+  equipment_mass_kg: number | null;
+  equipment_mass_meta: OperationalAssumedField;
+  total_mass_kg: number | null;
+  mobility_constraints?: string | null;
+  emergency_contact?: string | null;
+  profile_visibility: "mission_members" | "private";
+  profile_edit_history: Array<Record<string, unknown>>;
+  created_at_utc: string;
+  updated_at_utc: string;
+}
+
+export interface AuthSessionState {
+  authenticated: boolean;
+  astronaut?: AstronautProfile | null;
+  csrf_token?: string | null;
+  session_id?: string | null;
+}
+
+export interface MissionSummary {
+  mission_id: string;
+  name: string;
+  description: string;
+  objective: string;
+  lead_astronaut_id: string;
+  operating_region?: string | null;
+  planned_start_utc?: string | null;
+  planned_end_utc?: string | null;
+  visibility: string;
+  membership_policy: string;
+  status: string;
+  landing_site_status: "LANDING_SITE_UNCONFIGURED" | "REGISTERED";
+  my_role: MissionRole;
+  active_member_count: number;
+  active_sos_count: number;
+  created_at_utc: string;
+  updated_at_utc: string;
+}
+
+export interface MissionInvitation {
+  invite_id: string;
+  mission_id: string;
+  created_by: string;
+  role_on_join: MissionRole;
+  single_use: boolean;
+  max_uses?: number | null;
+  uses_count: number;
+  expires_at_utc: string;
+  revoked_at_utc?: string | null;
+  created_at_utc: string;
+  invite_token?: string | null;
+}
+
+export interface CrewPosition {
+  position_id: string;
+  mission_id: string;
+  astronaut_id: string;
+  display_name?: string | null;
+  latitude: number;
+  longitude_east: number;
+  crs: string;
+  latitude_convention: string;
+  longitude_direction: string;
+  elevation_m?: number | null;
+  elevation_source?: string | null;
+  uncertainty_m?: number | null;
+  source_id: string;
+  source_classification: string;
+  sequence_number: number;
+  measured_at_utc: string;
+  received_at_utc: string;
+  age_seconds: number;
+  is_stale: boolean;
+  validation_status: string;
+}
+
+export interface CrewMember {
+  astronaut_id: string;
+  display_name: string;
+  role: MissionRole;
+  membership_status: "ACTIVE" | "LEFT" | "REMOVED";
+  location_sharing_enabled: boolean;
+  connection_status: CrewConnectionStatus;
+  joined_at_utc: string;
+  latest_position?: CrewPosition | null;
+  body_mass_kg?: number | null;
+  suit_mass_kg?: number | null;
+  equipment_mass_kg?: number | null;
+  total_mass_kg?: number | null;
+  mass_classification?: string | null;
+  emergency_contact?: string | null;
+}
+
+export interface VoiceNoteRecord {
+  voice_note_id: string;
+  mission_id: string;
+  astronaut_id: string;
+  display_name?: string | null;
+  linked_event_type?: string | null;
+  linked_event_id?: string | null;
+  mime_type: string;
+  file_size_bytes: number;
+  duration_seconds?: number | null;
+  sha256_checksum: string;
+  upload_status: string;
+  playback_url: string;
+  created_at_utc: string;
+}
+
+export interface SosAcknowledgement {
+  ack_id: string;
+  sos_id: string;
+  astronaut_id: string;
+  display_name: string;
+  ack_type: "DELIVERED_TO_CREW_DEVICE" | "ACKNOWLEDGED_BY_CREW" | "RESOLVED" | "CANCELLED";
+  note?: string | null;
+  created_at_utc: string;
+}
+
+export interface SosEvent {
+  sos_id: string;
+  mission_id: string;
+  astronaut_id: string;
+  astronaut_display_name: string;
+  event_type: string;
+  status: SosStatus;
+  client_event_id?: string | null;
+  latitude?: number | null;
+  longitude_east?: number | null;
+  elevation_m?: number | null;
+  crs?: string | null;
+  position_source?: string | null;
+  position_classification?: string | null;
+  position_age_s?: number | null;
+  position_status: string;
+  message?: string | null;
+  voice_note?: VoiceNoteRecord | null;
+  acknowledgements: SosAcknowledgement[];
+  created_at_utc: string;
+  server_received_at_utc: string;
+  updated_at_utc: string;
+}
+
+export interface FieldObservation {
+  observation_id: string;
+  mission_id: string;
+  astronaut_id: string;
+  astronaut_display_name: string;
+  client_event_id?: string | null;
+  version: number;
+  latitude?: number | null;
+  longitude_east?: number | null;
+  elevation_m?: number | null;
+  crs: string;
+  coordinate_source: string;
+  uncertainty_m?: number | null;
+  target_id?: string | null;
+  category: ObservationCategory;
+  species_canonical_id?: string | null;
+  species_display_name?: string | null;
+  description: string;
+  epistemic_state: ObservationEpistemicState;
+  instrument_id?: string | null;
+  source_product_id?: string | null;
+  calibration_metadata?: string | null;
+  evidence_ids: string[];
+  voice_note?: VoiceNoteRecord | null;
+  offline_created_at_utc?: string | null;
+  synced_at_utc?: string | null;
+  reviewed_by?: string | null;
+  review_note?: string | null;
+  annotations: Array<Record<string, unknown>>;
+  audit_history: Array<Record<string, unknown>>;
+  created_at_utc: string;
+  updated_at_utc: string;
+}
+
+export interface GazetteerSiteRecord {
+  record_id: string;
+  name: string;
+  region?: string | null;
+  latitude: number;
+  longitude_east: number;
+  crs: string;
+  source: string;
+  dataset_id: string;
+  coverage_verified: boolean;
+  elevation_m?: number | null;
+  uncertainty_m?: number | null;
+}
+
+export interface LandingSiteRecord {
+  landing_site_id: string;
+  mission_id: string;
+  name: string;
+  latitude: number;
+  longitude_east: number;
+  crs: string;
+  latitude_convention: string;
+  longitude_direction: string;
+  source: string;
+  source_record_id?: string | null;
+  uncertainty_m?: number | null;
+  elevation_m?: number | null;
+  terrain_dataset_id?: string | null;
+  dem_coverage_state: "COVERED_DEM" | "OUTSIDE_EVALUATED_DEM_COVERAGE" | "UNVERIFIED_EXTERNAL";
+  registration_state: "LANDING_SITE_UNCONFIGURED" | "REGISTERED";
+  updated_by: string;
+  history: Array<Record<string, unknown>>;
+  created_at_utc: string;
+  updated_at_utc: string;
+}
+
+export interface LandingSitePerimeter {
+  perimeter_id: string;
+  mission_id: string;
+  landing_site_id: string;
+  status:
+    | "EVALUATED_WITH_VALIDATED_DEM"
+    | "INDETERMINATE_OUTSIDE_DEM"
+    | "INDETERMINATE_MISSING_CONSTRAINTS";
+  classification_label: string;
+  algorithm_id: string;
+  algorithm_version: string;
+  terrain_dataset_id?: string | null;
+  native_resolution_m?: number | null;
+  coverage_fraction?: number | null;
+  geometry_geojson?: Record<string, unknown> | null;
+  excluded_regions_geojson?: Record<string, unknown> | null;
+  constraints_used: Record<string, unknown>;
+  constraints_missing: string[];
+  limitations: string[];
+  provenance: Record<string, unknown>;
+  operator_approved: boolean;
+  approved_by?: string | null;
+  approved_at_utc?: string | null;
+  created_at_utc: string;
+}
+
+export interface LandingSiteBundle {
+  mission_id: string;
+  landing_site_status: "LANDING_SITE_UNCONFIGURED" | "REGISTERED";
+  landing_site?: LandingSiteRecord | null;
+  perimeter?: LandingSitePerimeter | null;
+}
+
+export interface MissionEventRecord {
+  event_id: string;
+  mission_id: string;
+  actor_id: string;
+  event_type: string;
+  client_timestamp_utc?: string | null;
+  server_timestamp_utc: string;
+  payload_schema_version: string;
+  event_seq: number;
+  correlation_id: string;
+  client_event_id?: string | null;
+  provenance: Record<string, unknown>;
+  auth_context: Record<string, unknown>;
+  payload: Record<string, unknown>;
+}
+
+

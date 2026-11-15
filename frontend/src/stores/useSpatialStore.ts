@@ -125,9 +125,17 @@ interface SpatialState {
       | "showFootprintsOverlay"
       | "showGapsOverlay"
       | "showMorphologyOverlay"
-      | "showRoverAssocOverlay",
+      | "showRoverAssocOverlay"
+      | "showLandingSiteOverlay"
+      | "showCrewOverlay"
+      | "showFieldObservationsOverlay",
     value: boolean
   ) => void;
+  focusCoordinate: { lat: number; lon: number; heightM?: number; label?: string } | null;
+  setFocusCoordinate: (coord: { lat: number; lon: number; heightM?: number; label?: string } | null) => void;
+  showLandingSiteOverlay: boolean;
+  showCrewOverlay: boolean;
+  showFieldObservationsOverlay: boolean;
   addMeasurePoint: (pt: MeasurePoint) => void;
   clearMeasurePoints: () => void;
   setSelectedEntity: (entity: SelectedSpatialEntity) => void;
@@ -268,6 +276,11 @@ export const useSpatialStore = create<SpatialState>((set, get) => ({
   showGapsOverlay: true,
   showMorphologyOverlay: false,
   showRoverAssocOverlay: false,
+  showLandingSiteOverlay: true,
+  showCrewOverlay: true,
+  showFieldObservationsOverlay: true,
+  focusCoordinate: null,
+  setFocusCoordinate: (focusCoordinate) => set({ focusCoordinate }),
   measurePoints: [],
   selectedEntity: null,
 

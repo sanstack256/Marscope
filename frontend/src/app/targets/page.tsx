@@ -234,8 +234,8 @@ export default function TargetExplorerPage() {
                         onClick={() => toggleTargetId(tgt.id)}
                         className={`px-2 py-1 rounded text-[10px] font-mono border transition-colors ${
                           selectedTargetIds.includes(tgt.id)
-                            ? "bg-purple-600/30 border-purple-400 text-purple-200"
-                            : "bg-[#161c2b] border-[#252f44] text-slate-300 hover:border-purple-400/50"
+                            ? "bg-cyan-500/20 border-cyan-400 text-cyan-200"
+                            : "bg-[#161c2b] border-[#252f44] text-slate-300 hover:border-cyan-400/50"
                         }`}
                       >
                         {selectedTargetIds.includes(tgt.id) ? "In Route ✓" : "+ Add to Route"}

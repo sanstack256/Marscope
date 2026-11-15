@@ -269,6 +269,9 @@ export default function SurfaceExplorerPage() {
   const showGapsOverlay = useSpatialStore((s) => s.showGapsOverlay);
   const showMorphologyOverlay = useSpatialStore((s) => s.showMorphologyOverlay);
   const showRoverAssocOverlay = useSpatialStore((s) => s.showRoverAssocOverlay);
+  const showLandingSiteOverlay = useSpatialStore((s) => s.showLandingSiteOverlay);
+  const showCrewOverlay = useSpatialStore((s) => s.showCrewOverlay);
+  const showFieldObservationsOverlay = useSpatialStore((s) => s.showFieldObservationsOverlay);
   const setOverlayFlag = useSpatialStore((s) => s.setOverlayFlag);
   const comparisonMode = useSpatialStore((s) => s.comparisonMode);
   const setComparisonMode = useSpatialStore((s) => s.setComparisonMode);
@@ -544,6 +547,42 @@ export default function SurfaceExplorerPage() {
                     {verifyFeedback}
                   </div>
                 )}
+
+                {/* Mission Operational Overlays (Globe + 3D Terrain synchronized) */}
+                <div className="p-2.5 rounded-lg bg-[#0d111a] border border-[#1d2536] space-y-1.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Mission Spatial Overlays
+                  </div>
+                  <div className="grid grid-cols-1 gap-1 text-[11px] text-slate-300">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={showLandingSiteOverlay}
+                        onChange={(e) => setOverlayFlag("showLandingSiteOverlay", e.target.checked)}
+                        className="accent-cyan-500"
+                      />
+                      <span>Landing Site &amp; 3D DEM Perimeter</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={showCrewOverlay}
+                        onChange={(e) => setOverlayFlag("showCrewOverlay", e.target.checked)}
+                        className="accent-cyan-500"
+                      />
+                      <span>Crew Positions &amp; Active SOS Beacons</span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={showFieldObservationsOverlay}
+                        onChange={(e) => setOverlayFlag("showFieldObservationsOverlay", e.target.checked)}
+                        className="accent-cyan-500"
+                      />
+                      <span>Crew Field Observations</span>
+                    </label>
+                  </div>
+                </div>
 
                 {/* Renderable Layers */}
                 <div className="space-y-2">
@@ -1037,10 +1076,10 @@ export default function SurfaceExplorerPage() {
                     )}
 
                     {opticalData && opticalData.available && (
-                      <div className="p-2.5 rounded-lg bg-[#090d16] border border-purple-500/30 space-y-1.5 text-[10px] font-mono">
+                      <div className="p-2.5 rounded-lg bg-[#090d16] border border-cyan-500/30 space-y-1.5 text-[10px] font-mono">
                         <div className="flex items-center justify-between">
-                          <span className="font-semibold text-purple-300">HiRISE Optical Analysis</span>
-                          <span className="px-1.5 py-0.5 rounded bg-purple-950/80 text-purple-300 text-[9px]">
+                          <span className="font-semibold text-cyan-300">HiRISE Optical Analysis</span>
+                          <span className="px-1.5 py-0.5 rounded bg-cyan-950/80 text-cyan-300 text-[9px]">
                             CANDIDATE_ONLY
                           </span>
                         </div>
@@ -1050,7 +1089,7 @@ export default function SurfaceExplorerPage() {
                         {opticalData.candidates.slice(0, 3).map((c) => (
                           <div key={c.feature_id} className="text-[9px] text-slate-300 flex justify-between gap-2">
                             <span className="truncate">{c.candidate_type}</span>
-                            <span className="text-purple-300 shrink-0">z={c.local_contrast_zscore.toFixed(2)}</span>
+                            <span className="text-cyan-300 shrink-0">z={c.local_contrast_zscore.toFixed(2)}</span>
                           </div>
                         ))}
                       </div>
@@ -1469,7 +1508,7 @@ export default function SurfaceExplorerPage() {
                           <span
                             className={`px-1.5 py-0.5 rounded border ${
                               inspectedEvidence.location_semantic_type === "rover_station_location"
-                                ? "bg-purple-950/60 border-purple-700/60 text-purple-200"
+                                ? "bg-cyan-950/60 border-cyan-700/60 text-cyan-200"
                                 : inspectedEvidence.location_semantic_type === "unlocated"
                                   ? "bg-red-950/60 border-red-700/60 text-red-200"
                                   : "bg-sky-950/60 border-sky-700/60 text-sky-200"
@@ -1619,7 +1658,7 @@ export default function SurfaceExplorerPage() {
                               <span
                                 className={`px-1.5 py-0.5 rounded border ${
                                   cand.location_semantic_type === "rover_station_location"
-                                    ? "bg-purple-950/50 border-purple-700/60 text-purple-200"
+                                    ? "bg-cyan-950/50 border-cyan-700/60 text-cyan-200"
                                     : "bg-amber-950/40 border-amber-700/50 text-amber-200"
                                 }`}
                               >
@@ -1662,7 +1701,7 @@ export default function SurfaceExplorerPage() {
                               </div>
                             )}
                             {cand.coordinate_limitations && cand.coordinate_limitations.length > 0 && (
-                              <div className="text-[9px] text-purple-300/90 leading-snug">
+                              <div className="text-[9px] text-amber-300/90 leading-snug">
                                 Note: {cand.coordinate_limitations[0]}
                               </div>
                             )}

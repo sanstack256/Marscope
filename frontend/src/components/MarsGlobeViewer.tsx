@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type * as CesiumTypes from "cesium";
 import { API_BASE_URL } from "../lib/constants";
 import { useLayerStore } from "../stores/useLayerStore";
+import { useAuthMissionStore } from "../stores/useAuthMissionStore";
 import { useMissionStore } from "../stores/useMissionStore";
 import { useRoutingStore } from "../stores/useRoutingStore";
 import { Compass, Globe2, Layers, Minus, Plus, RotateCcw, Crosshair, Route as RouteIcon } from "lucide-react";
@@ -847,6 +848,31 @@ export function MarsGlobeViewer() {
   const coverageReport = useSpatialStore((s) => s.coverageReport);
   const showFootprintsOverlay = useSpatialStore((s) => s.showFootprintsOverlay);
   const showGapsOverlay = useSpatialStore((s) => s.showGapsOverlay);
+  const showLandingSiteOverlay = useSpatialStore((s) => s.showLandingSiteOverlay);
+  const showCrewOverlay = useSpatialStore((s) => s.showCrewOverlay);
+  const showFieldObservationsOverlay = useSpatialStore((s) => s.showFieldObservationsOverlay);
+  const focusCoordinate = useSpatialStore((s) => s.focusCoordinate);
+
+  const landingSiteBundle = useAuthMissionStore((s) => s.landingSiteBundle);
+  const crewPositions = useAuthMissionStore((s) => s.positions);
+  const sosEvents = useAuthMissionStore((s) => s.sosEvents);
+  const fieldObservations = useAuthMissionStore((s) => s.observations);
+
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    const Cesium = cesiumRef.current;
+    const marsEllipsoid = ellipsoidRef.current;
+    if (!viewerReady || !viewer || viewer.isDestroyed() || !Cesium || !marsEllipsoid || !focusCoordinate) return;
+    const lon180 = focusCoordinate.lon > 180 ? focusCoordinate.lon - 360 : focusCoordinate.lon;
+    viewer.camera.flyTo({
+      destination: marsEllipsoid.cartographicToCartesian(
+        Cesium.Cartographic.fromDegrees(lon180, focusCoordinate.lat, focusCoordinate.heightM ?? 6500)
+      ),
+      orientation: { heading: 0, pitch: Cesium.Math.toRadians(-48), roll: 0 },
+      duration: 0.9,
+      complete: () => viewer.scene.requestRender(),
+    });
+  }, [viewerReady, focusCoordinate]);
 
   useEffect(() => {
     const viewer = viewerRef.current;
@@ -862,6 +888,131 @@ export function MarsGlobeViewer() {
     const entities = spatialSource.entities;
     entities.removeAll();
     const toLon180 = (lonEast: number) => (lonEast > 180 ? lonEast - 360 : lonEast);
+
+    if (showLandingSiteOverlay && landingSiteBundle?.landing_site) {
+      const ls = landingSiteBundle.landing_site;
+      entities.add({
+        id: `mission:landing-site:${ls.landing_site_id}`,
+        name: `Landing Site: ${ls.name}`,
+        position: marsEllipsoid.cartographicToCartesian(
+          Cesium.Cartographic.fromDegrees(toLon180(ls.longitude_east), ls.latitude, (ls.elevation_m ?? 0) + 120)
+        ),
+        point: {
+          pixelSize: 13,
+          color: Cesium.Color.fromCssColorString("#1F9D68"),
+          outlineColor: Cesium.Color.WHITE,
+          outlineWidth: 2,
+          heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+        },
+        label: {
+          text: `LANDING SITE: ${ls.name}`,
+          font: "11px monospace",
+          fillColor: Cesium.Color.fromCssColorString("#4ade80"),
+          outlineColor: Cesium.Color.BLACK,
+          outlineWidth: 2,
+          pixelOffset: new Cesium.Cartesian2(0, -18),
+        },
+      });
+
+      const perimGeom = landingSiteBundle.perimeter?.geometry_geojson as
+        | { geometry?: GeoJsonGeometry }
+        | GeoJsonGeometry
+        | null
+        | undefined;
+      const geomObj =
+        perimGeom && "geometry" in perimGeom && perimGeom.geometry ? perimGeom.geometry : (perimGeom as GeoJsonGeometry | null);
+      if (geomObj) {
+        const rings = extractGlobeOuterRings(geomObj);
+        rings.forEach((ring, rIdx) => {
+          const flat = ring.flatMap(([lon, lat]) => [toLon180(lon), lat]);
+          if (flat.length < 6) return;
+          entities.add({
+            id: `mission:perimeter:${rIdx}`,
+            polygon: {
+              hierarchy: Cesium.Cartesian3.fromDegreesArray(flat, marsEllipsoid),
+              material: Cesium.Color.fromCssColorString("#22B8CF").withAlpha(0.18),
+              outline: true,
+              outlineColor: Cesium.Color.fromCssColorString("#22B8CF"),
+              heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+            },
+          });
+        });
+      }
+    }
+
+    if (showCrewOverlay && crewPositions.length > 0) {
+      crewPositions.forEach((cp) => {
+        entities.add({
+          id: `mission:crew:${cp.astronaut_id}`,
+          name: cp.display_name || cp.astronaut_id,
+          position: marsEllipsoid.cartographicToCartesian(
+            Cesium.Cartographic.fromDegrees(toLon180(cp.longitude_east), cp.latitude, (cp.elevation_m ?? 0) + 80)
+          ),
+          point: {
+            pixelSize: 11,
+            color: Cesium.Color.fromCssColorString(cp.is_stale ? "#D98A1F" : "#22B8CF"),
+            outlineColor: Cesium.Color.WHITE,
+            outlineWidth: 2,
+            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+          },
+          label: {
+            text: `${cp.display_name || "Crew"}${cp.is_stale ? " (STALE)" : ""}`,
+            font: "10px monospace",
+            fillColor: Cesium.Color.WHITE,
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 2,
+            pixelOffset: new Cesium.Cartesian2(0, -16),
+          },
+        });
+      });
+    }
+
+    if (showFieldObservationsOverlay && fieldObservations.length > 0) {
+      fieldObservations.slice(0, 40).forEach((obs) => {
+        if (obs.latitude == null || obs.longitude_east == null) return;
+        entities.add({
+          id: `mission:obs:${obs.observation_id}`,
+          name: `${obs.category}: ${obs.species_display_name || obs.description}`,
+          position: marsEllipsoid.cartographicToCartesian(
+            Cesium.Cartographic.fromDegrees(toLon180(obs.longitude_east), obs.latitude, (obs.elevation_m ?? 0) + 60)
+          ),
+          point: {
+            pixelSize: 9,
+            color: Cesium.Color.fromCssColorString("#E25B38"),
+            outlineColor: Cesium.Color.WHITE,
+            outlineWidth: 1.5,
+            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+          },
+        });
+      });
+    }
+
+    sosEvents
+      .filter((s) => s.status !== "RESOLVED" && s.status !== "CANCELLED" && s.latitude != null && s.longitude_east != null)
+      .forEach((sos) => {
+        entities.add({
+          id: `mission:sos:${sos.sos_id}`,
+          name: `SOS: ${sos.astronaut_display_name}`,
+          position: marsEllipsoid.cartographicToCartesian(
+            Cesium.Cartographic.fromDegrees(toLon180(sos.longitude_east!), sos.latitude!, (sos.elevation_m ?? 0) + 140)
+          ),
+          point: {
+            pixelSize: 15,
+            color: Cesium.Color.fromCssColorString("#DC3545"),
+            outlineColor: Cesium.Color.WHITE,
+            outlineWidth: 2.5,
+            heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+          },
+          label: {
+            text: `SOS: ${sos.astronaut_display_name}`,
+            font: "bold 11px monospace",
+            fillColor: Cesium.Color.fromCssColorString("#ff6b7a"),
+            outlineColor: Cesium.Color.BLACK,
+            outlineWidth: 2,
+            pixelOffset: new Cesium.Cartesian2(0, -20),
+          },
+        });
+      });
 
     if (showFootprintsOverlay && intersectingFootprints.length > 0) {
       intersectingFootprints.slice(0, 12).forEach((fp) => {
@@ -905,7 +1056,20 @@ export function MarsGlobeViewer() {
     }
 
     viewer.scene.requestRender();
-  }, [viewerReady, intersectingFootprints, coverageReport, showFootprintsOverlay, showGapsOverlay]);
+  }, [
+    viewerReady,
+    intersectingFootprints,
+    coverageReport,
+    showFootprintsOverlay,
+    showGapsOverlay,
+    showLandingSiteOverlay,
+    showCrewOverlay,
+    showFieldObservationsOverlay,
+    landingSiteBundle,
+    crewPositions,
+    fieldObservations,
+    sosEvents,
+  ]);
 
   // Camera control handlers (proportional distance-aware zoom + Mars ellipsoid bounds)
   const handleZoom = (factor: number) => {

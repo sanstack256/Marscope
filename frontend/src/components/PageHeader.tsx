@@ -9,19 +9,19 @@ interface PageHeaderProps {
 
 export function PageHeader({ title, badge, description, actions }: PageHeaderProps) {
   return (
-    <div className="flex flex-col md:flex-row md:items-center justify-between pb-6 mb-6 border-b border-[#1e2638] gap-4">
+    <div className="flex flex-col md:flex-row md:items-center justify-between pb-5 mb-5 border-b border-[var(--border-subtle)] gap-3">
       <div>
-        <div className="flex items-center gap-3">
-          <h1 className="text-2xl font-bold tracking-tight text-slate-100">{title}</h1>
+        <div className="flex items-center gap-2.5 flex-wrap">
+          <h1 className="text-xl font-bold tracking-tight text-[var(--text-primary)]">{title}</h1>
           {badge && (
-            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold uppercase bg-[#e25b38]/20 text-[#f16f4d] border border-[#e25b38]/30">
+            <span className="px-2 py-0.5 rounded-[4px] text-[10px] font-mono font-semibold uppercase bg-[var(--accent-mars)]/15 text-[var(--accent-mars-hover)] border border-[var(--accent-mars)]/35">
               {badge}
             </span>
           )}
         </div>
-        <p className="text-xs text-slate-400 mt-1 max-w-2xl">{description}</p>
+        <p className="text-xs text-[var(--text-secondary)] mt-1 max-w-2xl leading-relaxed">{description}</p>
       </div>
-      {actions && <div className="flex items-center gap-3">{actions}</div>}
+      {actions && <div className="flex items-center gap-2.5 flex-wrap">{actions}</div>}
     </div>
   );
 }

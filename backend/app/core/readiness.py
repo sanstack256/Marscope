@@ -170,14 +170,20 @@ def evaluate_system_readiness(
         (os.getenv("MARSCOPE_OPERATOR_TOKEN") or "").strip()
         or str(getattr(settings, "OPERATOR_ACTION_TOKEN", "") or "").strip()
     )
+    from app.services.container import mission_db as _mission_db
+
+    db_status = _mission_db.status()
     mission_pillar = {
-        "ready": physics_ok and eva_store_ok and proc_dem_ready_count > 0,
+        "ready": physics_ok and eva_store_ok and proc_dem_ready_count > 0 and bool(db_status.get("available")),
         "physics_model_ready": physics_ok,
         "physics_parameters_count": len(physics_params),
         "routing_executable_with_local_dem": proc_dem_ready_count > 0,
         "live_telemetry_connected": False,
         "eva_store_readable": eva_store_ok,
         "eva_sessions_count": eva_sessions_count,
+        "mission_db_ready": bool(db_status.get("available")),
+        "mission_db_backend": db_status.get("engine"),
+        "mission_db_migrations": db_status.get("applied_migrations", []),
         "operator_token_configured": op_token_configured,
         "environment": str(getattr(settings, "ENVIRONMENT", "unknown")),
     }

@@ -1,37 +1,22 @@
 import type { Metadata } from "next";
-import { Suspense } from "react";
 import "./globals.css";
-import { Sidebar } from "../components/Sidebar";
-import { TopNav } from "../components/TopNav";
-import { IntegratedMissionContextBar } from "../components/IntegratedMissionContextBar";
+import { AppShellClient } from "../components/AppShellClient";
 
 export const metadata: Metadata = {
-  title: "MARSCOPE — Martian Surface Intelligence & Exploration System",
+  title: "MARSCOPE | Mars Surface Exploration & Multi-Astronaut Operations",
   description:
-    "Integrated Martian surface intelligence platform combining NASA planetary datasets, physics calculations, and constrained route optimization.",
+    "Uncertainty-aware Mars surface exploration, multi-astronaut collaboration, emergency response, landing-site intelligence, and orbital terrain analysis.",
 };
 
 export default function RootLayout({
   children,
-}: {
+}: Readonly<{
   children: React.ReactNode;
-}) {
+}>) {
   return (
-    <html lang="en" className="h-full antialiased dark">
-      <body className="h-full bg-[#0b0d13] text-slate-100 flex overflow-hidden">
-        {/* Navigation Sidebar */}
-        <Sidebar />
-
-        {/* Primary Viewport Area */}
-        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-          <TopNav />
-          <Suspense fallback={null}>
-            <IntegratedMissionContextBar />
-          </Suspense>
-          <main className="flex-1 overflow-y-auto p-6 md:p-8 bg-[#0b0d13]">
-            {children}
-          </main>
-        </div>
+    <html lang="en" className="dark">
+      <body className="antialiased bg-[var(--bg-canvas)] text-[var(--text-primary)] min-h-screen flex overflow-hidden">
+        <AppShellClient>{children}</AppShellClient>
       </body>
     </html>
   );

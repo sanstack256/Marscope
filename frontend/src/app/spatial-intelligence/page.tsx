@@ -976,7 +976,7 @@ export default function SpatialIntelligencePage() {
                                   {cand.epistemic_state}
                                 </span>
                                 {rev && (
-                                  <span className="px-1.5 py-0.5 rounded bg-purple-950/70 border border-purple-500/50 text-purple-200">
+                                  <span className="px-1.5 py-0.5 rounded bg-cyan-950/70 border border-cyan-500/50 text-cyan-200">
                                     {rev.classification} ({rev.action} by {rev.reviewer_id})
                                   </span>
                                 )}

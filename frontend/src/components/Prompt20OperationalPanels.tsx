@@ -17,7 +17,7 @@ import {
 import { useEvaOperationsStore, type EvaEvaluateParams } from "@/stores/useEvaOperationsStore";
 
 interface Props {
-  activeParams: EvaEvaluateParams;
+  activeParams?: EvaEvaluateParams | null;
 }
 
 const EVENT_TYPES = [
@@ -68,6 +68,7 @@ function statusTone(status: string | undefined): string {
 export function Prompt20OperationalPanels({ activeParams }: Props) {
   const {
     evaEnvelope,
+    lastEvalParams,
     missionSession,
     pendingComparison,
     sensitivityReport,
@@ -91,7 +92,7 @@ export function Prompt20OperationalPanels({ activeParams }: Props) {
     "Operator flagged loose regolith talus pocket along outbound bench; review contingency corridor."
   );
   const [replanSpeedMps, setReplanSpeedMps] = useState<string>(
-    activeParams.walking_speed_mps ? String(activeParams.walking_speed_mps) : "0.65"
+    activeParams?.walking_speed_mps ? String(activeParams.walking_speed_mps) : ""
   );
 
   if (!evaEnvelope) {
@@ -399,14 +400,16 @@ export function Prompt20OperationalPanels({ activeParams }: Props) {
             </label>
             <button
               type="button"
-              onClick={() => {
+                onClick={() => {
+                const baseParams = activeParams ?? lastEvalParams;
+                if (!baseParams) return;
                 const spd = Number(replanSpeedMps);
                 void previewReplan(missionId, {
                   reason: `Preview contingency replan from event '${eventType}'`,
                   updated_config: {
-                    ...activeParams,
+                    ...baseParams,
                     mission_id: missionId,
-                    walking_speed_mps: Number.isFinite(spd) && spd > 0 ? spd : activeParams.walking_speed_mps,
+                    walking_speed_mps: Number.isFinite(spd) && spd > 0 ? spd : baseParams.walking_speed_mps,
                   },
                 });
               }}

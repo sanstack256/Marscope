@@ -7,6 +7,8 @@ layer, localization, composition spatial index, coordinate association, and dest
 """
 
 from pathlib import Path
+import os
+from app.core.config import settings
 from app.ingestion.acquisition import AcquisitionService
 from app.ingestion.catalog import DatasetCatalogService
 from app.mobility.service import HumanMobilityService
@@ -37,7 +39,10 @@ from app.terrain.morphology import GeologicalMorphologyService
 # Project root path resolution
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
 REPO_ROOT = BACKEND_DIR.parent
-DATASETS_DIR = REPO_ROOT / "datasets"
+_configured_datasets_dir = (
+    settings.MARSCOPE_DATASETS_DIR or os.getenv("MARSCOPE_DATASETS_DIR") or ""
+).strip()
+DATASETS_DIR = Path(_configured_datasets_dir).resolve() if _configured_datasets_dir else (REPO_ROOT / "datasets")
 
 CATALOG_DIR = DATASETS_DIR / "catalog"
 MANIFESTS_DIR = DATASETS_DIR / "manifests"
@@ -160,3 +165,55 @@ science_investigation_service.attach_integration_services(
     spatial_registration_service=spatial_registration_service,
 )
 eva_operations_service.attach_science_service(science_investigation_service)
+
+# Prompt 1 Multi-Astronaut Mission Foundation Singletons
+from app.db.database import MissionDatabase
+from app.services.realtime_hub import MissionRealtimeHub
+from app.services.mission_event_service import MissionEventService
+from app.services.auth_service import AuthService
+from app.services.position_service import CrewPositionService
+from app.services.mission_service import MissionService
+from app.services.sos_service import SosService
+from app.services.field_observation_service import FieldObservationService
+from app.services.landing_site_service import LandingSiteService
+
+PRIVATE_ATTACHMENTS_DIR = DATASETS_DIR / "private_attachments"
+PRIVATE_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+
+mission_db = MissionDatabase(default_sqlite_path=DATASETS_DIR / "index" / "marscope_mission.sqlite")
+mission_realtime_hub = MissionRealtimeHub()
+mission_event_service = MissionEventService(mission_db)
+auth_service = AuthService(mission_db)
+position_service = CrewPositionService(
+    db=mission_db,
+    event_service=mission_event_service,
+    realtime_hub=mission_realtime_hub,
+    destination_service=destination_service,
+)
+mission_service = MissionService(
+    db=mission_db,
+    event_service=mission_event_service,
+    realtime_hub=mission_realtime_hub,
+    position_service=position_service,
+)
+sos_service = SosService(
+    db=mission_db,
+    event_service=mission_event_service,
+    realtime_hub=mission_realtime_hub,
+    position_service=position_service,
+    private_attachments_dir=PRIVATE_ATTACHMENTS_DIR,
+)
+field_observation_service = FieldObservationService(
+    db=mission_db,
+    event_service=mission_event_service,
+    realtime_hub=mission_realtime_hub,
+    destination_service=destination_service,
+)
+landing_site_service = LandingSiteService(
+    db=mission_db,
+    event_service=mission_event_service,
+    realtime_hub=mission_realtime_hub,
+    catalog_service=catalog_service,
+    destination_service=destination_service,
+    processed_dir=PROCESSED_DIR,
+)

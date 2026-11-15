@@ -1,29 +1,56 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Clock, Database, MapPinOff, Radio } from "lucide-react";
+import React, { useEffect, useState } from "react";
+import Link from "next/link";
+import {
+  AlertOctagon,
+  Clock,
+  Command,
+  LogOut,
+  RefreshCw,
+  UserCheck,
+  Wifi,
+  WifiOff,
+} from "lucide-react";
 import { API_BASE_URL } from "../lib/constants";
 import { SystemHealth } from "../types";
+import { useAuthMissionStore } from "../stores/useAuthMissionStore";
 import { useMissionStore } from "../stores/useMissionStore";
-import { useTrackingStore } from "../stores/useTrackingStore";
+import { CommandPalette } from "./ui/CommandPalette";
+import { ContextPopover } from "./ui/ContextPopover";
 
 export function TopNav() {
   const [currentTimeUtc, setCurrentTimeUtc] = useState<string>("");
   const [health, setHealth] = useState<SystemHealth | null>(null);
-  const [healthError, setHealthError] = useState<boolean>(false);
-  const { localizationStatus, fetchLocalizationStatus } = useMissionStore();
-  const trackingStatus = useTrackingStore((s) => s.trackingStatus);
-  const connectTrackingStream = useTrackingStore((s) => s.connectTrackingStream);
+  const [healthError, setHealthError] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
+  const {
+    authenticated,
+    astronaut,
+    missions,
+    activeMissionId,
+    activeMission,
+    selectMission,
+    logout,
+    sosEvents,
+    setSosDrawerOpen,
+    streamState,
+    browserOnline,
+    offlineQueue,
+    syncOfflineEventsNow,
+  } = useAuthMissionStore();
+
+  const { fetchLocalizationStatus } = useMissionStore();
 
   useEffect(() => {
     const updateTime = () => {
-      const now = new Date();
-      setCurrentTimeUtc(now.toUTCString().slice(17, 25) + " UTC");
+      setCurrentTimeUtc(new Date().toUTCString().slice(17, 25) + " UTC");
     };
     updateTime();
-    const interval = setInterval(updateTime, 1000);
+    const t = setInterval(updateTime, 1000);
 
-    const loadStatus = async () => {
+    const checkApi = async () => {
       try {
         const res = await fetch(`${API_BASE_URL}/health`, { cache: "no-store" });
         if (res.ok) {
@@ -37,89 +64,183 @@ export function TopNav() {
       }
       fetchLocalizationStatus();
     };
+    void checkApi();
 
-    loadStatus();
-    const disconnectStream = connectTrackingStream();
-    return () => {
-      clearInterval(interval);
-      disconnectStream();
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
     };
-  }, [fetchLocalizationStatus, connectTrackingStream]);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [fetchLocalizationStatus]);
 
-  const backendLabel = healthError
-    ? "API: OFFLINE"
-    : health
-    ? `API: ${health.status.toUpperCase()}`
-    : "API: CHECKING";
-
-  const dotClass = healthError
-    ? "bg-red-500"
-    : health?.status === "healthy"
-    ? "bg-emerald-400 animate-pulse"
-    : "bg-amber-400";
-
-  const livePosAvailable = Boolean(trackingStatus?.live_available);
-  const manualPos = localizationStatus?.current_position;
+  const activeSosList = sosEvents.filter((s) => s.status !== "RESOLVED" && s.status !== "CANCELLED");
 
   return (
-    <header className="h-16 bg-[#0d111a]/90 backdrop-blur border-b border-[#1e2638] px-6 flex items-center justify-between shrink-0 z-10">
-      {/* System Status Banner */}
-      <div className="flex items-center gap-3">
-        <div role="status" aria-live="polite" className="flex items-center gap-2 px-2.5 py-1 rounded bg-[#161c2b] border border-[#252f44]">
-          <span aria-hidden="true" className={`w-2 h-2 rounded-full ${dotClass}`}></span>
-          <span className="text-xs font-mono font-medium text-slate-300">{backendLabel}</span>
-        </div>
-        <div className="hidden md:flex items-center gap-2 text-xs text-slate-400">
-          <span className="text-slate-600">|</span>
-          <span className="font-mono text-slate-300 font-semibold">IAU2000:49900 MARS</span>
-        </div>
-      </div>
-
-      {/* Real-Time Clock & Live Adapter Indicators */}
-      <div className="flex items-center gap-3 text-xs font-mono">
-        <div className="hidden lg:flex items-center gap-2 px-3 py-1 rounded bg-[#131722] border border-[#1e2638] text-slate-400">
-          <Clock className="w-3.5 h-3.5 text-[#e25b38]" />
-          <span className="text-slate-200">{currentTimeUtc || "--:--:-- UTC"}</span>
-        </div>
-
-        <div
-          className="flex items-center gap-2 px-3 py-1 rounded bg-[#131722] border border-[#1e2638] text-slate-300"
-          title={
-            trackingStatus?.message ||
-            "Live Mars position unavailable — no mission positioning provider connected."
-          }
-        >
-          {livePosAvailable ? (
-            <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-          ) : (
-            <MapPinOff className="w-3.5 h-3.5 text-amber-400" />
-          )}
-          <span className="text-slate-400">POS:</span>
-          <span
-            className={
-              livePosAvailable
-                ? "text-emerald-300"
-                : manualPos?.latitude != null
-                  ? "text-cyan-300"
-                  : "text-amber-400"
-            }
+    <>
+      <header className="h-[56px] bg-[var(--bg-surface)]/95 backdrop-blur border-b border-[var(--border-subtle)] pl-14 pr-4 lg:px-5 flex items-center justify-between gap-3 shrink-0 z-30">
+        {/* Left: System State + Active Mission Switcher */}
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div
+            role="status"
+            aria-live="polite"
+            className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-[4px] bg-[var(--bg-void)] border border-[var(--border-subtle)] text-[11px] font-mono"
           >
-            {livePosAvailable && trackingStatus?.lat != null && trackingStatus?.lon_east != null
-              ? `LIVE (${trackingStatus.lat.toFixed(3)}°, ${trackingStatus.lon_east.toFixed(3)}°E)`
-              : trackingStatus?.status === "stale"
-                ? "LIVE STALE"
-                : manualPos?.latitude != null
-                  ? `MANUAL (${manualPos.latitude.toFixed(2)}°, ${manualPos.longitude?.toFixed(2)}°)`
-                  : "LIVE UNAVAILABLE"}
-          </span>
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                healthError
+                  ? "bg-[#DC3545]"
+                  : health?.status === "healthy"
+                  ? "bg-[#1F9D68]"
+                  : "bg-[#D98A1F]"
+              }`}
+            />
+            <span className="text-[var(--text-secondary)]">
+              {healthError ? "API OFFLINE" : health ? `API ${health.status.toUpperCase()}` : "API CHECK"}
+            </span>
+          </div>
+
+          {authenticated && (
+            <div className="flex items-center gap-2 min-w-0">
+              <label htmlFor="topnav-mission-select" className="sr-only">
+                Active Mission
+              </label>
+              <select
+                id="topnav-mission-select"
+                value={activeMissionId || ""}
+                onChange={(e) => void selectMission(e.target.value || null)}
+                className="bg-[var(--bg-void)] border border-[var(--border-strong)] rounded-[4px] px-2.5 py-1 text-xs font-medium text-[var(--text-primary)] max-w-[200px] sm:max-w-[260px] truncate"
+              >
+                {missions.length === 0 ? (
+                  <option value="">No missions joined</option>
+                ) : (
+                  missions.map((m) => (
+                    <option key={m.mission_id} value={m.mission_id}>
+                      {m.name} ({m.my_role})
+                    </option>
+                  ))
+                )}
+              </select>
+            </div>
+          )}
+
+          {activeMission && (
+            <span className="hidden xl:inline-flex items-center px-2 py-0.5 rounded-[4px] border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[10px] font-mono text-[var(--text-secondary)]">
+              {activeMission.landing_site_status === "REGISTERED" ? "SITE REGISTERED" : "LANDING SITE UNCONFIGURED"}
+            </span>
+          )}
         </div>
 
-        <div className="hidden sm:flex items-center gap-2 px-3 py-1 rounded bg-[#131722] border border-[#1e2638] text-slate-300">
-          <Database className="w-3.5 h-3.5 text-cyan-400" />
-          <span className="text-slate-400">API:</span>
-          <span className="font-bold text-slate-200">{health ? `v${health.version}` : "--"}</span>
+        {/* Right: SOS Alert Pill, Offline Queue, SSE, Command Palette, UTC, Astronaut Chip */}
+        <div className="flex items-center gap-2 text-xs">
+          {activeSosList.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setSosDrawerOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-[4px] bg-[#DC3545] text-white font-mono font-bold text-[11px] ms-sos-ring"
+            >
+              <AlertOctagon className="w-3.5 h-3.5" />
+              <span>SOS ({activeSosList.length})</span>
+            </button>
+          )}
+
+          {offlineQueue.length > 0 && (
+            <button
+              type="button"
+              onClick={() => void syncOfflineEventsNow()}
+              title="Queued offline events waiting for server delivery"
+              className="flex items-center gap-1.5 px-2 py-1 rounded-[4px] bg-[#D98A1F]/15 border border-[#D98A1F]/40 text-[#f5b041] font-mono text-[11px]"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>QUEUED: {offlineQueue.length}</span>
+            </button>
+          )}
+
+          <div
+            title={`Real-time mission stream: ${streamState}`}
+            className="hidden md:flex items-center gap-1.5 px-2 py-1 rounded-[4px] bg-[var(--bg-void)] border border-[var(--border-subtle)] text-[11px] font-mono"
+          >
+            {browserOnline && streamState === "CONNECTED" ? (
+              <Wifi className="w-3.5 h-3.5 text-[#1F9D68]" />
+            ) : (
+              <WifiOff className="w-3.5 h-3.5 text-[#D98A1F]" />
+            )}
+            <span className="text-[var(--text-secondary)]">{browserOnline ? streamState : "OFFLINE"}</span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setPaletteOpen(true)}
+            aria-label="Open command palette"
+            className="hidden sm:flex items-center gap-1.5 px-2 py-1 rounded-[4px] bg-[var(--bg-void)] border border-[var(--border-subtle)] text-[11px] font-mono text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+          >
+            <Command className="w-3 h-3" />
+            <span>K</span>
+          </button>
+
+          <div className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-[4px] bg-[var(--bg-void)] border border-[var(--border-subtle)] font-mono text-[11px] text-[var(--text-secondary)]">
+            <Clock className="w-3.5 h-3.5 text-[var(--accent-mars)]" />
+            <span>{currentTimeUtc || "--:--:-- UTC"}</span>
+          </div>
+
+          {authenticated && astronaut ? (
+            <ContextPopover
+              trigger={
+                <button
+                  type="button"
+                  className="flex items-center gap-2 px-2.5 py-1 rounded-[4px] bg-[var(--bg-elevated)] border border-[var(--border-strong)] text-xs text-[var(--text-primary)] hover:border-[var(--accent-telemetry)]"
+                >
+                  <UserCheck className="w-3.5 h-3.5 text-[var(--accent-telemetry)]" />
+                  <span className="max-w-[110px] truncate font-medium">{astronaut.display_name}</span>
+                </button>
+              }
+            >
+              <div className="space-y-2.5 text-xs">
+                <div>
+                  <div className="font-semibold text-[var(--text-primary)]">{astronaut.display_name}</div>
+                  <div className="font-mono text-[11px] text-[var(--text-muted)] truncate">{astronaut.email}</div>
+                </div>
+                <div className="border-t border-[var(--border-subtle)] pt-2 flex flex-col gap-1">
+                  <Link
+                    href="/profile"
+                    className="px-2 py-1.5 rounded-[4px] hover:bg-white/5 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                  >
+                    Astronaut Profile & Mass
+                  </Link>
+                  <Link
+                    href="/missions"
+                    className="px-2 py-1.5 rounded-[4px] hover:bg-white/5 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                  >
+                    Missions & Invitations
+                  </Link>
+                  <button
+                    type="button"
+                    onClick={() => void logout()}
+                    className="flex items-center gap-1.5 px-2 py-1.5 rounded-[4px] hover:bg-[#DC3545]/15 text-[#ff6b7a] text-left"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    <span>Sign Out</span>
+                  </button>
+                </div>
+              </div>
+            </ContextPopover>
+          ) : (
+            <Link
+              href="/"
+              className="px-2.5 py-1 rounded-[4px] bg-[var(--accent-mars)] text-white text-xs font-semibold hover:bg-[var(--accent-mars-hover)]"
+            >
+              Sign In
+            </Link>
+          )}
         </div>
-      </div>
-    </header>
+      </header>
+
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+    </>
   );
 }

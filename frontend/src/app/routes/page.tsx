@@ -192,7 +192,7 @@ export default function RoutesComparisonPage() {
                           <div>
                             <div className="text-sm font-bold text-slate-100 flex items-center gap-1.5">
                               {entry.mode === "science_priority" && (
-                                <Sparkles className="w-4 h-4 text-purple-400" />
+                                <Sparkles className="w-4 h-4 text-amber-400" />
                               )}
                               <span>{entry.mode_label}</span>
                             </div>
@@ -261,7 +261,7 @@ export default function RoutesComparisonPage() {
                         </div>
                         <div className="bg-[#0d111a] rounded-lg p-2 border border-[#1e2638]">
                           <div className="text-[10px] text-slate-400">Evidence Hits (&le;150m)</div>
-                          <div className="text-purple-300 font-bold">
+                          <div className="text-cyan-300 font-bold">
                             {r.corridor_evidence_hits_within_150m} hits
                           </div>
                         </div>

@@ -401,7 +401,7 @@ export default function PlannerPage() {
             data-testid="robust-compare-btn"
             onClick={() => void computeRobustComparison()}
             disabled={robustLoading || !startPoint || !destinationPoint}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600/25 hover:bg-purple-600/40 border border-purple-500/45 text-xs font-medium text-purple-200 transition-colors disabled:opacity-50"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/35 border border-cyan-500/45 text-xs font-medium text-cyan-200 transition-colors disabled:opacity-50"
             title="Compute spatially distinct multi-objective routes, independent returns, and scenario stability"
           >
             {robustLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
@@ -693,7 +693,7 @@ export default function PlannerPage() {
           <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-4 space-y-2.5">
             <div className="flex items-center justify-between">
               <h2 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
-                <Target className="w-3.5 h-3.5 text-purple-400" />
+                <Target className="w-3.5 h-3.5 text-cyan-400" />
                 Verified Science Targets ({selectedTargetIds.length}/{targets.length})
               </h2>
               <Link href="/targets" className="text-[10px] text-cyan-400 hover:underline">
@@ -717,7 +717,7 @@ export default function PlannerPage() {
                       key={t.id}
                       className={`flex items-start gap-2 p-2 rounded-lg border cursor-pointer transition-colors ${
                         checked
-                          ? "bg-purple-950/35 border-purple-500/45"
+                          ? "bg-cyan-950/35 border-cyan-500/45"
                           : "bg-[#0d111a] border-[#1e2638] hover:border-[#2a3652]"
                       }`}
                     >
@@ -725,7 +725,7 @@ export default function PlannerPage() {
                         type="checkbox"
                         checked={checked}
                         onChange={() => toggleTargetId(t.id)}
-                        className="mt-0.5 accent-purple-500"
+                        className="mt-0.5 accent-cyan-500"
                       />
                       <div className="min-w-0 flex-1">
                         <div className="text-[11px] font-semibold text-slate-100 truncate">
@@ -863,18 +863,22 @@ export default function PlannerPage() {
                 <label className="flex items-center gap-1.5 text-[11px] font-medium text-slate-200 cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={constraints.walking_speed_m_per_s != null}
-                    onChange={(e) =>
-                      updateConstraints({
-                        walking_speed_m_per_s: e.target.checked ? 0.8 : null,
-                        walking_speed_provenance: e.target.checked
-                          ? "User-Configured Planning Assumption (Unvalidated)"
-                          : null,
-                        astronaut_total_mass_kg: e.target.checked
-                          ? constraints.astronaut_total_mass_kg ?? 130
-                          : null,
-                      })
-                    }
+                    checked={constraints.walking_speed_m_per_s != null || constraints.astronaut_total_mass_kg != null}
+                    onChange={(e) => {
+                      if (!e.target.checked) {
+                        updateConstraints({
+                          walking_speed_m_per_s: null,
+                          walking_speed_provenance: null,
+                          astronaut_total_mass_kg: null,
+                        });
+                      } else {
+                        updateConstraints({
+                          walking_speed_m_per_s: constraints.walking_speed_m_per_s ?? 0,
+                          walking_speed_provenance: "User-Configured Planning Assumption (Unvalidated)",
+                          astronaut_total_mass_kg: constraints.astronaut_total_mass_kg ?? null,
+                        });
+                      }
+                    }}
                     className="accent-amber-500"
                   />
                   <span>Model Duration &amp; Mass Assumptions</span>
@@ -884,21 +888,23 @@ export default function PlannerPage() {
                 </span>
               </div>
 
-              {constraints.walking_speed_m_per_s != null && (
+              {(constraints.walking_speed_m_per_s != null || constraints.astronaut_total_mass_kg != null) && (
                 <div className="grid grid-cols-3 gap-2">
                   <label className="text-[10px] font-mono text-slate-400">
                     Speed (m/s)
                     <input
                       type="number"
-                      min={0.1}
+                      min={0}
                       max={3.0}
                       step={0.1}
-                      value={constraints.walking_speed_m_per_s}
-                      onChange={(e) =>
+                      value={constraints.walking_speed_m_per_s || ""}
+                      placeholder="Enter m/s"
+                      onChange={(e) => {
+                        const raw = e.target.value.trim();
                         updateConstraints({
-                          walking_speed_m_per_s: Math.max(0.1, Number(e.target.value) || 0.8),
-                        })
-                      }
+                          walking_speed_m_per_s: raw === "" ? null : Math.max(0.1, Number(raw)),
+                        });
+                      }}
                       className="mt-0.5 w-full bg-[#131926] border border-[#243047] rounded px-2 py-1 text-xs text-slate-100"
                     />
                   </label>
@@ -1223,13 +1229,13 @@ export default function PlannerPage() {
               {/* Prompt 16: Robust Multi-Route Comparison Matrix + Single-Corridor Bottleneck Honesty */}
               {robustComparison && (
                 <div
-                  className="bg-[#121622] border border-purple-500/35 rounded-xl p-4 space-y-3"
+                  className="bg-[#121622] border border-cyan-500/35 rounded-xl p-4 space-y-3"
                   data-testid="robust-comparison-panel"
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
-                      <Scale className="w-4 h-4 text-purple-300" />
-                      <h3 className="text-xs font-bold uppercase tracking-wider text-purple-200">
+                      <Scale className="w-4 h-4 text-cyan-300" />
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-cyan-200">
                         Robust Multi-Route Alternatives &amp; Return Comparison ({robustComparison.distinct_candidate_count} distinct)
                       </h3>
                     </div>
@@ -1381,7 +1387,7 @@ export default function PlannerPage() {
                           ).toFixed(1)}
                         </span>
                         <span className="text-slate-400">Science Corridor Bonus:</span>
-                        <span className="text-right text-purple-300">
+                        <span className="text-right text-cyan-300">
                           -{activeRoute.cost_decomposition.science_corridor_reduction.toFixed(1)}
                         </span>
                         <span className="text-slate-200 font-bold border-t border-[#1e2638] pt-1">
@@ -1571,7 +1577,7 @@ export default function PlannerPage() {
                         : "Partial"}
                     </span>
                     <span className="text-slate-400">Science Hits:</span>
-                    <span className="text-purple-300 text-right font-bold">
+                    <span className="text-cyan-300 text-right font-bold">
                       {activeRoute.corridor_evidence_hits_within_150m} (&le;150m)
                     </span>
                     <span className="text-slate-400">Targets Visited:</span>
@@ -1617,7 +1623,7 @@ export default function PlannerPage() {
 
                 {/* 4. Planning Assumptions */}
                 <div className="bg-[#121622] border border-[#1e2638] rounded-xl p-3 space-y-1.5">
-                  <div className="text-[10px] font-mono uppercase tracking-wider text-purple-300 font-bold">
+                  <div className="text-[10px] font-mono uppercase tracking-wider text-amber-300 font-bold">
                     Planning Assumptions
                   </div>
                   <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-[11px] font-mono">
@@ -1809,7 +1815,7 @@ export default function PlannerPage() {
                                 </div>
                               )}
                               {inst.nearby_science_targets.length > 0 && (
-                                <div className="text-[10px] text-purple-300">
+                                <div className="text-[10px] text-cyan-300">
                                   Targets: {inst.nearby_science_targets.join(", ")}
                                 </div>
                               )}

@@ -82,6 +82,7 @@ datasets/manifests/*
 !datasets/manifests/.gitkeep
 datasets/index/*
 !datasets/index/.gitkeep
+datasets/private_attachments/
 *.sqlite
 *.sqlite3
 *.sqlite-wal

@@ -75,7 +75,9 @@ export default function EvaSimulationPage() {
     const step = (now: number) => {
       const dt = (now - lastTs) / 1000;
       lastTs = now;
-      const baseSpeed = constraints.walking_speed_m_per_s ?? 0.8;
+      // Preview animation strictly uses explicitly configured speed when available;
+      // otherwise falls back ONLY to visual timeline scrubbing rate (1.0 m/s preview cadence) without altering backend duration metrics.
+      const baseSpeed = constraints.walking_speed_m_per_s ?? 1.0;
       setProgressState((prev) => {
         const curM = prev.routeId === currentRouteId ? prev.m : 0;
         const next = curM + dt * baseSpeed * 25 * speedMult;

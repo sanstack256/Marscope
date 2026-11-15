@@ -15,6 +15,7 @@ import {
 import { EmptyState } from "../../components/EmptyState";
 import { PageHeader } from "../../components/PageHeader";
 import { API_BASE_URL } from "../../lib/constants";
+import { useAuthMissionStore } from "../../stores/useAuthMissionStore";
 import {
   CoverageIntelligenceResponse,
   ElevationProfileResponse,
@@ -42,6 +43,8 @@ interface TerrainLayerRow {
 }
 
 export default function TerrainIntelligencePage() {
+  const astronaut = useAuthMissionStore((s) => s.astronaut);
+  const landingSiteBundle = useAuthMissionStore((s) => s.landingSiteBundle);
   const [summaryResp, setSummaryResp] = useState<TerrainSummaryResponse | null>(null);
   const [layers, setLayers] = useState<TerrainLayerRow[]>([]);
   const [mobilityStatus, setMobilityStatus] = useState<MobilityStatusResponse | null>(null);
@@ -60,23 +63,23 @@ export default function TerrainIntelligencePage() {
   const [coverageResp, setCoverageResp] = useState<CoverageIntelligenceResponse | null>(null);
   const [covLoading, setCovLoading] = useState<boolean>(false);
 
-  // Elevation Profile state
-  const [profStartLat, setProfStartLat] = useState("-4.5895");
-  const [profStartLon, setProfStartLon] = useState("137.4417");
-  const [profEndLat, setProfEndLat] = useState("-5.0800");
-  const [profEndLon, setProfEndLon] = useState("137.8500");
+  // Elevation Profile state (no fabricated default study coordinates)
+  const [profStartLat, setProfStartLat] = useState("");
+  const [profStartLon, setProfStartLon] = useState("");
+  const [profEndLat, setProfEndLat] = useState("");
+  const [profEndLon, setProfEndLon] = useState("");
   const [profSamples, setProfSamples] = useState("20");
   const [profileResp, setProfileResp] = useState<ElevationProfileResponse | null>(null);
   const [profLoading, setProfLoading] = useState<boolean>(false);
 
-  // Mobility Scenario & Evaluation state (no silent defaults for walking speed!)
-  const [scenName, setScenName] = useState("Gale Regional Transect Assumption");
+  // Mobility Scenario & Evaluation state (no silent mass/speed defaults!)
+  const [scenName, setScenName] = useState("");
   const [scenSpeed, setScenSpeed] = useState("");
   const [scenMaxSlope, setScenMaxSlope] = useState("");
   const [scenMaxRough, setScenMaxRough] = useState("");
-  const [scenBodyMass, setScenBodyMass] = useState("75");
-  const [scenSuitMass, setScenSuitMass] = useState("55");
-  const [scenLoadMass, setScenLoadMass] = useState("10");
+  const [scenBodyMass, setScenBodyMass] = useState("");
+  const [scenSuitMass, setScenSuitMass] = useState("");
+  const [scenLoadMass, setScenLoadMass] = useState("");
   const [evalResp, setEvalResp] = useState<MobilityEvaluationResponse | null>(null);
   const [evalLoading, setEvalLoading] = useState<boolean>(false);
 
@@ -213,6 +216,14 @@ export default function TerrainIntelligencePage() {
   }
 
   async function runElevationProfile() {
+    const sLat = parseFloat(profStartLat);
+    const sLon = parseFloat(profStartLon);
+    const eLat = parseFloat(profEndLat);
+    const eLon = parseFloat(profEndLon);
+    if (!Number.isFinite(sLat) || !Number.isFinite(sLon) || !Number.isFinite(eLat) || !Number.isFinite(eLon)) {
+      setError("Enter valid numeric start and end coordinates (or load a registered Landing Site) before computing an elevation profile.");
+      return;
+    }
     setProfLoading(true);
     setError(null);
     try {
@@ -221,13 +232,13 @@ export default function TerrainIntelligencePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           start: {
-            lat: parseFloat(profStartLat),
-            lon: parseFloat(profStartLon),
+            lat: sLat,
+            lon: sLon,
             label: "Transect Start",
           },
           end: {
-            lat: parseFloat(profEndLat),
-            lon: parseFloat(profEndLon),
+            lat: eLat,
+            lon: eLon,
             label: "Transect End",
           },
           sample_count: Math.max(2, parseInt(profSamples, 10) || 20),
@@ -247,6 +258,14 @@ export default function TerrainIntelligencePage() {
   }
 
   async function runScenarioEvaluation() {
+    const sLat = parseFloat(profStartLat);
+    const sLon = parseFloat(profStartLon);
+    const eLat = parseFloat(profEndLat);
+    const eLon = parseFloat(profEndLon);
+    if (!Number.isFinite(sLat) || !Number.isFinite(sLon) || !Number.isFinite(eLat) || !Number.isFinite(eLon)) {
+      setError("Enter valid numeric start and end coordinates in the Transect panel before evaluating a mobility scenario.");
+      return;
+    }
     setEvalLoading(true);
     setError(null);
     try {
@@ -278,8 +297,8 @@ export default function TerrainIntelligencePage() {
         body: JSON.stringify({
           inline_scenario: inlineScenario,
           waypoints: [
-            { lat: parseFloat(profStartLat), lon: parseFloat(profStartLon), label: "Start" },
-            { lat: parseFloat(profEndLat), lon: parseFloat(profEndLon), label: "End" },
+            { lat: sLat, lon: sLon, label: "Start" },
+            { lat: eLat, lon: eLon, label: "End" },
           ],
           sample_count: Math.max(2, parseInt(profSamples, 10) || 20),
           sampling_method: "nearest",
@@ -710,14 +729,28 @@ export default function TerrainIntelligencePage() {
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={() => void runElevationProfile()}
-                disabled={profLoading}
-                className="px-3.5 py-1.5 rounded bg-[#161c2b] hover:bg-[#1e263b] border border-[#2a3650] text-xs font-semibold text-sky-200 disabled:opacity-50"
-              >
-                {profLoading ? "Sampling DEM Transect..." : "Compute Elevation Gain/Loss Profile"}
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void runElevationProfile()}
+                  disabled={profLoading}
+                  className="px-3.5 py-1.5 rounded bg-[#161c2b] hover:bg-[#1e263b] border border-[#2a3650] text-xs font-semibold text-sky-200 disabled:opacity-50"
+                >
+                  {profLoading ? "Sampling DEM Transect..." : "Compute Elevation Gain/Loss Profile"}
+                </button>
+                {landingSiteBundle?.landing_site && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProfStartLat(String(landingSiteBundle.landing_site!.latitude));
+                      setProfStartLon(String(landingSiteBundle.landing_site!.longitude_east));
+                    }}
+                    className="px-3 py-1.5 rounded border border-cyan-500/40 bg-cyan-500/10 text-[11px] font-medium text-cyan-200 hover:bg-cyan-500/20"
+                  >
+                    Use Registered Landing Site as Start
+                  </button>
+                )}
+              </div>
 
               {profileResp && (
                 <div className="p-3.5 rounded-lg bg-[#0d111a] border border-[#1d2536] space-y-2.5 text-xs font-mono">
@@ -850,14 +883,41 @@ export default function TerrainIntelligencePage() {
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={() => void runScenarioEvaluation()}
-                disabled={evalLoading}
-                className="px-3.5 py-1.5 rounded bg-[#e25b38] hover:bg-[#cf4f2e] text-xs font-semibold text-white disabled:opacity-50"
-              >
-                {evalLoading ? "Evaluating Scenario..." : "Evaluate Transect Under Scenario"}
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void runScenarioEvaluation()}
+                  disabled={evalLoading}
+                  className="px-3.5 py-1.5 rounded bg-[#e25b38] hover:bg-[#cf4f2e] text-xs font-semibold text-white disabled:opacity-50"
+                >
+                  {evalLoading ? "Evaluating Scenario..." : "Evaluate Transect Under Scenario"}
+                </button>
+                {astronaut &&
+                  (astronaut.body_mass_kg !== null ||
+                    astronaut.suit_mass_kg !== null ||
+                    astronaut.equipment_mass_kg !== null) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (astronaut.body_mass_kg !== null && astronaut.body_mass_kg !== undefined) {
+                          setScenBodyMass(String(astronaut.body_mass_kg));
+                        }
+                        if (astronaut.suit_mass_kg !== null && astronaut.suit_mass_kg !== undefined) {
+                          setScenSuitMass(String(astronaut.suit_mass_kg));
+                        }
+                        if (
+                          astronaut.equipment_mass_kg !== null &&
+                          astronaut.equipment_mass_kg !== undefined
+                        ) {
+                          setScenLoadMass(String(astronaut.equipment_mass_kg));
+                        }
+                      }}
+                      className="px-3 py-1.5 rounded border border-amber-500/40 bg-amber-500/10 text-[11px] font-medium text-amber-200 hover:bg-amber-500/20"
+                    >
+                      Load My Profile Masses (USER_ASSUMED)
+                    </button>
+                  )}
+              </div>
 
               {evalResp && (
                 <div className="p-3.5 rounded-lg bg-[#0d111a] border border-[#1d2536] space-y-2.5 text-xs font-mono">

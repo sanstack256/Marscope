@@ -32,6 +32,7 @@ import { API_BASE_URL } from "@/lib/constants";
 import { useEvaOperationsStore, type EvaEvaluateParams } from "@/stores/useEvaOperationsStore";
 import { useEvidenceStore, type EvidenceOverlayToggles } from "@/stores/useEvidenceStore";
 import { useRoutingStore } from "@/stores/useRoutingStore";
+import { useAuthMissionStore } from "@/stores/useAuthMissionStore";
 import type {
   CorridorSegmentAssessment,
   EvaExplicitResourceSpec,
@@ -117,6 +118,8 @@ export default function MissionReadinessPage() {
   const activeMode = useRoutingStore((s) => s.activeMode);
   const loadBoxworkStudyExample = useRoutingStore((s) => s.loadBoxworkStudyExample);
   const requestCameraFocus = useRoutingStore((s) => s.requestCameraFocus);
+  const landingSiteBundle = useAuthMissionStore((s) => s.landingSiteBundle);
+  const activeMission = useAuthMissionStore((s) => s.activeMission);
 
   const {
     corridorAssessment,
@@ -158,7 +161,9 @@ export default function MissionReadinessPage() {
   } = useEvaOperationsStore();
 
   const [sectionFilter, setSectionFilter] = useState<SectionFilter>("all");
-  const [missionName, setMissionName] = useState("Gale Boxwork Traverse & EVA Operational Envelope");
+  const [missionName, setMissionName] = useState(
+    activeMission?.name || "EVA Operational Envelope"
+  );
   const [selectedMode, setSelectedMode] = useState<"conservative" | "balanced" | "science_priority">(
     (activeRoute?.mode as "conservative" | "balanced" | "science_priority") ||
       (activeMode as "conservative" | "balanced" | "science_priority") ||
@@ -190,6 +195,7 @@ export default function MissionReadinessPage() {
   const [computeReverseReturn, setComputeReverseReturn] = useState<boolean>(true);
   const [resourceRows, setResourceRows] = useState<EditableResourceRow[]>([]);
   const [resourceValidationError, setResourceValidationError] = useState<string | null>(null);
+  const [coordError, setCoordError] = useState<string | null>(null);
 
   // Refs for Section F Missing Information Drawer direct focus
   const walkingSpeedRef = useRef<HTMLInputElement | null>(null);
@@ -199,15 +205,26 @@ export default function MissionReadinessPage() {
   const payloadMassRef = useRef<HTMLInputElement | null>(null);
   const resourcesSectionRef = useRef<HTMLDivElement | null>(null);
 
-  const effectiveStart = startPoint ?? {
-    lat: -4.749,
-    lon_east: 137.394,
-    label: "Gale Boxwork Start",
-  };
-  const effectiveDest = destinationPoint ?? {
-    lat: -4.753,
-    lon_east: 137.396,
-    label: "Mount Sharp Target",
+  const effectiveStart =
+    startPoint ??
+    (landingSiteBundle?.landing_site
+      ? {
+          lat: landingSiteBundle.landing_site.latitude,
+          lon_east: landingSiteBundle.landing_site.longitude_east,
+          label: landingSiteBundle.landing_site.name,
+        }
+      : null);
+  const effectiveDest = destinationPoint ?? null;
+
+  const requireStartAndDest = () => {
+    if (!effectiveStart || !effectiveDest) {
+      setCoordError(
+        "Start and Destination coordinates are not configured. Pick points in Route Planner, register a Landing Site, or click 'Load Gale Boxwork Example'."
+      );
+      return null;
+    }
+    setCoordError(null);
+    return { start: effectiveStart, dest: effectiveDest };
   };
 
   const selectedSegment = useMemo(
@@ -282,10 +299,12 @@ export default function MissionReadinessPage() {
   }, [overheadMin]);
 
   const handleAssessCorridor = async () => {
+    const pts = requireStartAndDest();
+    if (!pts) return;
     const assessed = await assessCorridor({
       dataset_id: selectedDemDatasetId,
-      start: effectiveStart,
-      destination: effectiveDest,
+      start: pts.start,
+      destination: pts.dest,
       mode: selectedMode,
       corridor_width_m: corridorWidthM,
       observation_search_radius_m: searchRadiusM,
@@ -300,21 +319,25 @@ export default function MissionReadinessPage() {
   };
 
   const handleCompareRoutes = () => {
+    const pts = requireStartAndDest();
+    if (!pts) return;
     compareRoutesEvidence({
       dataset_id: selectedDemDatasetId,
-      start: effectiveStart,
-      destination: effectiveDest,
+      start: pts.start,
+      destination: pts.dest,
       corridor_width_m: corridorWidthM,
       observation_search_radius_m: searchRadiusM,
     });
   };
 
   const handleGenerateDossier = () => {
+    const pts = requireStartAndDest();
+    if (!pts) return;
     generateMissionDossier({
       mission_name: missionName,
       dataset_id: selectedDemDatasetId,
-      start: effectiveStart,
-      destination: effectiveDest,
+      start: pts.start,
+      destination: pts.dest,
       mode: selectedMode,
       corridor_width_m: corridorWidthM,
       observation_search_radius_m: searchRadiusM,
@@ -328,11 +351,14 @@ export default function MissionReadinessPage() {
     });
   };
 
-  const buildEvalParams = (resourcesPayload: EvaExplicitResourceSpec[]): EvaEvaluateParams => ({
+  const buildEvalParams = (
+    resourcesPayload: EvaExplicitResourceSpec[],
+    pts: { start: { lat: number; lon_east: number; label?: string | null }; dest: { lat: number; lon_east: number; label?: string | null } }
+  ): EvaEvaluateParams => ({
     mission_name: missionName,
     dataset_id: selectedDemDatasetId,
-    start: effectiveStart,
-    destination: effectiveDest,
+    start: pts.start,
+    destination: pts.dest,
     mode: selectedMode,
     corridor_width_m: corridorWidthM,
     observation_search_radius_m: searchRadiusM,
@@ -350,21 +376,25 @@ export default function MissionReadinessPage() {
   });
 
   const handleEvaluateEva = async () => {
+    const pts = requireStartAndDest();
+    if (!pts) return;
     const resBuild = buildResourcesPayload();
     if (!resBuild.ok) return;
-    const evaRes = await evaluateMission(buildEvalParams(resBuild.items));
+    const evaRes = await evaluateMission(buildEvalParams(resBuild.items, pts));
     if (evaRes?.mission_id) {
       await fetchReturnAnalysis(evaRes.mission_id);
     }
   };
 
   const handleRunFullAnalysis = async () => {
+    const pts = requireStartAndDest();
+    if (!pts) return;
     const resBuild = buildResourcesPayload();
     if (!resBuild.ok) return;
     const assessed = await assessCorridor({
       dataset_id: selectedDemDatasetId,
-      start: effectiveStart,
-      destination: effectiveDest,
+      start: pts.start,
+      destination: pts.dest,
       mode: selectedMode,
       corridor_width_m: corridorWidthM,
       observation_search_radius_m: searchRadiusM,
@@ -378,20 +408,20 @@ export default function MissionReadinessPage() {
     await fetchComplementarity();
     await compareRoutesEvidence({
       dataset_id: selectedDemDatasetId,
-      start: effectiveStart,
-      destination: effectiveDest,
+      start: pts.start,
+      destination: pts.dest,
       corridor_width_m: corridorWidthM,
       observation_search_radius_m: searchRadiusM,
     });
-    const evaRes = await evaluateMission(buildEvalParams(resBuild.items));
+    const evaRes = await evaluateMission(buildEvalParams(resBuild.items, pts));
     if (evaRes?.mission_id) {
       await fetchReturnAnalysis(evaRes.mission_id);
     }
     await generateMissionDossier({
       mission_name: missionName,
       dataset_id: selectedDemDatasetId,
-      start: effectiveStart,
-      destination: effectiveDest,
+      start: pts.start,
+      destination: pts.dest,
       mode: selectedMode,
       corridor_width_m: corridorWidthM,
       observation_search_radius_m: searchRadiusM,
@@ -604,10 +634,11 @@ export default function MissionReadinessPage() {
         }
       />
 
-      {(evidenceError || evaError || resourceValidationError) && (
+      {(evidenceError || evaError || resourceValidationError || coordError) && (
         <div className="rounded-xl border border-red-500/40 bg-red-950/30 p-3 text-xs text-red-200 flex items-start gap-2">
           <AlertTriangle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
           <div className="space-y-1">
+            {coordError && <div>Coordinates: {coordError}</div>}
             {evidenceError && <div>Evidence Engine: {evidenceError}</div>}
             {evaError && <div>EVA Envelope Engine: {evaError}</div>}
             {resourceValidationError && <div>Resource Input: {resourceValidationError}</div>}
@@ -670,11 +701,11 @@ export default function MissionReadinessPage() {
               <p className="text-[11px] text-slate-400">
                 Active DEM: <span className="font-mono text-cyan-300">{selectedDemDatasetId}</span> · Start:{" "}
                 <span className="font-mono text-slate-200">
-                  {effectiveStart.lat.toFixed(4)}°, {effectiveStart.lon_east.toFixed(4)}°E
+                  {effectiveStart ? `${effectiveStart.lat.toFixed(4)}°, ${effectiveStart.lon_east.toFixed(4)}°E` : "Unconfigured"}
                 </span>{" "}
                 → Dest:{" "}
                 <span className="font-mono text-slate-200">
-                  {effectiveDest.lat.toFixed(4)}°, {effectiveDest.lon_east.toFixed(4)}°E
+                  {effectiveDest ? `${effectiveDest.lat.toFixed(4)}°, ${effectiveDest.lon_east.toFixed(4)}°E` : "Unconfigured"}
                 </span>
               </p>
             </div>
@@ -1052,7 +1083,7 @@ export default function MissionReadinessPage() {
               disabled={loadingDossier}
               className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-800 disabled:opacity-50"
             >
-              <Database className="h-3.5 w-3.5 text-purple-400" />
+              <Database className="h-3.5 w-3.5 text-cyan-400" />
               {loadingDossier ? "Generating..." : "Generate 15-Domain Dossier"}
             </button>
             <button
@@ -2097,7 +2128,11 @@ export default function MissionReadinessPage() {
       {/* ===================================================================== */}
       {evaEnvelope && (
         <Prompt20OperationalPanels
-          activeParams={buildEvalParams(parsedResourcesPreview)}
+          activeParams={
+            effectiveStart && effectiveDest
+              ? buildEvalParams(parsedResourcesPreview, { start: effectiveStart, dest: effectiveDest })
+              : null
+          }
         />
       )}
 
@@ -2107,7 +2142,7 @@ export default function MissionReadinessPage() {
       {showSection("readiness") && (
         <section className="space-y-4">
           <h2 className="text-base font-semibold text-white flex items-center gap-2">
-            <Sparkles className="h-4 w-4 text-purple-400" />
+            <Sparkles className="h-4 w-4 text-cyan-400" />
             Section E · 15-Domain Evidence Readiness, Cache Validity & Dataset Validation Audit
           </h2>
 
@@ -2304,7 +2339,7 @@ export default function MissionReadinessPage() {
                   type="button"
                   onClick={() => void fetchComplementarity()}
                   disabled={loadingComplementarity}
-                  className="rounded border border-purple-500/40 bg-purple-500/15 px-2.5 py-1 text-[11px] font-mono text-purple-200 hover:bg-purple-500/25 disabled:opacity-50"
+                  className="rounded border border-cyan-500/40 bg-cyan-500/15 px-2.5 py-1 text-[11px] font-mono text-cyan-200 hover:bg-cyan-500/25 disabled:opacity-50"
                 >
                   {loadingComplementarity ? "Refreshing Registry..." : "Refresh Complementarity"}
                 </button>
@@ -2465,14 +2500,14 @@ export default function MissionReadinessPage() {
           {/* Prompt 16: Data Complementarity Registry (supports vs does_not_support) */}
           {complementarityReport && (
             <div
-              className="rounded-xl border border-purple-500/35 bg-slate-950/75 p-4 space-y-3 text-[11px]"
+              className="rounded-xl border border-cyan-500/35 bg-slate-950/75 p-4 space-y-3 text-[11px]"
               data-testid="prompt16-complementarity-panel"
             >
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-sm font-semibold text-white">
                   Data Complementarity Registry ({complementarityReport.registry_id} · {complementarityReport.registry_version})
                 </h3>
-                <span className="font-mono text-[10px] text-purple-300">
+                <span className="font-mono text-[10px] text-cyan-300">
                   Active Sources: {complementarityReport.active_dataset_ids.length}
                 </span>
               </div>

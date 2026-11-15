@@ -21,6 +21,7 @@ import {
   Columns2,
 } from "lucide-react";
 import { API_BASE_URL } from "@/lib/constants";
+import { useAuthMissionStore } from "@/stores/useAuthMissionStore";
 import { useEvaOperationsStore } from "@/stores/useEvaOperationsStore";
 import { useEvidenceStore } from "@/stores/useEvidenceStore";
 import { useRoutingStore, type CameraPresetType } from "@/stores/useRoutingStore";
@@ -343,6 +344,13 @@ export function LocalTerrain3DViewer({
   const corridorAssessment = useEvidenceStore((s) => s.corridorAssessment);
   const evidenceOverlays = useEvidenceStore((s) => s.overlays);
   const selectedSegmentId = useEvidenceStore((s) => s.selectedSegmentId);
+  const landingSiteBundle = useAuthMissionStore((s) => s.landingSiteBundle);
+  const crewPositions = useAuthMissionStore((s) => s.positions);
+  const fieldObservations = useAuthMissionStore((s) => s.observations);
+  const sosEvents = useAuthMissionStore((s) => s.sosEvents);
+  const showLandingSiteOverlay = useSpatialStore((s) => s.showLandingSiteOverlay);
+  const showCrewOverlay = useSpatialStore((s) => s.showCrewOverlay);
+  const showFieldObservationsOverlay = useSpatialStore((s) => s.showFieldObservationsOverlay);
   const evaReturnPlan = useEvaOperationsStore((s) => s.evaEnvelope?.return_plan ?? null);
   const selectedReturnAlternativeId = useEvaOperationsStore((s) => s.selectedReturnAlternativeId);
   const robustComparison = useRoutingStore((s) => s.robustComparison);
@@ -1925,6 +1933,87 @@ export function LocalTerrain3DViewer({
         overlayGroup.add(new THREE.Line(geom, mat));
       }
     }
+
+    // Prompt 1 Multi-Astronaut Overlays in 3D Terrain Scene
+    if (showLandingSiteOverlay && landingSiteBundle?.landing_site) {
+      const ls = landingSiteBundle.landing_site;
+      const elev = ls.elevation_m ?? lookupElevNear(ls.latitude, ls.longitude_east);
+      addBeaconPin(
+        toSceneVec(ls.latitude, ls.longitude_east, elev, 2.5),
+        "#1F9D68",
+        1.45,
+        { kind: "landing_site", landingSite: ls },
+        "start"
+      );
+
+      const perimGeo = landingSiteBundle.perimeter?.geometry_geojson as
+        | { geometry?: GeoJsonGeometry }
+        | GeoJsonGeometry
+        | null
+        | undefined;
+      const geomObj =
+        perimGeo && "geometry" in perimGeo && perimGeo.geometry
+          ? perimGeo.geometry
+          : (perimGeo as GeoJsonGeometry | null);
+      if (geomObj && geomObj.coordinates) {
+        const rings: Array<Array<[number, number]>> = [];
+        if (geomObj.type === "Polygon") {
+          const r0 = (geomObj.coordinates as unknown[][])[0];
+          if (Array.isArray(r0)) rings.push(r0 as Array<[number, number]>);
+        } else if (geomObj.type === "MultiPolygon") {
+          for (const poly of geomObj.coordinates as unknown[][][]) {
+            if (Array.isArray(poly?.[0])) rings.push(poly[0] as Array<[number, number]>);
+          }
+        }
+        rings.forEach((ring) => {
+          if (ring.length < 3) return;
+          const pts = ring.map(([lon, lat]) => toSceneVec(lat, lon, lookupElevNear(lat, lon), 4.0));
+          const geom = new THREE.BufferGeometry().setFromPoints(pts);
+          const mat = new THREE.LineBasicMaterial({ color: "#22B8CF", transparent: true, opacity: 0.95 });
+          overlayGroup.add(new THREE.Line(geom, mat));
+        });
+      }
+    }
+
+    if (showCrewOverlay && crewPositions.length > 0) {
+      crewPositions.forEach((cp) => {
+        const elev = cp.elevation_m ?? lookupElevNear(cp.latitude, cp.longitude_east);
+        addBeaconPin(
+          toSceneVec(cp.latitude, cp.longitude_east, elev, 2.0),
+          cp.is_stale ? "#D98A1F" : "#22B8CF",
+          1.2,
+          { kind: "crew_position", position: cp },
+          "waypoint"
+        );
+      });
+    }
+
+    if (showFieldObservationsOverlay && fieldObservations.length > 0) {
+      fieldObservations.slice(0, 40).forEach((obs) => {
+        if (obs.latitude == null || obs.longitude_east == null) return;
+        const elev = obs.elevation_m ?? lookupElevNear(obs.latitude, obs.longitude_east);
+        addBeaconPin(
+          toSceneVec(obs.latitude, obs.longitude_east, elev, 2.0),
+          "#E25B38",
+          1.0,
+          { kind: "field_observation", observation: obs },
+          "target"
+        );
+      });
+    }
+
+    sosEvents
+      .filter((s) => s.status !== "RESOLVED" && s.status !== "CANCELLED" && s.latitude != null && s.longitude_east != null)
+      .forEach((sos) => {
+        const elev = sos.elevation_m ?? lookupElevNear(sos.latitude!, sos.longitude_east!);
+        addBeaconPin(
+          toSceneVec(sos.latitude!, sos.longitude_east!, elev, 3.0),
+          "#DC3545",
+          1.55,
+          { kind: "sos_alert", sos },
+          "destination"
+        );
+      });
   }, [
     meshManifest,
     verticalExaggeration,
@@ -1956,6 +2045,13 @@ export function LocalTerrain3DViewer({
     effectiveMorphology,
     effectiveRoverAssoc,
     measurePoints,
+    landingSiteBundle,
+    crewPositions,
+    fieldObservations,
+    sosEvents,
+    showLandingSiteOverlay,
+    showCrewOverlay,
+    showFieldObservationsOverlay,
   ]);
 
   // Respond to external camera focus requests (e.g. clicking an instruction row or target)
@@ -2391,7 +2487,7 @@ export function LocalTerrain3DViewer({
           <button
             onClick={() => setShowTargets((v) => !v)}
             className={`px-2 py-0.5 rounded transition-colors ${
-              showTargets ? "bg-purple-500/20 text-purple-300" : "text-slate-400 hover:bg-[#182235]"
+              showTargets ? "bg-[#22B8CF]/20 text-[#22B8CF]" : "text-slate-400 hover:bg-[#182235]"
             }`}
             title="Toggle Science Target pins"
           >

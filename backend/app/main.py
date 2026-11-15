@@ -34,8 +34,17 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Accept",
+        "Authorization",
+        "Content-Type",
+        "X-CSRF-Token",
+        "X-Mars-Operator-Token",
+        "X-Mars-Tracking-Token",
+        "X-Operator-Token",
+        "X-Tracking-Token",
+    ],
 )
 
 # Exception handling
@@ -55,11 +64,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(api_router)
 
 
-@app.get("/", tags=["Root"])
-async def root():
-    """
-    Root entry point directing consumers to API documentation and system health.
-    """
+def _root_payload():
     return {
         "system": settings.PROJECT_NAME,
         "description": "Martian Surface Intelligence & Exploration System",
@@ -68,6 +73,22 @@ async def root():
         "target_region": settings.STUDY_AREA_NAME,
         "planetary_body": settings.PLANETARY_BODY,
     }
+
+
+@app.get("/", tags=["Root"])
+async def root():
+    """
+    Root entry point directing consumers to API documentation and system health.
+    """
+    return _root_payload()
+
+
+@app.get("/api", tags=["Root"])
+async def api_root():
+    """
+    API-prefixed root entry point for multi-service deployments routed under /api/*.
+    """
+    return _root_payload()
 
 
 if __name__ == "__main__":
