@@ -171,3 +171,24 @@ Prompt 19 upgrades MARSCOPE into an uncertainty-aware, multi-resolution, provena
    - 7-state rover-to-orbital spatial association (`evaluate_rover_orbital_association`) preserving location semantics (`rover_chassis`, `instrument_target_location`, `drill_or_scoop_sample_site`, `waypoint_station`) and scale disparity (`confirms_entire_orbital_pixel=False`).
    - 9-input SHA-256 deterministic cache key (`compute_spatial_cache_digest`), multi-resolution pyramid planner (`get_multi_resolution_pyramid_plan`, `upsampling_prevented=True`), and fail-closed `X-Mars-Operator-Token` cache invalidation.
    - Cross-engine integration across `eligibility.py`, `target_evaluation.py`, `routing/service.py`, and `evidence_intelligence/report.py`, plus the synchronized `/spatial-intelligence` workbench and `/explorer` 3D/Globe overlays.
+
+---
+
+## Prompt 20: Advanced Human Marswalk Operational-Intelligence Architecture
+
+Prompt 20 extends `backend/app/mobility/`, `backend/app/routing/`, `backend/app/eva_operations/`, `backend/app/science/provenance_graph.py`, `backend/app/terrain/morphology.py`, and `frontend/src/app/mission-readiness/` into an honest, uncertainty-aware human Marswalk decision-support architecture:
+
+1. **Honest Physical Constants & Provenance (`energy_budget.py`, `provenance_graph.py`)**
+   - `evaluate_eva_energy_budget` queries `mars_standard_gravity` strictly from `app.physics.registry.parameters` without a silent hardcoded `3.72076` fallback; missing parameters mark `available = False`, append `"mars_standard_gravity"` to `missing_inputs`, and log `ParameterProvenanceRecord` entries in `ProvenanceDependencyGraph`.
+
+2. **Three-Category Locomotion Modeling (`eva_operations/locomotion.py`)**
+   - Separates `USER_CONFIGURED_CONSTANT_SPEED` (`USER_ASSUMED`), `TERRESTRIAL_HIKING_APPROXIMATION` (pure Tobler 1993 equation bounded by explicit `min_valid_slope_deg` / `max_valid_slope_deg` without synthetic speed floors), and `MISSION_VALIDATED_SUIT_LOCOMOTION_MODEL` (explicitly `MODEL_UNAVAILABLE` until externally validated pressurized suit biomechanics data is loaded).
+
+3. **Ten-State Traversability & Unknown Terrain Governance (`mobility/models.py`, `mobility/cost_surface.py`, `routing/models.py`)**
+   - Classifies evaluated cells into 10 `TraversabilityEvidenceState` categories, attaches all 6 `UnmeasuredSoilProperty` keys initialized to `"UNKNOWN_UNMEASURED"`, supports 9 `RouteObjective` policies (case-insensitive `_missing_` compatibility with Prompt 16 UPPERCASE and lowercase callers) plus `UnknownTerrainPolicy` (`EXCLUDE_UNKNOWN`, `ALLOW_WITH_EXPLICIT_OPERATOR_OVERRIDE`, `REQUIRE_ADDITIONAL_OBSERVATION`, `ROUTE_THROUGH_WITH_LIMITATION`), and supports 9 human review actions in `GeologicalMorphologyService`.
+
+4. **Eleven-Category Resource Accounting, Sensitivity & SHA-256 Operations Dossier (`resource_budget.py`, `sensitivity.py`, `dossier.py`)**
+   - Covers all 11 `ExtensibleResourceCategory` domains (`UNAVAILABLE_NOT_SUPPLIED` for unconfigured categories), supports per-phase `ResourceRatePhaseSpec` integration (`PHASE_INTEGRATED_Q_DOT_T`), enforces `ReservePolicy.minimum_absolute_reserve` and strict unit compatibility (`UNIT_MISMATCH`), evaluates scenario stability in `evaluate_mission_sensitivity`, and exports reproducible SHA-256-digested `MissionOperationsDossier` artifacts.
+
+5. **Dynamic Replanning, Environmental Separation & Conditional Telemetry (`replanning.py`, `environmental_context.py`, `telemetry.py`, `Prompt20OperationalPanels.tsx`)**
+   - Implements the 14-state `MissionWorkflowState`, 15-event `EVENT_DEPENDENCY_INVALIDATION_MAP`, preview/approve/reject replanning preserving plan version history, strict separation between historical MSL RAD/REMS `ARCHIVE_OBSERVATION` baselines and unavailable live telemetry (`LIVE SURFACE WEATHER UNAVAILABLE`, `LIVE RADIATION TELEMETRY UNAVAILABLE`), fail-closed conditional telemetry ingestion (`ConditionalTelemetryAdapter`), and integrated panels in `/mission-readiness`.

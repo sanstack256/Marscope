@@ -1,16 +1,20 @@
 """
-MARSCOPE EVA Constraint Evaluator
+MARSCOPE EVA Constraint Evaluator (Prompt 20 Part 2.5 Extended)
 Checks terrain limits, duration & reserve compliance, return-route feasibility,
-resource limits, corridor evidence quality, and explicit safety boundary.
+resource limits, corridor evidence quality, locomotion model validity, and
+explicit safety boundary.
 """
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional, Tuple
 
 from app.evidence_intelligence.schemas import CorridorAssessment
+from app.eva_operations.locomotion import LocomotionModelCategory
 from app.eva_operations.schemas import (
     ConstraintCheckRecord,
+    EnergyBudgetBreakdown,
+    EnvelopeFeasibilityStatus,
     MissionConfigRequest,
     ResourceBudgetReport,
     ReturnPlanReport,
@@ -55,8 +59,8 @@ def evaluate_eva_constraints(
                 configured_limit=(
                     f"{config.mission_duration_limit_s:.0f} s" if config.mission_duration_limit_s else "Unconfigured"
                 ),
-                evaluated_value="Unavailable (missing walking speed / duration limit / reserve)",
-                explanation="Cannot verify EVA time envelope without explicit walking speed, duration limit, and return reserve.",
+                evaluated_value="Unavailable (missing walking speed / duration limit / reserve / suit model)",
+                explanation="Cannot verify EVA time envelope without explicit walking speed, duration limit, return reserve, and available locomotion model.",
             )
         )
     else:
@@ -163,7 +167,25 @@ def evaluate_eva_constraints(
         )
     )
 
-    # 6. Mandatory unvalidated human life-safety boundary
+    # 6. Locomotion model availability check (when Category C is requested)
+    if config.locomotion_category == LocomotionModelCategory.MISSION_VALIDATED_SUIT_LOCOMOTION_MODEL:
+        has_suit = bool(config.validated_suit_model_source)
+        records.append(
+            ConstraintCheckRecord(
+                constraint_id="locomotion_model_availability",
+                category="locomotion_model",
+                status="PASS" if has_suit else "UNAVAILABLE",
+                configured_limit="Authenticated Mars pressurized suit locomotion dataset required",
+                evaluated_value=config.validated_suit_model_source or "MODEL_UNAVAILABLE",
+                explanation=(
+                    "Validated suit locomotion dataset supplied."
+                    if has_suit
+                    else "No authenticated pressurized Mars spacesuit locomotion dataset is bundled; MARSCOPE refuses to fabricate suit biomechanics."
+                ),
+            )
+        )
+
+    # 7. Mandatory unvalidated human life-safety boundary
     records.append(
         ConstraintCheckRecord(
             constraint_id="human_life_safety_certification",
@@ -179,3 +201,36 @@ def evaluate_eva_constraints(
     )
 
     return records
+
+
+def determine_envelope_and_model_status(
+    *,
+    config: MissionConfigRequest,
+    constraints: List[ConstraintCheckRecord],
+    time_budget: TimeBudgetBreakdown,
+    energy_budget: EnergyBudgetBreakdown,
+    resource_budget: ResourceBudgetReport,
+) -> Tuple[EnvelopeFeasibilityStatus, EnvelopeFeasibilityStatus]:
+    """Return (legacy_envelope_status, prompt20_model_feasibility_status)."""
+    any_fail = any(c.status == "FAIL" for c in constraints)
+    if any_fail:
+        legacy_status = EnvelopeFeasibilityStatus.EXCEEDS_CONFIGURED_CONSTRAINTS
+    elif time_budget.available and energy_budget.available:
+        legacy_status = EnvelopeFeasibilityStatus.FEASIBLE_WITHIN_CONFIGURED_CONSTRAINTS
+    else:
+        legacy_status = EnvelopeFeasibilityStatus.INCOMPLETE_USER_CONSTRAINTS
+
+    # Prompt 20 Part 2.5 model feasibility status
+    if (
+        config.locomotion_category == LocomotionModelCategory.MISSION_VALIDATED_SUIT_LOCOMOTION_MODEL
+        and not config.validated_suit_model_source
+    ) or "mars_standard_gravity" in energy_budget.missing_inputs:
+        model_status = EnvelopeFeasibilityStatus.BLOCKED_BY_UNKNOWN_INPUTS
+    elif any_fail:
+        model_status = EnvelopeFeasibilityStatus.INFEASIBLE_UNDER_CONFIGURED_MODEL
+    elif time_budget.available and energy_budget.available:
+        model_status = EnvelopeFeasibilityStatus.FEASIBLE_UNDER_CONFIGURED_MODEL
+    else:
+        model_status = EnvelopeFeasibilityStatus.INCOMPLETE_CONSTRAINT_EVALUATION
+
+    return legacy_status, model_status

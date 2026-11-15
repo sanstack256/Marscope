@@ -375,18 +375,30 @@ class ScienceAwareRoutingService:
         dz_m: float,
         slope_deg: float,
         walking_speed_m_per_s: Optional[float],
+        use_tobler_grade_approximation: bool = True,
     ) -> Optional[float]:
         if walking_speed_m_per_s is None or walking_speed_m_per_s <= 0:
             return None
-        # Grade-sensitive speed scaling anchored cleanly to user-supplied flat-ground walking_speed
-        # (Tobler-style grade attenuation factor normalized to 1.0 at zero slope, capped >= 0.25)
-        slope_tan = dz_m / max(0.1, horiz_m)
-        ref_tobler_flat = math.exp(-3.5 * 0.05)  # exp(-0.175) = 0.83946
-        grade_factor = math.exp(-3.5 * abs(slope_tan + 0.05)) / ref_tobler_flat
-        # Mild local slope factor so steep side-slopes cannot claim flat-ground speed
-        local_atten = max(0.35, 1.0 - (max(0.0, slope_deg) / 55.0))
-        eff_speed = walking_speed_m_per_s * max(0.22, min(1.1, min(grade_factor, local_atten)))
-        return horiz_m / eff_speed
+        from app.eva_operations.locomotion import (
+            LocomotionModelCategory,
+            evaluate_segment_locomotion,
+        )
+
+        ev = evaluate_segment_locomotion(
+            segment_index=0,
+            horizontal_distance_m=horiz_m,
+            elevation_change_m=dz_m,
+            slope_deg=slope_deg,
+            reference_speed_mps=walking_speed_m_per_s,
+            category=(
+                LocomotionModelCategory.TERRESTRIAL_HIKING_APPROXIMATION
+                if use_tobler_grade_approximation
+                else LocomotionModelCategory.USER_CONFIGURED_CONSTANT_SPEED
+            ),
+            min_valid_slope_deg=-85.0,
+            max_valid_slope_deg=85.0,
+        )
+        return ev.duration_s
 
     def get_status(self) -> RouteStatusResponse:
         return RouteStatusResponse(
@@ -461,7 +473,17 @@ class ScienceAwareRoutingService:
         TerrainGrid for deterministic unit tests).
         """
         t0 = time.perf_counter()
-        policy = resolve_routing_policy(req.mode, req.objective)
+        if req.constraints.unknown_terrain_policy == "ALLOW_WITH_EXPLICIT_OPERATOR_OVERRIDE":
+            if not (req.constraints.operator_unknown_override_reason and req.constraints.operator_unknown_override_reason.strip()):
+                raise RoutePlanningError(
+                    "unknown_terrain_policy='ALLOW_WITH_EXPLICIT_OPERATOR_OVERRIDE' requires an explicit non-empty operator_unknown_override_reason.",
+                    detail={"reason": "missing_operator_unknown_override_reason"},
+                )
+        policy = resolve_routing_policy(
+            req.mode,
+            req.objective,
+            custom_weights=req.constraints.custom_objective_weights,
+        )
         stops, sci_corridor, nearby_lookup, ev_hits = self._gather_stops_and_science(req)
         all_pts = [(req.start.lat, req.start.lon_east)] + [(s[1], s[2]) for s in stops] + [(req.destination.lat, req.destination.lon_east)]
 

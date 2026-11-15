@@ -1942,6 +1942,7 @@ export interface MissionDossierResponse {
 
 export interface EvaExplicitResourceSpec {
   resource_name: string;
+  category?: string | null;
   initial_quantity: number;
   unit: string;
   consumption_rate: number;
@@ -1952,6 +1953,7 @@ export interface EvaExplicitResourceSpec {
 
 export interface EvaResourceEvaluationEntry {
   resource_name: string;
+  category?: string | null;
   status: string;
   initial_quantity?: number | null;
   unit: string;
@@ -1962,7 +1964,103 @@ export interface EvaResourceEvaluationEntry {
   remaining_after_eva?: number | null;
   margin_above_reserve?: number | null;
   equation_applied: string;
+  integration_mode?: string;
+  reserve_policy_status?: string;
+  phase_breakdown?: Record<string, number>;
+  assumption_classification?: string;
   explanation: string;
+}
+
+export interface ParameterProvenanceRecord {
+  parameter_name: string;
+  value?: unknown;
+  units: string;
+  classification: string;
+  source_type: string;
+  citation?: string | null;
+  validity_domain?: string | null;
+  confirmed_by_operator: boolean;
+  version: string;
+}
+
+export interface LocomotionScenarioComparisonEntry {
+  scenario_id: string;
+  scenario_label: string;
+  category: string;
+  model_id: string;
+  reference_speed_mps?: number | null;
+  status: string;
+  classification: string;
+  outbound_duration_s?: number | null;
+  return_duration_s?: number | null;
+  total_traverse_duration_s?: number | null;
+  mean_effective_speed_mps?: number | null;
+  min_effective_speed_mps?: number | null;
+  max_effective_speed_mps?: number | null;
+  within_mission_duration_limit?: boolean | null;
+  disclosure: string;
+}
+
+export interface EnvironmentalObservationRecord {
+  record_id: string;
+  instrument: string;
+  mission: string;
+  modality: string;
+  observation_type: string;
+  classification: string;
+  location_description: string;
+  sol_or_epoch_range: string;
+  value?: number | null;
+  value_range?: number[] | null;
+  unit: string;
+  source_citation: string;
+  scientific_caveat: string;
+}
+
+export interface EvaEnvironmentalContextReport {
+  study_region: string;
+  live_weather_available: boolean;
+  live_weather_status: string;
+  live_radiation_available: boolean;
+  live_radiation_status: string;
+  archive_observations: EnvironmentalObservationRecord[];
+  eva_duration_s?: number | null;
+  archive_reference_gcr_dose_msv?: number | null;
+  archive_reference_gcr_dose_usv?: number | null;
+  radiation_calculation_note: string;
+  prohibited_inferences: string[];
+}
+
+export interface TelemetryConsumableSample {
+  channel_name: string;
+  value: number;
+  unit: string;
+}
+
+export interface TelemetryAdapterStatusResponse {
+  adapter_name: string;
+  adapter_version: string;
+  connected: boolean;
+  connection_status: string;
+  crew_state_status: string;
+  freshness_state: string;
+  classification: string;
+  auth_token_configured: boolean;
+  provider_id?: string | null;
+  session_id?: string | null;
+  sequence_number?: number | null;
+  crs?: string | null;
+  lat?: number | null;
+  lon_east?: number | null;
+  elevation_m?: number | null;
+  horizontal_uncertainty_m?: number | null;
+  heading_deg?: number | null;
+  packet_timestamp_utc?: string | null;
+  age_seconds?: number | null;
+  consumables: TelemetryConsumableSample[];
+  rejected_packet_count: number;
+  last_rejection_reason?: string | null;
+  disclosures: string[];
 }
 
 export interface EvaTimeBudgetBreakdown {
@@ -1978,7 +2076,10 @@ export interface EvaTimeBudgetBreakdown {
   time_margin_s?: number | null;
   within_time_budget?: boolean | null;
   speed_model_used: string;
+  locomotion_category?: string;
   speed_model_validation_note: string;
+  locomotion_model?: LocomotionModelSpec | null;
+  parameter_provenance?: ParameterProvenanceRecord[];
   missing_inputs: string[];
 }
 
@@ -1987,7 +2088,7 @@ export interface EvaEnergyBudgetBreakdown {
   astronaut_suit_mass_kg?: number | null;
   payload_mass_kg?: number | null;
   total_mass_kg?: number | null;
-  mars_gravity_m_s2: number;
+  mars_gravity_m_s2: number | null;
   surface_weight_n?: number | null;
   outbound_climb_gain_m: number;
   outbound_descent_loss_m: number;
@@ -1997,6 +2098,7 @@ export interface EvaEnergyBudgetBreakdown {
   return_climb_work_j?: number | null;
   total_positive_climb_work_j?: number | null;
   net_gravitational_pe_change_j?: number | null;
+  parameter_provenance?: ParameterProvenanceRecord[];
   disclaimer: string;
   missing_inputs: string[];
 }
@@ -2066,25 +2168,157 @@ export interface EvaMissionEnvelopeResponse {
   source_product_id: string;
   route_id: string;
   assessment_id: string;
+  dossier_id?: string | null;
   envelope_status: string;
+  model_feasibility_status?: string;
+  workflow_state?: string;
+  plan_version?: number;
+  stale?: boolean;
+  stale_reasons?: string[];
   operational_safety_certified: boolean;
   missing_inputs: string[];
+  config?: Record<string, unknown>;
   outbound_summary: Record<string, number>;
+  locomotion_model?: LocomotionModelSpec | null;
+  locomotion_scenarios?: LocomotionScenarioComparisonEntry[];
+  parameter_provenance?: ParameterProvenanceRecord[];
+  traversability_analytics?: {
+    native_dem_resolution_m?: number;
+    minimum_resolvable_feature_width_m?: number;
+    unknown_terrain_policy?: string;
+    corridor_valid_dem_fraction?: number;
+    mean_optical_coverage_fraction?: number | null;
+    optical_coverage_status?: string;
+    unmeasured_soil_properties?: Record<string, string>;
+    sub_pixel_hazard_disclosure?: string;
+    [key: string]: unknown;
+  };
   time_budget: EvaTimeBudgetBreakdown;
   energy_budget: EvaEnergyBudgetBreakdown;
   resource_budget: {
     overall_status: string;
     entries: EvaResourceEvaluationEntry[];
+    category_coverage?: Record<string, string>;
     missing_inputs: string[];
     limitations: string[];
   };
   return_plan: EvaReturnPlanReport;
   schedule: EvaSegmentScheduleItem[];
   constraints: EvaConstraintCheckRecord[];
+  environmental_context?: EvaEnvironmentalContextReport | null;
+  telemetry_state?: TelemetryAdapterStatusResponse | null;
   uncertainty_notes: string[];
   limitations: string[];
   cache_validity: string;
   compute_time_ms: number;
+}
+
+export interface MissionEventRecord {
+  event_id: string;
+  mission_id: string;
+  event_type: string;
+  recorded_at_utc: string;
+  operator_id: string;
+  description: string;
+  payload: Record<string, unknown>;
+  invalidated_subsystems: string[];
+  triggers_replanning: boolean;
+}
+
+export interface PlanComparisonReport {
+  comparison_id: string;
+  mission_id: string;
+  generated_at_utc: string;
+  previous_plan_version: number;
+  candidate_plan_version: number;
+  trigger_event_ids: string[];
+  invalidated_subsystems: string[];
+  outbound_distance_delta_m: number;
+  outbound_climb_gain_delta_m: number;
+  return_distance_delta_m: number;
+  return_climb_gain_delta_m: number;
+  total_mission_time_delta_s?: number | null;
+  remaining_time_margin_delta_s?: number | null;
+  climb_work_delta_kj?: number | null;
+  previous_feasibility_status: string;
+  candidate_feasibility_status: string;
+  previous_model_feasibility_status: string;
+  candidate_model_feasibility_status: string;
+  previous_ponr_label?: string | null;
+  candidate_ponr_label?: string | null;
+  route_overlap_fraction: number;
+  geometry_changed: boolean;
+  requires_operator_approval: boolean;
+  approved_by_operator: boolean;
+  summary_notes: string[];
+}
+
+export interface MissionVersionHistoryEntry {
+  plan_version: number;
+  created_at_utc: string;
+  status: string;
+  reason: string;
+  envelope: EvaMissionEnvelopeResponse;
+}
+
+export interface MissionOperationalSession {
+  mission_id: string;
+  workflow_state: string;
+  active_plan_version: number;
+  active_config: Record<string, unknown>;
+  active_envelope: EvaMissionEnvelopeResponse;
+  stale: boolean;
+  stale_subsystems: string[];
+  stale_reasons: string[];
+  events: MissionEventRecord[];
+  plan_history: MissionVersionHistoryEntry[];
+  pending_comparison?: PlanComparisonReport | null;
+}
+
+export interface MissionSensitivityScenarioOutcome {
+  scenario_id: string;
+  dimension: string;
+  scenario_label: string;
+  parameter_perturbation: string;
+  evaluated: boolean;
+  model_feasibility_status: string;
+  total_mission_time_s?: number | null;
+  remaining_time_margin_s?: number | null;
+  within_time_budget?: boolean | null;
+  all_resources_within_limit?: boolean | null;
+  notes: string;
+}
+
+export interface MissionSensitivityAnalysisReport {
+  mission_id: string;
+  plan_version: number;
+  baseline_model_feasibility_status: string;
+  stability_classification: string;
+  evaluated_scenario_count: number;
+  feasible_scenario_count: number;
+  infeasible_scenario_count: number;
+  unavailable_or_incomplete_count: number;
+  scenario_outcomes: MissionSensitivityScenarioOutcome[];
+  critical_drivers: string[];
+  honest_disclosures: string[];
+}
+
+export interface MissionOperationsDossier {
+  dossier_id: string;
+  dossier_schema_version: string;
+  exported_at_utc: string;
+  sha256_integrity_digest: string;
+  mission_id: string;
+  mission_name: string;
+  study_region: string;
+  workflow_state: string;
+  plan_version: number;
+  stale: boolean;
+  stale_reasons: string[];
+  feasibility_status: string;
+  model_feasibility_status: string;
+  feasibility_summary: string;
+  [key: string]: unknown;
 }
 
 // ============================================================
@@ -2357,10 +2591,13 @@ export interface RobustRouteCompareResponse {
 export interface LocomotionModelSpec {
   model_id: string;
   model_version: string;
+  category?: string;
   classification: string;
   description: string;
   applicable_scope: string;
   unvalidated_note: string;
+  min_valid_slope_deg?: number;
+  max_valid_slope_deg?: number;
 }
 
 export interface TurnbackCheckpointRecord {

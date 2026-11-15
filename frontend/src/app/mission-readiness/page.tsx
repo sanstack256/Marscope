@@ -27,8 +27,9 @@ import {
 } from "lucide-react";
 import { LocalTerrain3DViewer } from "@/components/LocalTerrain3DViewer";
 import { PageHeader } from "@/components/PageHeader";
+import { Prompt20OperationalPanels } from "@/components/Prompt20OperationalPanels";
 import { API_BASE_URL } from "@/lib/constants";
-import { useEvaOperationsStore } from "@/stores/useEvaOperationsStore";
+import { useEvaOperationsStore, type EvaEvaluateParams } from "@/stores/useEvaOperationsStore";
 import { useEvidenceStore, type EvidenceOverlayToggles } from "@/stores/useEvidenceStore";
 import { useRoutingStore } from "@/stores/useRoutingStore";
 import type {
@@ -65,6 +66,13 @@ function formatNum(value: number | null | undefined, digits = 2): string {
   return value.toFixed(digits);
 }
 
+function parseOptNum(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const val = Number(trimmed);
+  return Number.isFinite(val) ? val : null;
+}
+
 function badgeClassForStatus(status: string): string {
   switch (status) {
     case "PASS":
@@ -72,6 +80,8 @@ function badgeClassForStatus(status: string): string {
     case "WITHIN_LIMIT":
     case "WITHIN_CONSTRAINTS":
     case "FEASIBLE_WITHIN_CONFIGURED_CONSTRAINTS":
+    case "FEASIBLE_UNDER_CONFIGURED_MODEL":
+    case "CALCULATED":
     case "CURRENT":
     case "VERIFIED_LOCAL":
     case "RESEARCH_GRADE":
@@ -79,6 +89,7 @@ function badgeClassForStatus(status: string): string {
     case "FAIL":
     case "EXCEEDS_LIMIT":
     case "EXCEEDS_CONSTRAINTS":
+    case "INFEASIBLE_UNDER_CONFIGURED_MODEL":
     case "INSUFFICIENT_EVIDENCE":
     case "UNIT_MISMATCH":
     case "MISSING":
@@ -87,6 +98,8 @@ function badgeClassForStatus(status: string): string {
     case "STALE":
     case "PARTIALLY_ASSESSED":
     case "INCOMPLETE_USER_CONSTRAINTS":
+    case "INCOMPLETE_CONSTRAINT_EVALUATION":
+    case "BLOCKED_BY_UNKNOWN_INPUTS":
     case "RECOMPUTING":
     case "URL_UNVERIFIED":
     case "CONTEXT_ONLY":
@@ -157,7 +170,18 @@ export default function MissionReadinessPage() {
 
   // Explicit EVA assumption inputs — strictly nullable by default (never silently fabricated)
   const [walkingSpeedMps, setWalkingSpeedMps] = useState<string>("");
-  const [useToblerApprox, setUseToblerApprox] = useState<boolean>(false);
+  const [locomotionCategory, setLocomotionCategory] = useState<
+    | "USER_CONFIGURED_CONSTANT_SPEED"
+    | "TERRESTRIAL_HIKING_APPROXIMATION"
+    | "MISSION_VALIDATED_SUIT_LOCOMOTION_MODEL"
+  >("USER_CONFIGURED_CONSTANT_SPEED");
+  const [unknownTerrainPolicy, setUnknownTerrainPolicy] = useState<
+    | "EXCLUDE_UNKNOWN"
+    | "ALLOW_WITH_EXPLICIT_OPERATOR_OVERRIDE"
+    | "REQUIRE_ADDITIONAL_OBSERVATION"
+    | "ROUTE_THROUGH_WITH_LIMITATION"
+  >("EXCLUDE_UNKNOWN");
+  const useToblerApprox = locomotionCategory === "TERRESTRIAL_HIKING_APPROXIMATION";
   const [durationLimitMin, setDurationLimitMin] = useState<string>("");
   const [reserveFrac, setReserveFrac] = useState<string>("");
   const [overheadMin, setOverheadMin] = useState<string>("0");
@@ -194,12 +218,26 @@ export default function MissionReadinessPage() {
     [corridorAssessment, selectedSegmentId]
   );
 
-  const parseOptNum = (raw: string): number | null => {
-    const trimmed = raw.trim();
-    if (!trimmed) return null;
-    const val = Number(trimmed);
-    return Number.isFinite(val) ? val : null;
-  };
+  const parsedResourcesPreview = useMemo<EvaExplicitResourceSpec[]>(() => {
+    const out: EvaExplicitResourceSpec[] = [];
+    for (const row of resourceRows) {
+      const qty = parseOptNum(row.initial_quantity);
+      const rate = parseOptNum(row.consumption_rate);
+      const resFrac = parseOptNum(row.reserve_fraction) ?? 0;
+      if (!row.resource_name.trim() || qty === null || qty < 0 || rate === null || rate < 0) continue;
+      if (resFrac < 0 || resFrac >= 1) continue;
+      out.push({
+        resource_name: row.resource_name.trim(),
+        initial_quantity: qty,
+        unit: row.unit.trim(),
+        consumption_rate: rate,
+        rate_unit: row.rate_unit.trim(),
+        reserve_fraction: resFrac,
+        source_note: row.source_note.trim() || null,
+      });
+    }
+    return out;
+  }, [resourceRows]);
 
   const buildResourcesPayload = (): { ok: boolean; items: EvaExplicitResourceSpec[] } => {
     const parsed: EvaExplicitResourceSpec[] = [];
@@ -290,27 +328,31 @@ export default function MissionReadinessPage() {
     });
   };
 
+  const buildEvalParams = (resourcesPayload: EvaExplicitResourceSpec[]): EvaEvaluateParams => ({
+    mission_name: missionName,
+    dataset_id: selectedDemDatasetId,
+    start: effectiveStart,
+    destination: effectiveDest,
+    mode: selectedMode,
+    corridor_width_m: corridorWidthM,
+    observation_search_radius_m: searchRadiusM,
+    walking_speed_mps: parseOptNum(walkingSpeedMps),
+    use_tobler_grade_approximation: useToblerApprox,
+    locomotion_category: locomotionCategory,
+    unknown_terrain_policy: unknownTerrainPolicy,
+    mission_duration_limit_s: durationLimitSeconds,
+    return_reserve_fraction: parseOptNum(reserveFrac),
+    operational_overhead_s: overheadSeconds,
+    astronaut_suit_mass_kg: parseOptNum(suitMassKg),
+    payload_mass_kg: parseOptNum(payloadMassKg),
+    resources: resourcesPayload,
+    compute_reverse_return_route: computeReverseReturn,
+  });
+
   const handleEvaluateEva = async () => {
     const resBuild = buildResourcesPayload();
     if (!resBuild.ok) return;
-    const evaRes = await evaluateMission({
-      mission_name: missionName,
-      dataset_id: selectedDemDatasetId,
-      start: effectiveStart,
-      destination: effectiveDest,
-      mode: selectedMode,
-      corridor_width_m: corridorWidthM,
-      observation_search_radius_m: searchRadiusM,
-      walking_speed_mps: parseOptNum(walkingSpeedMps),
-      use_tobler_grade_approximation: useToblerApprox,
-      mission_duration_limit_s: durationLimitSeconds,
-      return_reserve_fraction: parseOptNum(reserveFrac),
-      operational_overhead_s: overheadSeconds,
-      astronaut_suit_mass_kg: parseOptNum(suitMassKg),
-      payload_mass_kg: parseOptNum(payloadMassKg),
-      resources: resBuild.items,
-      compute_reverse_return_route: computeReverseReturn,
-    });
+    const evaRes = await evaluateMission(buildEvalParams(resBuild.items));
     if (evaRes?.mission_id) {
       await fetchReturnAnalysis(evaRes.mission_id);
     }
@@ -341,24 +383,7 @@ export default function MissionReadinessPage() {
       corridor_width_m: corridorWidthM,
       observation_search_radius_m: searchRadiusM,
     });
-    const evaRes = await evaluateMission({
-      mission_name: missionName,
-      dataset_id: selectedDemDatasetId,
-      start: effectiveStart,
-      destination: effectiveDest,
-      mode: selectedMode,
-      corridor_width_m: corridorWidthM,
-      observation_search_radius_m: searchRadiusM,
-      walking_speed_mps: parseOptNum(walkingSpeedMps),
-      use_tobler_grade_approximation: useToblerApprox,
-      mission_duration_limit_s: durationLimitSeconds,
-      return_reserve_fraction: parseOptNum(reserveFrac),
-      operational_overhead_s: overheadSeconds,
-      astronaut_suit_mass_kg: parseOptNum(suitMassKg),
-      payload_mass_kg: parseOptNum(payloadMassKg),
-      resources: resBuild.items,
-      compute_reverse_return_route: computeReverseReturn,
-    });
+    const evaRes = await evaluateMission(buildEvalParams(resBuild.items));
     if (evaRes?.mission_id) {
       await fetchReturnAnalysis(evaRes.mission_id);
     }
@@ -763,16 +788,49 @@ export default function MissionReadinessPage() {
                 className="w-full rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-slate-100 placeholder:text-slate-600"
               />
             </label>
-            <div className="flex flex-col justify-end gap-1.5 pb-1">
-              <label className="flex items-center gap-1.5 text-[11px] text-slate-300 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={useToblerApprox}
-                  onChange={(e) => setUseToblerApprox(e.target.checked)}
-                  className="rounded border-slate-700 bg-slate-900"
-                />
-                <span>Tobler slope approx (unvalidated)</span>
+            <div className="col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <label className="space-y-1">
+                <span className="text-[11px] text-slate-400">Locomotion Model Category</span>
+                <select
+                  value={locomotionCategory}
+                  onChange={(e) =>
+                    setLocomotionCategory(
+                      e.target.value as
+                        | "USER_CONFIGURED_CONSTANT_SPEED"
+                        | "TERRESTRIAL_HIKING_APPROXIMATION"
+                        | "MISSION_VALIDATED_SUIT_LOCOMOTION_MODEL"
+                    )
+                  }
+                  className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-[11px] text-slate-100"
+                >
+                  <option value="USER_CONFIGURED_CONSTANT_SPEED">Cat A · User Constant Speed (v0)</option>
+                  <option value="TERRESTRIAL_HIKING_APPROXIMATION">Cat B · Tobler 1993 Hiking Approx (Exploratory)</option>
+                  <option value="MISSION_VALIDATED_SUIT_LOCOMOTION_MODEL">Cat C · Validated Mars Suit Model (Unavailable)</option>
+                </select>
               </label>
+              <label className="space-y-1">
+                <span className="text-[11px] text-slate-400">Unknown Terrain Policy</span>
+                <select
+                  value={unknownTerrainPolicy}
+                  onChange={(e) =>
+                    setUnknownTerrainPolicy(
+                      e.target.value as
+                        | "EXCLUDE_UNKNOWN"
+                        | "ALLOW_WITH_EXPLICIT_OPERATOR_OVERRIDE"
+                        | "REQUIRE_ADDITIONAL_OBSERVATION"
+                        | "ROUTE_THROUGH_WITH_LIMITATION"
+                    )
+                  }
+                  className="w-full rounded border border-slate-700 bg-slate-900 px-2 py-1.5 text-[11px] text-slate-100"
+                >
+                  <option value="EXCLUDE_UNKNOWN">Exclude Unknown Cells</option>
+                  <option value="REQUIRE_ADDITIONAL_OBSERVATION">Require Additional Observation</option>
+                  <option value="ROUTE_THROUGH_WITH_LIMITATION">Route With Limitation Flag</option>
+                  <option value="ALLOW_WITH_EXPLICIT_OPERATOR_OVERRIDE">Allow With Operator Override</option>
+                </select>
+              </label>
+            </div>
+            <div className="flex flex-col justify-end gap-1.5 pb-1">
               <label className="flex items-center gap-1.5 text-[11px] text-slate-300 cursor-pointer">
                 <input
                   type="checkbox"
@@ -1829,7 +1887,11 @@ export default function MissionReadinessPage() {
               <div className="flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-white">Mechanical Climb Work (W = m g ΣΔh+)</h3>
                 <span className="font-mono text-[10px] text-slate-400">
-                  g = {evaEnvelope?.energy_budget.mars_gravity_m_s2 ?? 3.72076} m/s²
+                  g ={" "}
+                  {evaEnvelope?.energy_budget.mars_gravity_m_s2 !== null &&
+                  evaEnvelope?.energy_budget.mars_gravity_m_s2 !== undefined
+                    ? `${evaEnvelope.energy_budget.mars_gravity_m_s2} m/s²`
+                    : "UNAVAILABLE"}
                 </span>
               </div>
               {evaEnvelope ? (
@@ -1996,6 +2058,15 @@ export default function MissionReadinessPage() {
             </table>
           )}
         </section>
+      )}
+
+      {/* ===================================================================== */}
+      {/* PROMPT 20 — HUMAN MARSWALK OPERATIONAL INTELLIGENCE & REPLANNING      */}
+      {/* ===================================================================== */}
+      {evaEnvelope && (
+        <Prompt20OperationalPanels
+          activeParams={buildEvalParams(parsedResourcesPreview)}
+        />
       )}
 
       {/* ===================================================================== */}

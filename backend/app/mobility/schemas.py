@@ -12,6 +12,8 @@ from app.mobility.models import (
     ParameterOriginType,
     ResolutionSuitabilityLevel,
     TerrainCoverageState,
+    TraversabilityEvidenceState,
+    UNMEASURED_SOIL_PROPERTIES_DEFAULT,
 )
 from app.schemas.terrain import InsufficientCoverageReport, RasterBandStats
 
@@ -484,6 +486,12 @@ class TraversalSegmentEvaluation(BaseModel):
     uphill_parallel_gravity_force_newtons: Optional[float] = None
     # Scenario-derived traversal estimates (explicitly separated)
     traversal_availability_state: CellTraversalAvailabilityState
+    traversability_evidence_state: TraversabilityEvidenceState = (
+        TraversabilityEvidenceState.EVALUATED_WITH_LIMITATIONS
+    )
+    unmeasured_soil_properties: Dict[str, str] = Field(
+        default_factory=lambda: dict(UNMEASURED_SOIL_PROPERTIES_DEFAULT)
+    )
     reference_speed_m_per_s: Optional[float] = None
     slope_speed_factor: Optional[float] = None
     roughness_speed_factor: Optional[float] = None
@@ -536,6 +544,10 @@ class CostSurfaceCellRecord(BaseModel):
     roughness_tri_meters: Optional[float] = None
     # Scenario-derived traversal cost (null whenever unknown/excluded/unconfigured)
     traversal_availability_state: CellTraversalAvailabilityState
+    traversability_evidence_state: TraversabilityEvidenceState = (
+        TraversabilityEvidenceState.EVALUATED_WITH_LIMITATIONS
+    )
+    candidate_obstacle_ids: List[str] = Field(default_factory=list)
     effective_speed_m_per_s: Optional[float] = None
     traversal_cost_seconds_per_meter: Optional[float] = None
     cell_crossing_time_seconds: Optional[float] = None
@@ -567,9 +579,17 @@ class CostSurfaceSummary(BaseModel):
     safety_classification_policy: str = "no_safe_or_unsafe_labels_emitted"
     coverage_state_counts: Dict[str, int]
     traversal_availability_counts: Dict[str, int]
+    traversability_evidence_state_counts: Dict[str, int] = Field(default_factory=dict)
     evaluated_cell_count: int
     unknown_terrain_cell_count: int
     excluded_by_scenario_cell_count: int
+    candidate_obstacle_count: int = 0
+    accepted_obstacle_count: int = 0
+    optical_coverage_available: bool = False
+    spatial_registration_status: str = "ALIGNED_HIGH_PRECISION"
+    unmeasured_soil_properties: Dict[str, str] = Field(
+        default_factory=lambda: dict(UNMEASURED_SOIL_PROPERTIES_DEFAULT)
+    )
     min_effective_speed_m_per_s: Optional[float] = None
     max_effective_speed_m_per_s: Optional[float] = None
     mean_effective_speed_m_per_s: Optional[float] = None

@@ -60,16 +60,21 @@ NODATA_BORDER_GUARD_PX = 2
 class MorphologyReviewRecord(BaseModel):
     candidate_id: str
     dataset_id: str
-    action: str  # accept | reject | annotate
+    action: str  # accept | reject | annotate | correct_geometry | add_observation | attach_source | record_uncertainty | add_note | mark_unresolved
     reviewer_id: str
     reviewed_at_utc: str
     updated_epistemic_state: MorphologyEpistemicState
     classification: str = "USER_PROVIDED"
+    review_classification: str = "USER_REVIEWED"
     origin_note: str = (
-        "USER_PROVIDED expert review annotation — NOT an orbital or in-situ instrument measurement."
+        "USER_PROVIDED / USER_REVIEWED expert review annotation — NOT an orbital or in-situ instrument measurement."
     )
     annotation_note: Optional[str] = None
     assigned_feature_class: Optional[MorphologyFeatureClass] = None
+    corrected_geometry_geojson: Optional[Dict[str, Any]] = None
+    observation_record: Optional[Dict[str, Any]] = None
+    attached_source_reference: Optional[str] = None
+    recorded_uncertainty_m: Optional[float] = None
 
 
 class MorphologicalFeatureCandidate(BaseModel):
@@ -971,14 +976,31 @@ class GeologicalMorphologyService:
         reviewer_id: str,
         annotation_note: Optional[str] = None,
         assigned_feature_class: Optional[MorphologyFeatureClass] = None,
+        corrected_geometry_geojson: Optional[Dict[str, Any]] = None,
+        observation_record: Optional[Dict[str, Any]] = None,
+        attached_source_reference: Optional[str] = None,
+        recorded_uncertainty_m: Optional[float] = None,
     ) -> MorphologyReviewRecord:
         act = action.strip().lower()
-        if act not in {"accept", "reject", "annotate"}:
-            raise ValueError(f"Invalid review action '{action}': expected accept, reject, or annotate.")
-        if act in {"accept", "annotate"}:
-            ep = MorphologyEpistemicState.EXPERT_INTERPRETATION
-        else:
+        allowed_actions = {
+            "accept",
+            "reject",
+            "annotate",
+            "correct_geometry",
+            "add_observation",
+            "attach_source",
+            "record_uncertainty",
+            "add_note",
+            "mark_unresolved",
+        }
+        if act not in allowed_actions:
+            raise ValueError(
+                f"Invalid review action '{action}': expected one of {sorted(allowed_actions)}."
+            )
+        if act in {"reject", "mark_unresolved"}:
             ep = MorphologyEpistemicState.UNRESOLVED
+        else:
+            ep = MorphologyEpistemicState.EXPERT_INTERPRETATION
 
         rec = MorphologyReviewRecord(
             candidate_id=candidate_id,
@@ -988,7 +1010,12 @@ class GeologicalMorphologyService:
             reviewed_at_utc=datetime.now(timezone.utc).isoformat(),
             updated_epistemic_state=ep,
             classification="USER_PROVIDED",
+            review_classification="USER_REVIEWED",
             annotation_note=annotation_note,
             assigned_feature_class=assigned_feature_class,
+            corrected_geometry_geojson=corrected_geometry_geojson,
+            observation_record=observation_record,
+            attached_source_reference=attached_source_reference,
+            recorded_uncertainty_m=recorded_uncertainty_m,
         )
         return self.review_store.save_review(rec)

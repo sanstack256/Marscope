@@ -1,7 +1,9 @@
 """
-MARSCOPE EVA Segment-Level Operational Schedule Builder
+MARSCOPE EVA Segment-Level Operational Schedule Builder (Prompt 20 Part 2.1 & Part 5)
 Links every schedule step to real segment geometry & corridor polygons so
 UI timelines synchronize bidirectionally with the 3D terrain viewer.
+Uses pure documented Tobler (1993) grade math without undocumented linear slope
+multipliers or arbitrary speed floors.
 """
 
 from __future__ import annotations
@@ -10,17 +12,17 @@ import math
 from typing import Dict, List, Optional
 
 from app.evidence_intelligence.schemas import CorridorAssessment
+from app.eva_operations.locomotion import (
+    LocomotionEvaluationStatus,
+    LocomotionModelCategory,
+    evaluate_segment_locomotion,
+)
 from app.eva_operations.schemas import (
-    LocomotionModelSpec,
     ReturnPlanReport,
     ReturnPlanStatus,
     SegmentScheduleItem,
-    get_locomotion_model_spec,
 )
-from app.mobility.terrain_features import mars_great_circle_distance_meters
 from app.routing.schemas import RouteCoordinateInput
-
-LOCOMOTION_SPEED_FLOOR_RATIO = 0.22
 
 
 def _approx_tobler_for_vertices(
@@ -30,16 +32,27 @@ def _approx_tobler_for_vertices(
     surface_dist_m: float,
     walking_speed_mps: Optional[float],
     mean_slope_deg: Optional[float],
+    min_valid_slope_deg: float = -45.0,
+    max_valid_slope_deg: float = 45.0,
 ) -> Optional[float]:
     if walking_speed_mps is None or walking_speed_mps <= 0 or surface_dist_m <= 0:
         return None
     dz = (elev_end - elev_start) if (elev_start is not None and elev_end is not None) else 0.0
     horiz = max(0.1, math.sqrt(max(0.01, surface_dist_m * surface_dist_m - dz * dz)))
-    ref_tobler = math.exp(-3.5 * 0.05)
-    grade_factor = math.exp(-3.5 * abs((dz / horiz) + 0.05)) / ref_tobler
-    local_atten = max(0.35, 1.0 - max(0.0, float(mean_slope_deg or 0.0)) / 55.0)
-    eff_speed = walking_speed_mps * max(LOCOMOTION_SPEED_FLOOR_RATIO, min(1.1, min(grade_factor, local_atten)))
-    return round(surface_dist_m / eff_speed, 1)
+    slope_val = float(mean_slope_deg) if mean_slope_deg is not None else math.degrees(math.atan2(abs(dz), horiz))
+    res = evaluate_segment_locomotion(
+        segment_index=0,
+        horizontal_distance_m=horiz,
+        elevation_change_m=dz,
+        slope_deg=slope_val,
+        category=LocomotionModelCategory.TERRESTRIAL_HIKING_APPROXIMATION,
+        reference_speed_mps=walking_speed_mps,
+        min_valid_slope_deg=min_valid_slope_deg,
+        max_valid_slope_deg=max_valid_slope_deg,
+    )
+    if res.status != LocomotionEvaluationStatus.EVALUATED or res.duration_s is None:
+        return None
+    return round(res.duration_s, 1)
 
 
 def build_eva_schedule(
@@ -51,11 +64,20 @@ def build_eva_schedule(
     stop_dwell_seconds: Dict[str, float],
     operational_overhead_s: float,
     surface_weight_n: Optional[float],
+    locomotion_category: Optional[LocomotionModelCategory] = None,
+    validated_suit_model_source: Optional[str] = None,
+    min_valid_slope_deg: float = -45.0,
+    max_valid_slope_deg: float = 45.0,
 ) -> List[SegmentScheduleItem]:
     items: List[SegmentScheduleItem] = []
     seq = 0
     cursor_t = 0.0
     cum_climb_j = 0.0
+
+    suit_unavailable = (
+        locomotion_category == LocomotionModelCategory.MISSION_VALIDATED_SUIT_LOCOMOTION_MODEL
+        and not validated_suit_model_source
+    )
 
     # Pre-traverse operational overhead if specified
     if operational_overhead_s > 0.0:
@@ -89,16 +111,30 @@ def build_eva_schedule(
         if surface_weight_n is not None:
             cum_climb_j += surface_weight_n * gain
 
-        d_const = round(surf_d / walking_speed_mps, 1) if (walking_speed_mps and walking_speed_mps > 0) else None
-        d_tobler = _approx_tobler_for_vertices(
-            seg.vertices or [seg.start_coord, seg.end_coord],
-            seg.start_elevation_m,
-            seg.end_elevation_m,
-            surf_d,
-            walking_speed_mps,
-            seg.mean_slope_deg,
+        d_const = (
+            round(surf_d / walking_speed_mps, 1)
+            if (walking_speed_mps and walking_speed_mps > 0 and not suit_unavailable)
+            else None
         )
-        active_dur = d_tobler if use_tobler_grade_approximation else d_const
+        d_tobler = (
+            _approx_tobler_for_vertices(
+                seg.vertices or [seg.start_coord, seg.end_coord],
+                seg.start_elevation_m,
+                seg.end_elevation_m,
+                surf_d,
+                walking_speed_mps,
+                seg.mean_slope_deg,
+                min_valid_slope_deg=min_valid_slope_deg,
+                max_valid_slope_deg=max_valid_slope_deg,
+            )
+            if not suit_unavailable
+            else None
+        )
+        use_tob = (
+            use_tobler_grade_approximation
+            or locomotion_category == LocomotionModelCategory.TERRESTRIAL_HIKING_APPROXIMATION
+        )
+        active_dur = d_tobler if use_tob else d_const
 
         t_start = round(cursor_t, 1) if active_dur is not None else None
         t_end = round(cursor_t + active_dur, 1) if active_dur is not None else None
@@ -158,9 +194,13 @@ def build_eva_schedule(
     if return_plan.return_route_computed and return_plan.return_status != ReturnPlanStatus.REVERSED_OUTBOUND_REFERENCE_ONLY:
         if surface_weight_n is not None:
             cum_climb_j += surface_weight_n * return_plan.return_elevation_gain_m
-        d_ret_const = return_plan.return_duration_constant_s
-        d_ret_tobler = return_plan.return_duration_tobler_s
-        active_ret = d_ret_tobler if use_tobler_grade_approximation else d_ret_const
+        d_ret_const = return_plan.return_duration_constant_s if not suit_unavailable else None
+        d_ret_tobler = return_plan.return_duration_tobler_s if not suit_unavailable else None
+        use_tob = (
+            use_tobler_grade_approximation
+            or locomotion_category == LocomotionModelCategory.TERRESTRIAL_HIKING_APPROXIMATION
+        )
+        active_ret = d_ret_tobler if use_tob else d_ret_const
         t_start = round(cursor_t, 1) if (active_ret is not None and walking_speed_mps) else None
         t_end = round(cursor_t + active_ret, 1) if (active_ret is not None and t_start is not None) else None
         ret_coords = [

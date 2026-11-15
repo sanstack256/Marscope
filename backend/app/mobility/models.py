@@ -1,5 +1,5 @@
 """
-MARSCOPE Human Mobility Intelligence Domain Models & Enumerations
+MARSCOPE Human Mobility Intelligence Domain Models & Enumerations (Prompt 13, 16, 20 Part 3)
 Martian Surface Intelligence & Exploration System
 """
 
@@ -31,6 +31,42 @@ class CellTraversalAvailabilityState(str, Enum):
     EXPLICIT_SCENARIO_EXCLUSION = "explicit_scenario_exclusion"
     INSUFFICIENT_SCENARIO_PARAMETERS = "insufficient_scenario_parameters"
     OUTSIDE_MODEL_VALID_DOMAIN = "outside_model_valid_domain"
+
+
+class TraversabilityEvidenceState(str, Enum):
+    """
+    10-state human-centric terrain traversability evidence classification (Prompt 20 Part 3.3).
+    """
+
+    EVALUATED_WITH_AVAILABLE_EVIDENCE = "EVALUATED_WITH_AVAILABLE_EVIDENCE"
+    EVALUATED_WITH_LIMITATIONS = "EVALUATED_WITH_LIMITATIONS"
+    KNOWN_GEOMETRIC_CONSTRAINT = "KNOWN_GEOMETRIC_CONSTRAINT"
+    CANDIDATE_OBSTACLE_PRESENT = "CANDIDATE_OBSTACLE_PRESENT"
+    UNKNOWN_INSUFFICIENT_RESOLUTION = "UNKNOWN_INSUFFICIENT_RESOLUTION"
+    UNKNOWN_NO_VALID_TERRAIN = "UNKNOWN_NO_VALID_TERRAIN"
+    UNKNOWN_NO_OPTICAL_EVIDENCE = "UNKNOWN_NO_OPTICAL_EVIDENCE"
+    UNKNOWN_REGISTRATION_FAILURE = "UNKNOWN_REGISTRATION_FAILURE"
+    UNKNOWN_UNMEASURED_MATERIAL_PROPERTIES = "UNKNOWN_UNMEASURED_MATERIAL_PROPERTIES"
+    NOT_EVALUATED = "NOT_EVALUATED"
+
+
+class UnmeasuredSoilProperty(str, Enum):
+    """
+    Physical regolith/substrate mechanical properties that cannot be measured from
+    orbital topography or optical imagery alone (Prompt 20 Part 3.2).
+    """
+
+    REGOLITH_BEARING_CAPACITY = "regolith_bearing_capacity"
+    SOIL_SHEAR_STRENGTH = "soil_shear_strength"
+    BOOT_TRACTION = "boot_traction"
+    SINKAGE = "sinkage"
+    DUST_STABILITY = "dust_stability"
+    SUBSURFACE_VOIDS = "subsurface_voids"
+
+
+UNMEASURED_SOIL_PROPERTIES_DEFAULT = {
+    prop.value: "UNKNOWN_UNMEASURED" for prop in UnmeasuredSoilProperty
+}
 
 
 class AnalysisScaleType(str, Enum):

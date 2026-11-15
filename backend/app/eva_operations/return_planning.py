@@ -1,8 +1,8 @@
 """
-MARSCOPE Explicit EVA Return-Route & Route-Aware Turnback Planning Engine
+MARSCOPE Explicit EVA Return-Route & Route-Aware Turnback Planning Engine (Prompt 20 Part 7)
 Evaluates independent destination->origin paths, alternative return trajectories,
 asymmetric climb costs, and checkpoint-by-checkpoint turnback constraints without
-symmetric 2*d/v illusions.
+symmetric 2*d/v illusions or undocumented linear slope multipliers.
 """
 
 from __future__ import annotations
@@ -10,6 +10,11 @@ from __future__ import annotations
 import math
 from typing import Any, List, Optional
 
+from app.eva_operations.locomotion import (
+    LocomotionEvaluationStatus,
+    LocomotionModelCategory,
+    evaluate_segment_locomotion,
+)
 from app.eva_operations.schemas import (
     IndependentReturnAlternative,
     ReturnPlanReport,
@@ -57,11 +62,13 @@ def _compute_reversed_symmetric_vertices(outbound_verts: List[RouteVertex]) -> L
 
 
 def _estimate_vertex_path_tobler_seconds(
-    verts: List[RouteVertex], walking_speed_mps: Optional[float]
+    verts: List[RouteVertex],
+    walking_speed_mps: Optional[float],
+    min_valid_slope_deg: float = -45.0,
+    max_valid_slope_deg: float = 45.0,
 ) -> Optional[float]:
     if walking_speed_mps is None or walking_speed_mps <= 0 or len(verts) < 2:
         return None
-    ref_tobler_flat = math.exp(-3.5 * 0.05)
     total = 0.0
     for i in range(1, len(verts)):
         h = mars_great_circle_distance_meters(
@@ -70,12 +77,20 @@ def _estimate_vertex_path_tobler_seconds(
         dz = float(verts[i].elevation_m) - float(verts[i - 1].elevation_m)
         if h <= 1e-6:
             continue
-        slope_tan = dz / h
-        grade_factor = math.exp(-3.5 * abs(slope_tan + 0.05)) / ref_tobler_flat
-        eff_slp = float(verts[i].slope_deg) if verts[i].slope_deg is not None else math.degrees(math.atan2(abs(dz), h))
-        local_atten = max(0.35, 1.0 - max(0.0, eff_slp) / 55.0)
-        eff_speed = walking_speed_mps * max(0.22, min(1.1, min(grade_factor, local_atten)))
-        total += h / eff_speed
+        slope_val = float(verts[i].slope_deg) if verts[i].slope_deg is not None else math.degrees(math.atan2(abs(dz), h))
+        res = evaluate_segment_locomotion(
+            segment_index=i - 1,
+            horizontal_distance_m=h,
+            elevation_change_m=dz,
+            slope_deg=slope_val,
+            category=LocomotionModelCategory.TERRESTRIAL_HIKING_APPROXIMATION,
+            reference_speed_mps=walking_speed_mps,
+            min_valid_slope_deg=min_valid_slope_deg,
+            max_valid_slope_deg=max_valid_slope_deg,
+        )
+        if res.status != LocomotionEvaluationStatus.EVALUATED or res.duration_s is None:
+            return None
+        total += res.duration_s
     return round(total, 1)
 
 
@@ -92,6 +107,9 @@ def _compute_polyline_overlap_fraction(
         if any(mars_great_circle_distance_meters(va.lat, va.lon_east, vb.lat, vb.lon_east) <= tolerance_m for vb in verts_b):
             hits += 1
     return round(hits / float(len(verts_a)), 4)
+
+
+_polyline_overlap_fraction = _compute_polyline_overlap_fraction
 
 
 def _select_checkpoint_indices(n_verts: int, max_checkpoints: int = 8) -> List[int]:
@@ -115,9 +133,17 @@ def plan_eva_return_route(
     operational_overhead_s: float,
     usable_budget_s: Optional[float],
     compute_reverse_return_route: bool = True,
+    locomotion_category: Optional[LocomotionModelCategory] = None,
+    min_valid_slope_deg: float = -45.0,
+    max_valid_slope_deg: float = 45.0,
 ) -> ReturnPlanReport:
     warnings: List[str] = []
-    loco_spec = get_locomotion_model_spec(use_tobler_grade_approximation)
+    loco_spec = get_locomotion_model_spec(
+        use_tobler_grade_approximation,
+        category=locomotion_category,
+        min_valid_slope_deg=min_valid_slope_deg,
+        max_valid_slope_deg=max_valid_slope_deg,
+    )
     out_verts = outbound_route.vertices
     if len(out_verts) < 2:
         return ReturnPlanReport(
@@ -130,6 +156,7 @@ def plan_eva_return_route(
             return_elevation_gain_m=0.0,
             return_elevation_loss_m=0.0,
             asymmetric_climb_delta_m=0.0,
+            point_of_no_return_explanation="Outbound route has fewer than 2 vertices.",
             locomotion_model=loco_spec,
             warnings=["Outbound route has fewer than 2 vertices."],
         )
@@ -142,7 +169,12 @@ def plan_eva_return_route(
         r_gain = outbound_route.total_elevation_loss_m
         r_loss = outbound_route.total_elevation_gain_m
         d_const = round(r_surf / walking_speed_mps, 1) if (walking_speed_mps and walking_speed_mps > 0) else None
-        d_tobler = _estimate_vertex_path_tobler_seconds(ref_verts, walking_speed_mps)
+        d_tobler = _estimate_vertex_path_tobler_seconds(
+            ref_verts,
+            walking_speed_mps,
+            min_valid_slope_deg=min_valid_slope_deg,
+            max_valid_slope_deg=max_valid_slope_deg,
+        )
         warnings.append(
             "Independent return computation disabled; reversed outbound path is displayed ONLY as visual reference and does NOT validate return feasibility."
         )
@@ -163,10 +195,20 @@ def plan_eva_return_route(
             point_of_no_return_distance_m=None,
             turnback_constraint_checkpoint_distance_m=None,
             turnback_ponr_method="unavailable_reference_only",
+            point_of_no_return_explanation=(
+                "Independent return routing was disabled by configuration; no verified turnback checkpoint can be established."
+            ),
             overlap_with_outbound_fraction=1.0,
             locomotion_model=loco_spec,
             turnback_checkpoints=[],
             return_alternatives=[],
+            emergency_return_alternatives=[],
+            outbound_vs_return_asymmetry={
+                "outbound_climb_gain_m": round(outbound_route.total_elevation_gain_m, 2),
+                "return_climb_gain_m": round(r_gain, 2),
+                "asymmetric_climb_delta_m": round(r_gain - outbound_route.total_elevation_gain_m, 2),
+                "note": "Reversed outbound reference only; independent return was not solved.",
+            },
             feasible_within_usable_budget=None,
             warnings=warnings,
         )
@@ -176,7 +218,6 @@ def plan_eva_return_route(
     checkpoints: List[TurnbackCheckpointRecord] = []
     failure_exc: Optional[str] = None
 
-    # Use fast single-grid independent return + reverse-Dijkstra checkpoint solver when available
     if hasattr(routing_service, "compute_independent_return_with_checkpoints"):
         try:
             (
@@ -241,9 +282,11 @@ def plan_eva_return_route(
             return_elevation_loss_m=0.0,
             asymmetric_climb_delta_m=0.0,
             turnback_ponr_method="independent_return_failed",
+            point_of_no_return_explanation=f"Independent return computation failed: {failure_exc or 'no path'}.",
             locomotion_model=loco_spec,
             turnback_checkpoints=checkpoints,
             return_alternatives=[],
+            emergency_return_alternatives=[],
             feasible_within_usable_budget=False,
             warnings=warnings,
         )
@@ -257,14 +300,18 @@ def plan_eva_return_route(
     overlap_with_out = _compute_polyline_overlap_fraction(r_verts, out_verts)
 
     d_const = round(r_surf / walking_speed_mps, 1) if (walking_speed_mps and walking_speed_mps > 0) else None
-    d_tobler = _estimate_vertex_path_tobler_seconds(r_verts, walking_speed_mps)
+    d_tobler = _estimate_vertex_path_tobler_seconds(
+        r_verts,
+        walking_speed_mps,
+        min_valid_slope_deg=min_valid_slope_deg,
+        max_valid_slope_deg=max_valid_slope_deg,
+    )
     active_ret_s = d_tobler if use_tobler_grade_approximation else d_const
 
     # If checkpoints were not precomputed by fast reverse-Dijkstra helper, compute checkpoint-by-checkpoint now
     if not checkpoints:
         cum_surf = 0.0
         cum_out_tobler = 0.0
-        ref_tobler = math.exp(-3.5 * 0.05)
         vert_out_cum_tobler: List[float] = [0.0]
         for idx in range(1, len(out_verts)):
             h = mars_great_circle_distance_meters(
@@ -273,10 +320,19 @@ def plan_eva_return_route(
             dz = float(out_verts[idx].elevation_m) - float(out_verts[idx - 1].elevation_m)
             cum_surf += math.hypot(h, dz)
             if walking_speed_mps and walking_speed_mps > 0 and h > 1e-6:
-                grade_factor = math.exp(-3.5 * abs((dz / h) + 0.05)) / ref_tobler
-                slp = float(out_verts[idx].slope_deg) if out_verts[idx].slope_deg is not None else math.degrees(math.atan2(abs(dz), h))
-                atten = max(0.35, 1.0 - max(0.0, slp) / 55.0)
-                cum_out_tobler += h / (walking_speed_mps * max(0.22, min(1.1, min(grade_factor, atten))))
+                seg_slope = float(out_verts[idx].slope_deg) if out_verts[idx].slope_deg is not None else math.degrees(math.atan2(abs(dz), h))
+                seg_tob = evaluate_segment_locomotion(
+                    segment_index=idx - 1,
+                    horizontal_distance_m=h,
+                    elevation_change_m=dz,
+                    slope_deg=seg_slope,
+                    category=LocomotionModelCategory.TERRESTRIAL_HIKING_APPROXIMATION,
+                    reference_speed_mps=walking_speed_mps,
+                    min_valid_slope_deg=min_valid_slope_deg,
+                    max_valid_slope_deg=max_valid_slope_deg,
+                )
+                if seg_tob.duration_s is not None:
+                    cum_out_tobler += seg_tob.duration_s
             vert_out_cum_tobler.append(cum_out_tobler)
 
         for cp_pos, v_idx in enumerate(_select_checkpoint_indices(len(out_verts))):
@@ -302,14 +358,20 @@ def plan_eva_return_route(
                 )
                 cp_ret = routing_service.compute_route(cp_req)
                 cp_c = round(cp_ret.total_surface_distance_m / walking_speed_mps, 1) if (walking_speed_mps and walking_speed_mps > 0) else None
-                cp_tob = _estimate_vertex_path_tobler_seconds(cp_ret.vertices, walking_speed_mps)
+                cp_tob = _estimate_vertex_path_tobler_seconds(
+                    cp_ret.vertices,
+                    walking_speed_mps,
+                    min_valid_slope_deg=min_valid_slope_deg,
+                    max_valid_slope_deg=max_valid_slope_deg,
+                )
                 active_cp_ret = cp_tob if use_tobler_grade_approximation else cp_c
                 rt_time = (
                     round((out_t or 0.0) + (active_cp_ret or 0.0) + operational_overhead_s + (stop_dwell_total_s if v_idx == len(out_verts) - 1 else 0.0), 1)
                     if (out_t is not None and active_cp_ret is not None)
                     else None
                 )
-                fits = (rt_time <= usable_budget_s) if (rt_time is not None and usable_budget_s is not None) else None
+                rem_margin = round(usable_budget_s - rt_time, 1) if (rt_time is not None and usable_budget_s is not None) else None
+                fits = (rem_margin >= 0.0) if rem_margin is not None else None
                 checkpoints.append(
                     TurnbackCheckpointRecord(
                         checkpoint_index=cp_pos,
@@ -323,6 +385,7 @@ def plan_eva_return_route(
                         independent_return_duration_constant_s=cp_c,
                         independent_return_duration_tobler_s=cp_tob,
                         estimated_roundtrip_time_s=rt_time,
+                        remaining_margin_s=rem_margin,
                         fits_usable_budget=fits,
                         return_differs_from_outbound=_compute_polyline_overlap_fraction(cp_ret.vertices, out_verts[: v_idx + 1]) < 0.85,
                     )
@@ -340,11 +403,20 @@ def plan_eva_return_route(
                         failure_reason=str(cp_exc),
                     )
                 )
+    else:
+        for cp in checkpoints:
+            if cp.remaining_margin_s is None and cp.estimated_roundtrip_time_s is not None and usable_budget_s is not None:
+                cp.remaining_margin_s = round(usable_budget_s - cp.estimated_roundtrip_time_s, 1)
 
     out_travel_active: Optional[float] = None
     if walking_speed_mps and walking_speed_mps > 0:
         out_travel_active = (
-            _estimate_vertex_path_tobler_seconds(out_verts, walking_speed_mps)
+            _estimate_vertex_path_tobler_seconds(
+                out_verts,
+                walking_speed_mps,
+                min_valid_slope_deg=min_valid_slope_deg,
+                max_valid_slope_deg=max_valid_slope_deg,
+            )
             if use_tobler_grade_approximation
             else round(outbound_route.total_surface_distance_m / walking_speed_mps, 1)
         )
@@ -383,6 +455,19 @@ def plan_eva_return_route(
             f"Return leg encounters +{asym_delta:.1f} m more elevation gain than outbound traverse; asymmetric climb load governs return reserve."
         )
 
+    ponr_expl = (
+        f"Latest budget-compliant turnback checkpoint along outbound path is at {turnback_dist_m:.1f} m "
+        f"(evaluated via {len(checkpoints)} independent checkpoint-to-origin solves)."
+        if turnback_dist_m is not None
+        else "No outbound checkpoint satisfies usable round-trip duration budget or duration constraints were not supplied."
+    )
+
+    emergency_alts = [
+        alt
+        for alt in return_alts
+        if alt.objective in ("SHORTEST_DISTANCE", "MINIMUM_SLOPE", "MINIMUM_ELEVATION_GAIN")
+    ]
+
     return ReturnPlanReport(
         return_status=ret_status,
         return_route_computed=True,
@@ -403,10 +488,21 @@ def plan_eva_return_route(
         point_of_no_return_distance_m=turnback_dist_m,
         turnback_constraint_checkpoint_distance_m=turnback_dist_m,
         turnback_ponr_method="checkpoint_independent_reverse_dijkstra",
+        point_of_no_return_explanation=ponr_expl,
         overlap_with_outbound_fraction=overlap_with_out,
         locomotion_model=loco_spec,
         turnback_checkpoints=checkpoints,
         return_alternatives=return_alts,
+        emergency_return_alternatives=emergency_alts,
+        outbound_vs_return_asymmetry={
+            "outbound_surface_distance_m": round(outbound_route.total_surface_distance_m, 2),
+            "return_surface_distance_m": round(r_surf, 2),
+            "distance_delta_m": round(r_surf - outbound_route.total_surface_distance_m, 2),
+            "outbound_climb_gain_m": round(outbound_route.total_elevation_gain_m, 2),
+            "return_climb_gain_m": round(r_gain, 2),
+            "asymmetric_climb_delta_m": asym_delta,
+            "overlap_with_outbound_fraction": overlap_with_out,
+        },
         feasible_within_usable_budget=feasible,
         warnings=warnings,
     )

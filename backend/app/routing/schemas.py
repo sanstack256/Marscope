@@ -67,6 +67,22 @@ class RoutePlanningConstraints(BaseModel):
         220, ge=40, le=450,
         description="Upper grid axis cap so DEM solver stays fast and bounded in RAM."
     )
+    unknown_terrain_policy: str = Field(
+        "EXCLUDE_UNKNOWN",
+        description="Explicit policy for handling unknown or insufficiently observed terrain cells (EXCLUDE_UNKNOWN, ALLOW_WITH_EXPLICIT_OPERATOR_OVERRIDE, REQUIRE_ADDITIONAL_OBSERVATION, ROUTE_THROUGH_WITH_LIMITATION)."
+    )
+    operator_unknown_override_reason: Optional[str] = Field(
+        None,
+        description="Required operator justification when unknown_terrain_policy='ALLOW_WITH_EXPLICIT_OPERATOR_OVERRIDE'."
+    )
+    avoid_accepted_obstacles: bool = Field(
+        True,
+        description="Exclude or penalize human-accepted morphology obstacle candidates during route computation."
+    )
+    custom_objective_weights: Optional[Dict[str, float]] = Field(
+        None,
+        description="Optional operator-supplied cost weight overrides (slope_weight, uphill_weight, etc.)."
+    )
 
 
 class RouteComputeRequest(BaseModel):

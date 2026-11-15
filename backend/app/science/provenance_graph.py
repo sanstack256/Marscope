@@ -56,6 +56,20 @@ class ProvenanceStep(BaseModel):
     assumptions: List[str] = Field(default_factory=list)
 
 
+class ParameterProvenanceRecord(BaseModel):
+    """Explicit provenance, unit, classification, and validity metadata for each parameter."""
+
+    parameter_name: str
+    value: Optional[Any] = None
+    units: str
+    classification: ScientificDataClassification
+    source_type: str
+    citation: Optional[str] = None
+    validity_domain: Optional[str] = None
+    confirmed_by_operator: bool = True
+    version: str = "2.0.0"
+
+
 class ProvenanceDependencyGraph(BaseModel):
     output_id: str
     classification: ScientificDataClassification
@@ -69,6 +83,7 @@ class ProvenanceDependencyGraph(BaseModel):
     method: str
     algorithm_version: str
     parameters: Dict[str, Any] = Field(default_factory=dict)
+    parameter_provenance: List[ParameterProvenanceRecord] = Field(default_factory=list)
     assumptions: List[str] = Field(default_factory=list)
     intermediate_steps: List[ProvenanceStep] = Field(default_factory=list)
     nodes: List[ProvenanceNode] = Field(default_factory=list)

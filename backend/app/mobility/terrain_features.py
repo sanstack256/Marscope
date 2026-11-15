@@ -315,14 +315,35 @@ def extract_windowed_terrain_features(
     rough_stats = compute_band_stats(tri_arr, "meters")
 
     rows, cols = dem_arr.shape
+    valid_z_mask = np.isfinite(dem_clean)
+    valid_deriv_mask = valid_z_mask & np.isfinite(slope_arr) & np.isfinite(tri_arr)
+    nodata_count = int(np.count_nonzero(~valid_z_mask))
+    valid_src_count = int(np.count_nonzero(valid_deriv_mask))
+    deriv_unavail_count = int(rows * cols) - nodata_count - valid_src_count
+
     state_counts: Dict[str, int] = {s.value: 0 for s in TerrainCoverageState}
+    state_counts[TerrainCoverageState.INSIDE_FOOTPRINT_NODATA.value] = nodata_count
+    state_counts[TerrainCoverageState.DERIVATIVE_UNAVAILABLE_INVALID_NEIGHBORHOOD.value] = deriv_unavail_count
+    state_counts[TerrainCoverageState.VALID_SOURCE_DATA.value] = valid_src_count
+
     cells: List[TerrainFeatureCell] = []
+    t_a = float(win_transform.a)
+    t_b = float(win_transform.b)
+    t_c = float(win_transform.c)
+    t_d = float(win_transform.d)
+    t_e = float(win_transform.e)
+    t_f = float(win_transform.f)
 
     for r in range(rows):
+        if len(cells) >= max_returned_cells:
+            break
         for c in range(cols):
-            lon_c, lat_c = rio_xy(win_transform, r, c, offset="center")
+            if len(cells) >= max_returned_cells:
+                break
+            lon_c = t_c + (c + 0.5) * t_a + (r + 0.5) * t_b
+            lat_c = t_f + (c + 0.5) * t_d + (r + 0.5) * t_e
             lon_east = normalize_longitude_360(float(lon_c))
-            z_val = float(dem_clean[r, c]) if np.isfinite(dem_clean[r, c]) else None
+            z_val = float(dem_clean[r, c]) if valid_z_mask[r, c] else None
             s_val = float(slope_arr[r, c]) if np.isfinite(slope_arr[r, c]) else None
             a_raw_val = float(aspect_raw[r, c]) if np.isfinite(aspect_raw[r, c]) else None
             a_val = None if (a_raw_val is None or a_raw_val == -1.0) else a_raw_val
@@ -338,22 +359,20 @@ def extract_windowed_terrain_features(
                 c_state = TerrainCoverageState.VALID_SOURCE_DATA
                 flat_undef = (a_raw_val == -1.0)
 
-            state_counts[c_state.value] += 1
-            if len(cells) < max_returned_cells:
-                cells.append(
-                    TerrainFeatureCell(
-                        row=r,
-                        col=c,
-                        center_lat=round(float(lat_c), 6),
-                        center_lon_east=round(lon_east, 6),
-                        coverage_state=c_state,
-                        elevation_meters=round(z_val, 4) if z_val is not None else None,
-                        slope_deg=round(s_val, 4) if s_val is not None else None,
-                        aspect_deg=round(a_val, 4) if a_val is not None else None,
-                        aspect_undefined_flat=flat_undef,
-                        roughness_tri_meters=round(t_val, 4) if t_val is not None else None,
-                    )
+            cells.append(
+                TerrainFeatureCell(
+                    row=r,
+                    col=c,
+                    center_lat=round(float(lat_c), 6),
+                    center_lon_east=round(lon_east, 6),
+                    coverage_state=c_state,
+                    elevation_meters=round(z_val, 4) if z_val is not None else None,
+                    slope_deg=round(s_val, 4) if s_val is not None else None,
+                    aspect_deg=round(a_val, 4) if a_val is not None else None,
+                    aspect_undefined_flat=flat_undef,
+                    roughness_tri_meters=round(t_val, 4) if t_val is not None else None,
                 )
+            )
 
     suitability = evaluate_dem_resolution_suitability(
         native_resolution_m=dataset.horizontal_resolution_meters or dx_m,

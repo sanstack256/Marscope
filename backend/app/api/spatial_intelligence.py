@@ -149,10 +149,17 @@ class TerrainChangeCompareRequest(BaseModel):
 class MorphologyReviewSubmitRequest(BaseModel):
     candidate_id: str
     dataset_id: str
-    action: str = Field(..., description="accept | reject | annotate")
+    action: str = Field(
+        ...,
+        description="accept | reject | annotate | correct_geometry | add_observation | attach_source | record_uncertainty | add_note | mark_unresolved",
+    )
     reviewer_id: str = Field(..., min_length=2, max_length=64)
     annotation_note: Optional[str] = Field(None, max_length=500)
     assigned_feature_class: Optional[MorphologyFeatureClass] = None
+    corrected_geometry_geojson: Optional[Dict[str, Any]] = None
+    observation_record: Optional[Dict[str, Any]] = None
+    attached_source_reference: Optional[str] = Field(None, max_length=300)
+    recorded_uncertainty_m: Optional[float] = Field(None, ge=0.0)
 
 
 class RoverAssociateRequest(BaseModel):
@@ -487,6 +494,10 @@ async def submit_morphology_review(req: MorphologyReviewSubmitRequest, request: 
             reviewer_id=req.reviewer_id,
             annotation_note=req.annotation_note,
             assigned_feature_class=req.assigned_feature_class,
+            corrected_geometry_geojson=req.corrected_geometry_geojson,
+            observation_record=req.observation_record,
+            attached_source_reference=req.attached_source_reference,
+            recorded_uncertainty_m=req.recorded_uncertainty_m,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

@@ -445,7 +445,7 @@ def test_real_hirise_robust_compare_and_sensitivity_endpoints() -> None:
     r_obj = client.get("/api/routing/objectives")
     assert r_obj.status_code == 200
     objs = r_obj.json()["objectives"]
-    assert len(objs) == 7
+    assert len(objs) >= 7  # 7 Prompt 16 core objectives + Prompt 20 extensions (9 total)
 
     payload = {
         "dataset_id": "hirise_dteec_009149_1750",
