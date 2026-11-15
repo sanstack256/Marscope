@@ -25,6 +25,12 @@ import {
   buildCompactedTileMeshGeometryData,
   buildValidTileBoundarySegments,
 } from "@/lib/terrainNoData";
+import {
+  buildTileTextureUrlStrict,
+  isOrthoOverlayAvailable,
+  OverlayUnavailableError,
+  resolveOverlayForManifest,
+} from "@/lib/terrainOverlay";
 import { useAuthMissionStore } from "@/stores/useAuthMissionStore";
 import { useEvaOperationsStore } from "@/stores/useEvaOperationsStore";
 import { useEvidenceStore } from "@/stores/useEvidenceStore";
@@ -66,31 +72,11 @@ function buildTileTextureUrl(
   manifest: TerrainMeshManifest,
   overlayMode: TextureOverlayMode
 ): string {
-  const texDatasetId =
-    overlayMode === "ortho" && manifest.ortho_dataset_id
-      ? manifest.ortho_dataset_id
-      : manifest.dataset_id;
-  const texOverlay: TextureOverlayMode =
-    overlayMode === "ortho" && !manifest.ortho_dataset_id ? "elevation" : overlayMode;
-
-  const qs = new URLSearchParams({
-    overlay: texOverlay,
-    min_lat: tile.bounds.min_lat.toFixed(7),
-    max_lat: tile.bounds.max_lat.toFixed(7),
-    min_lon: tile.bounds.min_lon.toFixed(7),
-    max_lon: tile.bounds.max_lon.toFixed(7),
-    size: String(TERRAIN_TEX_SIZE),
+  return buildTileTextureUrlStrict(tile, manifest, overlayMode, {
+    apiBaseUrl: API_BASE_URL,
+    texSize: TERRAIN_TEX_SIZE,
+    maxSlopeDeg: useRoutingStore.getState().constraints.max_slope_deg ?? 20,
   });
-  if (texOverlay === "elevation" && manifest.elevation_range_m) {
-    qs.set("vmin", String(manifest.elevation_range_m.min_m));
-    qs.set("vmax", String(manifest.elevation_range_m.max_m));
-  } else if (texOverlay === "roughness" && manifest.roughness_range_m) {
-    qs.set("vmin", String(manifest.roughness_range_m.min_m));
-    qs.set("vmax", String(manifest.roughness_range_m.max_m));
-  } else if (texOverlay === "traversability_state") {
-    qs.set("max_slope_deg", String(useRoutingStore.getState().constraints.max_slope_deg ?? 20));
-  }
-  return `${API_BASE_URL}/terrain/ortho/${encodeURIComponent(texDatasetId)}/texture?${qs.toString()}`;
 }
 
 const MARS_EQUATORIAL_RADIUS_M = 3396190.0;
@@ -282,6 +268,7 @@ export function LocalTerrain3DViewer({
   const overviewClusterRef = useRef(false);
 
   const [tilesLoading, setTilesLoading] = useState(false);
+  const [overlayError, setOverlayError] = useState<string | null>(null);
   const [deliveredSampleSpacing, setDeliveredSampleSpacing] = useState<{
     dx_m: number;
     dy_m: number;
@@ -766,6 +753,18 @@ export function LocalTerrain3DViewer({
     activeOverlayRef.current = activeOverlayMode;
   }, [activeOverlayMode]);
 
+  const orthoAvailable = isOrthoOverlayAvailable(meshManifest);
+  const effectiveCompareOverlayMode: TextureOverlayMode =
+    compareOverlayMode === "ortho" && !orthoAvailable ? "slope" : compareOverlayMode;
+
+  useEffect(() => {
+    if (!meshManifest) return;
+    const resolved = resolveOverlayForManifest(activeOverlayMode, meshManifest);
+    if (resolved !== activeOverlayMode) {
+      setActiveOverlayMode(resolved);
+    }
+  }, [meshManifest, activeOverlayMode, setActiveOverlayMode]);
+
   // Auto-LOD distance selector: adjusts LOD smoothly based on camera distance when lodMode === "auto"
   useEffect(() => {
     const controls = controlsRef.current;
@@ -920,15 +919,24 @@ export function LocalTerrain3DViewer({
             maxNorthM: maxN,
           } satisfies TileMeshUserData;
 
-          const texUrl = buildTileTextureUrl(tile, meshManifest, currentOverlay);
-          const cachedTex = textureCacheRef.current.get(texUrl);
+          const overlayForInit = resolveOverlayForManifest(currentOverlay, meshManifest);
+          let texUrl: string | null = null;
+          try {
+            texUrl = buildTileTextureUrl(tile, meshManifest, overlayForInit);
+          } catch (err) {
+            if (err instanceof OverlayUnavailableError) {
+              setOverlayError(err.message);
+            }
+          }
+          const cachedTex = texUrl ? textureCacheRef.current.get(texUrl) : undefined;
           if (cachedTex) {
             mat.color.set("#ffffff");
             mat.map = cachedTex;
             mat.needsUpdate = true;
-          } else {
+          } else if (texUrl) {
+            const loadUrl = texUrl;
             texLoader.load(
-              texUrl,
+              loadUrl,
               (loadedTex) => {
                 if (cancelled) {
                   loadedTex.dispose();
@@ -938,7 +946,7 @@ export function LocalTerrain3DViewer({
                 loadedTex.wrapS = THREE.ClampToEdgeWrapping;
                 loadedTex.wrapT = THREE.ClampToEdgeWrapping;
                 loadedTex.anisotropy = Math.min(4, rendererRef.current?.capabilities.getMaxAnisotropy() || 1);
-                textureCacheRef.current.set(texUrl, loadedTex);
+                textureCacheRef.current.set(loadUrl, loadedTex);
                 if (textureCacheRef.current.size > 64) {
                   const oldest = textureCacheRef.current.keys().next().value;
                   if (oldest) {
@@ -952,7 +960,11 @@ export function LocalTerrain3DViewer({
               },
               undefined,
               () => {
-                // Keep terrain surface rendered with shaded base tone if texture fails
+                if (!cancelled) {
+                  setOverlayError(
+                    `Failed to load '${overlayForInit}' overlay texture for tile ${tile.tile_id}; displaying unshaded base geometry without substituting another overlay.`
+                  );
+                }
               }
             );
           }
@@ -1046,32 +1058,81 @@ export function LocalTerrain3DViewer({
 
     const isCompareOverlay =
       (comparisonMode === "swipe" || comparisonMode === "blend") &&
-      compareOverlayMode !== activeOverlayMode;
+      effectiveCompareOverlayMode !== activeOverlayMode;
 
     disposeComposites();
 
+    setOverlayError(null);
     terrainGroup.children.forEach((child) => {
       const mesh = child as THREE.Mesh;
       const ud = mesh.userData as TileMeshUserData | undefined;
       if (!ud?.tile) return;
       const mat = mesh.material as THREE.MeshStandardMaterial;
-      const primaryUrl = buildTileTextureUrl(ud.tile, meshManifest, activeOverlayMode);
+      let primaryUrl: string;
+      try {
+        primaryUrl = buildTileTextureUrl(ud.tile, meshManifest, activeOverlayMode);
+      } catch (err) {
+        if (!cancelled) {
+          mat.map = null;
+          mat.color.set("#9e7a66");
+          mat.needsUpdate = true;
+          setOverlayError(
+            err instanceof Error
+              ? err.message
+              : `Overlay '${activeOverlayMode}' is unavailable for this dataset.`
+          );
+        }
+        return;
+      }
 
       if (!isCompareOverlay) {
         void loadOrGetTex(primaryUrl).then((tex) => {
-          if (cancelled || !tex) return;
+          if (cancelled) return;
+          if (!tex) {
+            mat.map = null;
+            mat.color.set("#9e7a66");
+            mat.needsUpdate = true;
+            setOverlayError(
+              `Failed to load '${activeOverlayMode}' overlay texture for tile ${ud.tile.tile_id}; refusing to substitute another overlay.`
+            );
+            return;
+          }
           mat.color.set("#ffffff");
           mat.map = tex;
           mat.needsUpdate = true;
         });
       } else {
-        const secondaryUrl = buildTileTextureUrl(ud.tile, meshManifest, compareOverlayMode);
+        let secondaryUrl: string;
+        try {
+          secondaryUrl = buildTileTextureUrl(ud.tile, meshManifest, effectiveCompareOverlayMode);
+        } catch (err) {
+          if (!cancelled) {
+            setOverlayError(
+              err instanceof Error
+                ? err.message
+                : `Comparison overlay '${effectiveCompareOverlayMode}' is unavailable.`
+            );
+          }
+          return;
+        }
         void Promise.all([loadOrGetTex(primaryUrl), loadOrGetTex(secondaryUrl)]).then(([texA, texB]) => {
-          if (cancelled || !texA) return;
+          if (cancelled) return;
+          if (!texA) {
+            mat.map = null;
+            mat.color.set("#9e7a66");
+            mat.needsUpdate = true;
+            setOverlayError(
+              `Failed to load '${activeOverlayMode}' overlay texture for tile ${ud.tile.tile_id}.`
+            );
+            return;
+          }
           if (!texB) {
             mat.color.set("#ffffff");
             mat.map = texA;
             mat.needsUpdate = true;
+            setOverlayError(
+              `Failed to load comparison overlay '${effectiveCompareOverlayMode}' for tile ${ud.tile.tile_id}.`
+            );
             return;
           }
           const comp = buildComparisonTileCanvasTexture(
@@ -1099,7 +1160,7 @@ export function LocalTerrain3DViewer({
     };
   }, [
     activeOverlayMode,
-    compareOverlayMode,
+    effectiveCompareOverlayMode,
     comparisonMode,
     swipeFraction,
     blendOpacity,
@@ -2232,19 +2293,39 @@ export function LocalTerrain3DViewer({
 
         {/* Surface Texture Overlay Mode */}
         <div className="flex bg-[#0b101b]/95 border border-[#243047] rounded-lg p-0.5 text-[10px] font-mono">
-          {overlays.map((ov) => (
-            <button
-              key={ov.id}
-              onClick={() => setActiveOverlayMode(ov.id)}
-              className={`px-2 py-0.5 rounded transition-colors ${
-                activeOverlayMode === ov.id
-                  ? "bg-[#e25b38] text-white font-semibold"
-                  : "text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              {ov.label}
-            </button>
-          ))}
+          {overlays.map((ov) => {
+            const isOrthoDisabled = ov.id === "ortho" && !orthoAvailable;
+            return (
+              <button
+                key={ov.id}
+                type="button"
+                disabled={isOrthoDisabled}
+                onClick={() => {
+                  if (isOrthoDisabled) {
+                    setOverlayError("No paired, co-registered HiRISE orthophoto is available for this DEM.");
+                    return;
+                  }
+                  setOverlayError(null);
+                  setActiveOverlayMode(ov.id);
+                }}
+                title={
+                  isOrthoDisabled
+                    ? "Unavailable: no paired, co-registered HiRISE orthophoto is present for this DEM"
+                    : ov.label
+                }
+                className={`px-2 py-0.5 rounded transition-colors ${
+                  isOrthoDisabled
+                    ? "text-slate-600 cursor-not-allowed opacity-50"
+                    : activeOverlayMode === ov.id
+                    ? "bg-[#e25b38] text-white font-semibold"
+                    : "text-slate-400 hover:text-slate-200"
+                }`}
+              >
+                {ov.label}
+                {isOrthoDisabled ? " (N/A)" : ""}
+              </button>
+            );
+          })}
         </div>
 
         {/* Vertical Exaggeration Toggle */}
@@ -2344,13 +2425,15 @@ export function LocalTerrain3DViewer({
             {(comparisonMode === "swipe" || comparisonMode === "blend") && (
               <>
                 <select
-                  value={compareOverlayMode}
+                  value={effectiveCompareOverlayMode}
                   onChange={(e) => setCompareOverlayMode(e.target.value as TextureOverlayMode)}
                   className="bg-[#0f1625] border border-[#2d3b55] rounded px-1.5 py-0.5 text-[10px] text-sky-200"
                   title="Secondary overlay layer to compare against active layer"
                 >
                   <option value="elevation">vs Elevation</option>
-                  <option value="ortho">vs HiRISE Ortho</option>
+                  <option value="ortho" disabled={!orthoAvailable}>
+                    vs HiRISE Ortho{!orthoAvailable ? " (Unavailable)" : ""}
+                  </option>
                   <option value="slope">vs Slope</option>
                   <option value="roughness">vs TRI</option>
                   <option value="uncertainty_status">vs Uncertainty</option>
@@ -2778,12 +2861,26 @@ export function LocalTerrain3DViewer({
         </div>
 
         <div className="flex flex-col items-end gap-1.5">
+          {overlayError && (
+            <div
+              role="alert"
+              data-testid="terrain-overlay-error"
+              className="max-w-xs bg-rose-950/90 border border-rose-500/50 text-rose-200 rounded-lg px-2.5 py-1.5 text-[10px] font-mono pointer-events-auto shadow-lg flex items-start justify-between gap-2"
+            >
+              <span>{overlayError}</span>
+              <button
+                type="button"
+                onClick={() => setOverlayError(null)}
+                className="text-rose-300 hover:text-white font-bold shrink-0"
+                aria-label="Dismiss overlay error"
+              >
+                ×
+              </button>
+            </div>
+          )}
           {/* Context-Aware Bottom-Right Terrain Legend */}
           {(() => {
-            const effectiveOverlay =
-              activeOverlayMode === "ortho" && !meshManifest?.ortho_dataset_id
-                ? "elevation"
-                : activeOverlayMode;
+            const effectiveOverlay = activeOverlayMode;
             const normSpec = meshManifest?.color_normalizations?.[effectiveOverlay];
             const stops = normSpec?.palette_stops || [];
             const gradientCss =
