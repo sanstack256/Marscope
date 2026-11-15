@@ -8,6 +8,7 @@ Uses Application Default Credentials (Cloud Run / Cloud Run Job service account)
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import threading
@@ -80,6 +81,18 @@ class GCSDatasetStore:
             if Path(blob.name).name.lower() == target_lower:
                 return str(blob.name)
         return None
+
+    def read_json_object(self, relative_key: str) -> Optional[Dict[str, Any]]:
+        """Read and parse a JSON object (e.g. catalog/<id>.json or manifests/<id>.manifest.json) from GCS."""
+        obj_name = self._object_name(relative_key)
+        blob = self.bucket.blob(obj_name)
+        if not blob.exists():
+            return None
+        raw_text = blob.download_as_text(encoding="utf-8")
+        payload = json.loads(raw_text)
+        if not isinstance(payload, dict):
+            raise ValueError(f"GCS JSON object 'gs://{self.bucket_name}/{obj_name}' must be a JSON object.")
+        return payload
 
     def upload_file_streaming(
         self,

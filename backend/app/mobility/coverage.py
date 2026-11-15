@@ -13,9 +13,11 @@ Quantifies covered, uncovered, valid, and no-data surface area on the IAU 2000
 Mars reference sphere without ever expanding the requested study region.
 """
 
+import json
+import logging
 import math
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import rasterio
 from rasterio.vrt import WarpedVRT
@@ -65,50 +67,115 @@ def _normalize_bounds_180(bounds: Dict[str, float]) -> Tuple[float, float, float
     return min_lat, max_lat, min_lon, max_lon
 
 
-def _resolve_raw_dem_open_path(dataset: Dataset, raw_dir: Path) -> Tuple[Path, Optional[Path]]:
-    raw_file: Optional[Path] = None
+logger = logging.getLogger(__name__)
+
+
+def _find_local_raw_file(dataset: Dataset, raw_dir: Path) -> Optional[Path]:
+    """Locate a dataset's raw raster file on local disk without network I/O."""
     if dataset.local_file_path:
         p = Path(dataset.local_file_path)
-        if p.exists():
-            raw_file = p
-    if raw_file is None:
-        for cand in (
-            raw_dir / dataset.product_id.lower(),
-            raw_dir / dataset.product_id,
-            raw_dir / dataset.product_id.upper(),
-        ):
-            if cand.exists():
-                raw_file = cand
-                break
-    if raw_file is None and raw_dir.exists():
+        if p.exists() and p.is_file():
+            return p
+        if not p.is_absolute():
+            rel_p = raw_dir.parent / p
+            if rel_p.exists() and rel_p.is_file():
+                return rel_p
+    for cand in (
+        raw_dir / dataset.product_id.lower(),
+        raw_dir / dataset.product_id,
+        raw_dir / dataset.product_id.upper(),
+    ):
+        if cand.exists() and cand.is_file():
+            return cand
+    if raw_dir.exists():
         target_lower = dataset.product_id.lower()
         for entry in raw_dir.iterdir():
             if entry.is_file() and entry.name.lower() == target_lower:
-                raw_file = entry
-                break
+                return entry
+    return None
+
+
+def _resolve_expected_integrity(
+    dataset: Dataset,
+    raw_dir: Path,
+    gcs_store: Optional[Any],
+) -> Tuple[Optional[str], Optional[int]]:
+    """Resolve expected SHA-256 and byte size from dataset, bootstrap_manifest, or dataset manifest."""
+    from app.ingestion.bootstrap import load_bootstrap_manifest
+
+    expected_sha = dataset.sha256_checksum
+    expected_size = dataset.file_size_bytes
+
+    if not expected_sha or not expected_size:
+        manifest_path = raw_dir.parent / "bootstrap_manifest.json"
+        manifest = None
+        if manifest_path.exists():
+            manifest = load_bootstrap_manifest(manifest_path)
+        else:
+            try:
+                manifest = load_bootstrap_manifest(None)
+            except FileNotFoundError:
+                manifest = None
+        if manifest is not None:
+            for entry in manifest.get("products", []):
+                if entry.get("dataset_id") == dataset.id:
+                    expected_sha = expected_sha or entry.get("expected_sha256")
+                    expected_size = expected_size or entry.get("expected_size_bytes")
+                    break
+
+    if not expected_sha or not expected_size:
+        local_man = raw_dir.parent / "manifests" / f"{dataset.id}.manifest.json"
+        if local_man.exists():
+            try:
+                man_data = json.loads(local_man.read_text(encoding="utf-8"))
+                expected_sha = expected_sha or man_data.get("sha256_checksum")
+                expected_size = expected_size or man_data.get("file_size_bytes")
+            except Exception as exc:
+                logger.warning("Failed to read local manifest for '%s': %s", dataset.id, exc)
+
+    if (not expected_sha or not expected_size) and gcs_store is not None and hasattr(gcs_store, "read_json_object"):
+        try:
+            gcs_man = gcs_store.read_json_object(f"manifests/{dataset.id}.manifest.json")
+            if gcs_man:
+                expected_sha = expected_sha or gcs_man.get("sha256_checksum")
+                expected_size = expected_size or gcs_man.get("file_size_bytes")
+        except Exception as exc:
+            logger.warning("Failed to read GCS manifest for '%s': %s", dataset.id, exc)
+
+    return expected_sha, expected_size
+
+
+def is_dataset_asset_available(dataset: Dataset, raw_dir: Path) -> bool:
+    """Return True if a dataset's raw asset exists locally or is present in configured GCS."""
+    if _find_local_raw_file(dataset, raw_dir) is not None:
+        return True
+    from app.ingestion.gcs_storage import GCSDatasetStore
+
+    gcs_store = GCSDatasetStore.from_env()
+    if gcs_store is None:
+        return False
+    try:
+        return bool(gcs_store.find_raw_object_name(dataset.product_id))
+    except Exception as exc:
+        logger.warning(
+            "GCS availability check failed for dataset '%s' (%s): %s",
+            dataset.id,
+            dataset.product_id,
+            exc,
+        )
+        return False
+
+
+def _resolve_raw_dem_open_path(dataset: Dataset, raw_dir: Path) -> Tuple[Path, Optional[Path]]:
+    raw_file = _find_local_raw_file(dataset, raw_dir)
+    downloaded_from_gcs = False
+    gcs_store = None
     if raw_file is None or not raw_file.exists():
-        from app.ingestion.bootstrap import load_bootstrap_manifest
         from app.ingestion.gcs_storage import GCSDatasetStore
 
         gcs_store = GCSDatasetStore.from_env()
         if gcs_store is not None:
-            manifest_path = raw_dir.parent / "bootstrap_manifest.json"
-            expected_sha = dataset.sha256_checksum
-            expected_size = dataset.file_size_bytes
-            manifest = None
-            if manifest_path.exists():
-                manifest = load_bootstrap_manifest(manifest_path)
-            else:
-                try:
-                    manifest = load_bootstrap_manifest(None)
-                except FileNotFoundError:
-                    manifest = None
-            if manifest is not None:
-                for entry in manifest.get("products", []):
-                    if entry.get("dataset_id") == dataset.id:
-                        expected_sha = expected_sha or entry.get("expected_sha256")
-                        expected_size = expected_size or entry.get("expected_size_bytes")
-                        break
+            expected_sha, expected_size = _resolve_expected_integrity(dataset, raw_dir, gcs_store)
             retrieved = gcs_store.ensure_raw_dataset_on_disk(
                 dataset,
                 raw_dir,
@@ -117,6 +184,7 @@ def _resolve_raw_dem_open_path(dataset: Dataset, raw_dir: Path) -> Tuple[Path, O
             )
             if retrieved is not None and retrieved.exists():
                 raw_file = retrieved
+                downloaded_from_gcs = True
 
     if raw_file is None or not raw_file.exists():
         raise FileNotFoundError(f"Raw DEM file for '{dataset.id}' is not present in {raw_dir}.")
@@ -127,6 +195,13 @@ def _resolve_raw_dem_open_path(dataset: Dataset, raw_dir: Path) -> Tuple[Path, O
         if cand_l.exists():
             lbl_path = cand_l
             break
+    if lbl_path is None and downloaded_from_gcs and gcs_store is not None:
+        try:
+            lbl_obj = gcs_store.find_raw_object_name(Path(raw_file.name).with_suffix(".LBL").name)
+            if lbl_obj:
+                lbl_path = gcs_store.download_file_streaming(lbl_obj, raw_dir / Path(lbl_obj).name)
+        except Exception as exc:
+            logger.warning("Optional companion label fetch from GCS failed for '%s': %s", dataset.id, exc)
     open_path = lbl_path if (lbl_path and raw_file.suffix.lower() == ".img") else raw_file
     return open_path, lbl_path
 

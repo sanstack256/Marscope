@@ -28,7 +28,7 @@ from rasterio.vrt import WarpedVRT
 from app.geospatial.crs import MARS_EQUATORIAL_RADIUS_M, angular_displacement_to_metric
 from app.ingestion.catalog import DatasetCatalogService
 from app.ingestion.pds_label import extract_pds3_metadata
-from app.mobility.coverage import _resolve_raw_dem_open_path
+from app.mobility.coverage import _resolve_raw_dem_open_path, is_dataset_asset_available
 from app.mobility.resolution import evaluate_dem_resolution_suitability
 from app.mobility.terrain_features import mars_great_circle_distance_meters
 from app.schemas.dataset import Dataset, DatasetLifecycleStatus
@@ -262,6 +262,7 @@ class TerrainMeshService:
         self.raw_dir = raw_dir
         self._max_cache_items = max_cache_items
         self._tile_cache: "OrderedDict[str, Any]" = OrderedDict()
+        self._ortho_avail_cache: Dict[str, Tuple[float, bool]] = {}
         self._lock = threading.Lock()
         self.uncertainty_service = uncertainty_service
 
@@ -293,6 +294,44 @@ class TerrainMeshService:
     def clear_cache(self) -> None:
         with self._lock:
             self._tile_cache.clear()
+            self._ortho_avail_cache.clear()
+
+    def _resolve_catalog_dataset(self, dataset_id: str) -> Optional[Dataset]:
+        ds = self.catalog_service.get_dataset(dataset_id)
+        if ds is not None:
+            return ds
+        from app.ingestion.gcs_storage import GCSDatasetStore
+
+        gcs_store = GCSDatasetStore.from_env()
+        if gcs_store is None:
+            return None
+        try:
+            payload = gcs_store.read_json_object(f"catalog/{dataset_id}.json")
+            if payload is None:
+                return None
+            ds = Dataset.model_validate(payload)
+            if hasattr(self.catalog_service, "_datasets"):
+                self.catalog_service._datasets[ds.id] = ds
+            return ds
+        except Exception:
+            return None
+
+    def _resolve_paired_ortho_dataset_id(self, dem_dataset_id: str) -> Optional[str]:
+        ortho_id = PAIRED_ORTHO_MAP.get(dem_dataset_id)
+        if not ortho_id:
+            return None
+        ortho_ds = self._resolve_catalog_dataset(ortho_id)
+        if not ortho_ds:
+            return None
+        now = time.monotonic()
+        with self._lock:
+            cached = self._ortho_avail_cache.get(ortho_id)
+            if cached is not None and (now - cached[0]) < 60.0:
+                return ortho_id if cached[1] else None
+        available = is_dataset_asset_available(ortho_ds, Path(self.raw_dir))
+        with self._lock:
+            self._ortho_avail_cache[ortho_id] = (now, available)
+        return ortho_id if available else None
 
     def list_available_dem_summaries(self) -> List[MeshDemSummary]:
         datasets = self.catalog_service.list_datasets()
@@ -326,11 +365,7 @@ class TerrainMeshService:
                 effective_resolution_m=ds.horizontal_resolution_meters,
                 dem_available=True,
             )
-            ortho_id = PAIRED_ORTHO_MAP.get(ds.id)
-            if ortho_id:
-                ortho_ds = self.catalog_service.get_dataset(ortho_id)
-                if not ortho_ds or not ortho_ds.local_file_path:
-                    ortho_id = None
+            ortho_id = self._resolve_paired_ortho_dataset_id(ds.id)
             summaries.append(
                 MeshDemSummary(
                     dataset_id=ds.id,
@@ -487,11 +522,7 @@ class TerrainMeshService:
                         )
                     )
 
-        ortho_id = PAIRED_ORTHO_MAP.get(ds.id)
-        if ortho_id:
-            ortho_ds = self.catalog_service.get_dataset(ortho_id)
-            if not ortho_ds or not ortho_ds.local_file_path:
-                ortho_id = None
+        ortho_id = self._resolve_paired_ortho_dataset_id(ds.id)
 
         suit = evaluate_dem_resolution_suitability(
             native_resolution_m=ds.horizontal_resolution_meters,
@@ -1401,7 +1432,7 @@ class TerrainMeshService:
             if mapped:
                 target_ds_id = mapped
 
-        ds = self.catalog_service.get_dataset(target_ds_id)
+        ds = self._resolve_catalog_dataset(target_ds_id)
         if not ds:
             raise FileNotFoundError(f"Texture dataset '{target_ds_id}' not found.")
         open_path, lbl_path = _resolve_raw_dem_open_path(ds, self.raw_dir)
@@ -1409,77 +1440,80 @@ class TerrainMeshService:
             raise FileNotFoundError(f"Raster file missing locally for '{ds.id}'.")
 
         if overlay_l == "ortho":
-            with rasterio.open(open_path) as src:
-                def _read_ortho(reader: Any) -> np.ndarray:
-                    rb = reader.bounds
-                    q_min_lon = min_lon + 360.0 if (rb.right > 180.0 and min_lon < 0.0) else min_lon
-                    q_max_lon = max_lon + 360.0 if (rb.right > 180.0 and max_lon < 0.0) else max_lon
-                    rgba = np.zeros((size, size, 4), dtype=np.uint8)
-                    if q_max_lon <= rb.left or q_min_lon >= rb.right or max_lat <= rb.bottom or min_lat >= rb.top:
+            try:
+                with rasterio.open(open_path) as src:
+                    def _read_ortho(reader: Any) -> np.ndarray:
+                        rb = reader.bounds
+                        q_min_lon = min_lon + 360.0 if (rb.right > 180.0 and min_lon < 0.0) else min_lon
+                        q_max_lon = max_lon + 360.0 if (rb.right > 180.0 and max_lon < 0.0) else max_lon
+                        rgba = np.zeros((size, size, 4), dtype=np.uint8)
+                        if q_max_lon <= rb.left or q_min_lon >= rb.right or max_lat <= rb.bottom or min_lat >= rb.top:
+                            return rgba
+
+                        # Continuous exact subpixel bilinear sampling matching tile UV grid [0..size-1]
+                        lons = np.linspace(q_min_lon, q_max_lon, size, dtype=np.float64)
+                        lats = np.linspace(max_lat, min_lat, size, dtype=np.float64)
+                        inv_t = ~reader.transform
+                        c_min_f = inv_t.a * float(lons[0]) + inv_t.b * float(lats[-1]) + inv_t.c
+                        r_max_f = inv_t.d * float(lons[0]) + inv_t.e * float(lats[-1]) + inv_t.f
+                        c_max_f = inv_t.a * float(lons[-1]) + inv_t.b * float(lats[0]) + inv_t.c
+                        r_min_f = inv_t.d * float(lons[-1]) + inv_t.e * float(lats[0]) + inv_t.f
+
+                        c0 = max(0, int(math.floor(min(c_min_f, c_max_f))) - 2)
+                        c1 = min(reader.width, int(math.ceil(max(c_min_f, c_max_f))) + 3)
+                        r0 = max(0, int(math.floor(min(r_min_f, r_max_f))) - 2)
+                        r1 = min(reader.height, int(math.ceil(max(r_min_f, r_max_f))) + 3)
+                        if c0 >= c1 or r0 >= r1:
+                            return rgba
+
+                        win = rasterio.windows.Window(c0, r0, c1 - c0, r1 - r0)
+                        patch = reader.read(1, window=win).astype(np.float64)
+                        if reader.nodata is not None:
+                            patch = np.where(patch == float(reader.nodata), np.nan, patch)
+                        patch = np.where(patch <= 0.0, np.nan, patch)
+
+                        patch_inv = ~(reader.window_transform(win))
+                        center_lat = 0.5 * (min_lat + max_lat)
+                        col_coords = patch_inv.a * lons + patch_inv.b * center_lat + patch_inv.c - 0.5
+                        row_coords = patch_inv.d * float(lons[0]) + patch_inv.e * lats + patch_inv.f - 0.5
+
+                        in_x = (col_coords >= 0.0) & (col_coords <= float(patch.shape[1] - 1))
+                        in_y = (row_coords >= 0.0) & (row_coords <= float(patch.shape[0] - 1))
+                        c_clamped = np.clip(col_coords, 0.0, max(0.0, float(patch.shape[1] - 1)))
+                        r_clamped = np.clip(row_coords, 0.0, max(0.0, float(patch.shape[0] - 1)))
+
+                        ci0 = np.floor(c_clamped).astype(np.int64)
+                        ci1 = np.minimum(ci0 + 1, patch.shape[1] - 1)
+                        ri0 = np.floor(r_clamped).astype(np.int64)
+                        ri1 = np.minimum(ri0 + 1, patch.shape[0] - 1)
+                        dc = (c_clamped - ci0)[None, :]
+                        dr = (r_clamped - ri0)[:, None]
+
+                        v00 = patch[np.ix_(ri0, ci0)]
+                        v01 = patch[np.ix_(ri0, ci1)]
+                        v10 = patch[np.ix_(ri1, ci0)]
+                        v11 = patch[np.ix_(ri1, ci1)]
+                        valid_4 = (np.isfinite(v00) & np.isfinite(v01) & np.isfinite(v10) & np.isfinite(v11)) & (in_y[:, None] & in_x[None, :])
+                        interp = (
+                            np.where(valid_4, v00, 0.0) * (1.0 - dr) * (1.0 - dc)
+                            + np.where(valid_4, v01, 0.0) * (1.0 - dr) * dc
+                            + np.where(valid_4, v10, 0.0) * dr * (1.0 - dc)
+                            + np.where(valid_4, v11, 0.0) * dr * dc
+                        )
+                        val = np.clip(interp, 0.0, 255.0).astype(np.uint8)
+                        rgba[..., 0] = val
+                        rgba[..., 1] = np.clip(val * 0.92, 0, 255).astype(np.uint8)
+                        rgba[..., 2] = np.clip(val * 0.84, 0, 255).astype(np.uint8)
+                        rgba[..., 3] = np.where(valid_4, 255, 0).astype(np.uint8)
                         return rgba
 
-                    # Continuous exact subpixel bilinear sampling matching tile UV grid [0..size-1]
-                    lons = np.linspace(q_min_lon, q_max_lon, size, dtype=np.float64)
-                    lats = np.linspace(max_lat, min_lat, size, dtype=np.float64)
-                    inv_t = ~reader.transform
-                    c_min_f = inv_t.a * float(lons[0]) + inv_t.b * float(lats[-1]) + inv_t.c
-                    r_max_f = inv_t.d * float(lons[0]) + inv_t.e * float(lats[-1]) + inv_t.f
-                    c_max_f = inv_t.a * float(lons[-1]) + inv_t.b * float(lats[0]) + inv_t.c
-                    r_min_f = inv_t.d * float(lons[-1]) + inv_t.e * float(lats[0]) + inv_t.f
-
-                    c0 = max(0, int(math.floor(min(c_min_f, c_max_f))) - 2)
-                    c1 = min(reader.width, int(math.ceil(max(c_min_f, c_max_f))) + 3)
-                    r0 = max(0, int(math.floor(min(r_min_f, r_max_f))) - 2)
-                    r1 = min(reader.height, int(math.ceil(max(r_min_f, r_max_f))) + 3)
-                    if c0 >= c1 or r0 >= r1:
-                        return rgba
-
-                    win = rasterio.windows.Window(c0, r0, c1 - c0, r1 - r0)
-                    patch = reader.read(1, window=win).astype(np.float64)
-                    if reader.nodata is not None:
-                        patch = np.where(patch == float(reader.nodata), np.nan, patch)
-                    patch = np.where(patch <= 0.0, np.nan, patch)
-
-                    patch_inv = ~(reader.window_transform(win))
-                    center_lat = 0.5 * (min_lat + max_lat)
-                    col_coords = patch_inv.a * lons + patch_inv.b * center_lat + patch_inv.c - 0.5
-                    row_coords = patch_inv.d * float(lons[0]) + patch_inv.e * lats + patch_inv.f - 0.5
-
-                    in_x = (col_coords >= 0.0) & (col_coords <= float(patch.shape[1] - 1))
-                    in_y = (row_coords >= 0.0) & (row_coords <= float(patch.shape[0] - 1))
-                    c_clamped = np.clip(col_coords, 0.0, max(0.0, float(patch.shape[1] - 1)))
-                    r_clamped = np.clip(row_coords, 0.0, max(0.0, float(patch.shape[0] - 1)))
-
-                    ci0 = np.floor(c_clamped).astype(np.int64)
-                    ci1 = np.minimum(ci0 + 1, patch.shape[1] - 1)
-                    ri0 = np.floor(r_clamped).astype(np.int64)
-                    ri1 = np.minimum(ri0 + 1, patch.shape[0] - 1)
-                    dc = (c_clamped - ci0)[None, :]
-                    dr = (r_clamped - ri0)[:, None]
-
-                    v00 = patch[np.ix_(ri0, ci0)]
-                    v01 = patch[np.ix_(ri0, ci1)]
-                    v10 = patch[np.ix_(ri1, ci0)]
-                    v11 = patch[np.ix_(ri1, ci1)]
-                    valid_4 = (np.isfinite(v00) & np.isfinite(v01) & np.isfinite(v10) & np.isfinite(v11)) & (in_y[:, None] & in_x[None, :])
-                    interp = (
-                        np.where(valid_4, v00, 0.0) * (1.0 - dr) * (1.0 - dc)
-                        + np.where(valid_4, v01, 0.0) * (1.0 - dr) * dc
-                        + np.where(valid_4, v10, 0.0) * dr * (1.0 - dc)
-                        + np.where(valid_4, v11, 0.0) * dr * dc
-                    )
-                    val = np.clip(interp, 0.0, 255.0).astype(np.uint8)
-                    rgba[..., 0] = val
-                    rgba[..., 1] = np.clip(val * 0.92, 0, 255).astype(np.uint8)
-                    rgba[..., 2] = np.clip(val * 0.84, 0, 255).astype(np.uint8)
-                    rgba[..., 3] = np.where(valid_4, 255, 0).astype(np.uint8)
-                    return rgba
-
-                if src.crs and src.crs.is_projected:
-                    with WarpedVRT(src, crs=MARS_GEOG_CRS) as vrt:
-                        rgba = _read_ortho(vrt)
-                else:
-                    rgba = _read_ortho(src)
+                    if src.crs and src.crs.is_projected:
+                        with WarpedVRT(src, crs=MARS_GEOG_CRS) as vrt:
+                            rgba = _read_ortho(vrt)
+                    else:
+                        rgba = _read_ortho(src)
+            except rasterio.errors.RasterioError as exc:
+                raise ValueError(f"Failed to decode orthophoto raster '{ds.id}' ({open_path.name}): {exc}") from exc
         else:
             # Sample mesh grid at texture resolution (max 129 for derivative ramp) cleanly
             tex_grid = min(129, max(65, size // 2))

@@ -21,7 +21,7 @@ from rasterio.crs import CRS
 from rasterio.vrt import WarpedVRT
 
 from app.ingestion.catalog import DatasetCatalogService
-from app.mobility.coverage import _resolve_raw_dem_open_path
+from app.mobility.coverage import _resolve_raw_dem_open_path, is_dataset_asset_available
 from app.schemas.dataset import Dataset
 from app.terrain.mesh import DEFAULT_GALE_STUDY_BOUNDS, MARS_GEOG_CRS, PAIRED_ORTHO_MAP, TerrainMeshService
 from app.terrain_uncertainty.elevation_uncertainty import inspect_dataset_elevation_uncertainty
@@ -133,7 +133,7 @@ class TerrainUncertaintyService:
         if not cand_id:
             return None
         opt_ds = self.catalog_service.get_dataset(cand_id)
-        if not opt_ds or not opt_ds.local_file_path:
+        if not opt_ds or not is_dataset_asset_available(opt_ds, self.raw_dir):
             return None
         cov = opt_ds.coverage
         # Verify spatial intersection before claiming optical support
