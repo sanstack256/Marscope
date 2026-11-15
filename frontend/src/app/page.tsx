@@ -2,675 +2,444 @@
 
 import React, { useState } from "react";
 import Link from "next/link";
-import {
-  AlertOctagon,
-  Compass,
-  Flag,
-  Globe2,
-  KeyRound,
-  LogIn,
-  Microscope,
-  Plus,
-  Route,
-  ShieldCheck,
-  UserPlus,
-  Users,
-} from "lucide-react";
-import { apiFetch } from "../lib/constants";
+import dynamic from "next/dynamic";
+import { ArrowRight, Check, Compass, Menu, X } from "lucide-react";
 import { useAuthMissionStore } from "../stores/useAuthMissionStore";
-import { useSpatialStore } from "../stores/useSpatialStore";
-import { PageHeader } from "../components/PageHeader";
-import { StatusIndicator } from "../components/ui/StatusIndicator";
-import { EmptyState } from "../components/ui/EmptyState";
 
-export default function MissionControlHomePage() {
-  const {
-    authChecked,
-    authenticated,
-    astronaut,
-    authError,
-    register,
-    login,
-    missions,
-    activeMission,
-    crew,
-    observations,
-    sosEvents,
-    landingSiteBundle,
-    missionEvents,
-    createMission,
-    joinMission,
-  } = useAuthMissionStore();
-
-  const setFocusCoordinate = useSpatialStore((s) => s.setFocusCoordinate);
-
-  const [authTab, setAuthTab] = useState<"login" | "register" | "reset">("login");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [resetToken, setResetToken] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [resetNotice, setResetNotice] = useState<string | null>(null);
-  const [authBusy, setAuthBusy] = useState(false);
-
-  const [overviewTab, setOverviewTab] = useState<"overview" | "crew" | "observations" | "landing" | "activity">("overview");
-  const [newMissionName, setNewMissionName] = useState("");
-  const [newMissionObjective, setNewMissionObjective] = useState("");
-  const [inviteCode, setInviteCode] = useState("");
-  const [missionMsg, setMissionMsg] = useState<string | null>(null);
-
-  const handleAuthSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setAuthBusy(true);
-    setResetNotice(null);
-    try {
-      if (authTab === "login") {
-        await login(email, password);
-      } else if (authTab === "register") {
-        await register(email, password, displayName);
-      }
-    } finally {
-      setAuthBusy(false);
-    }
-  };
-
-  const handleResetRequest = async () => {
-    setResetNotice(null);
-    const res = await apiFetch("/auth/password-reset/request", {
-      method: "POST",
-      body: JSON.stringify({ email }),
-    });
-    const body = await res.json().catch(() => ({}));
-    setResetNotice(body.reset_token_preview ? `Reset token (dev/test): ${body.reset_token_preview}` : body.message || "Reset requested.");
-  };
-
-  const handleResetConfirm = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const res = await apiFetch("/auth/password-reset/confirm", {
-      method: "POST",
-      body: JSON.stringify({ token: resetToken, new_password: newPassword }),
-    });
-    if (res.ok) {
-      setResetNotice("Password updated. Sign in with your new credentials.");
-      setAuthTab("login");
-    } else {
-      const b = await res.json().catch(() => ({}));
-      setResetNotice(b.detail || "Failed to confirm reset token.");
-    }
-  };
-
-  const handleCreateMission = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newMissionName.trim()) return;
-    setMissionMsg(null);
-    const created = await createMission({
-      name: newMissionName.trim(),
-      objective: newMissionObjective.trim(),
-    });
-    if (created) {
-      setNewMissionName("");
-      setNewMissionObjective("");
-      setMissionMsg(`Created mission "${created.name}".`);
-    } else {
-      setMissionMsg("Failed to create mission.");
-    }
-  };
-
-  const handleJoinMission = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inviteCode.trim()) return;
-    setMissionMsg(null);
-    const joined = await joinMission(inviteCode.trim());
-    if (joined) {
-      setInviteCode("");
-      setMissionMsg(`Joined mission "${joined.name}" as ${joined.my_role}.`);
-    } else {
-      setMissionMsg("Invalid, expired, or revoked mission invitation.");
-    }
-  };
-
-  if (!authChecked) {
-    return (
-      <div className="max-w-5xl mx-auto p-6 ms-panel text-xs font-mono text-[var(--text-secondary)]">
-        Verifying astronaut session...
+const MarsLandingGlobe = dynamic(
+  () => import("../components/landing/MarsLandingGlobe").then((m) => m.MarsLandingGlobe),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="w-full aspect-square max-w-[520px] mx-auto rounded-full border border-[#242424] bg-[#0B0B0B] flex items-center justify-center text-xs font-mono text-[#A1A1AA]">
+        Initializing 3D Mars...
       </div>
-    );
+    ),
   }
+);
 
-  if (!authenticated) {
-    return (
-      <div className="max-w-5xl mx-auto space-y-6">
-        <PageHeader
-          title="MARSCOPE Mission Control"
-          badge="IAU2000:49900"
-          description="Sign in or register an astronaut account to establish isolated multi-astronaut mission workspaces, live coordinates, SOS emergency coordination, and DEM-backed landing-site planning."
-        />
+export default function LandingPage() {
+  const authenticated = useAuthMissionStore((s) => s.authenticated);
+  const astronaut = useAuthMissionStore((s) => s.astronaut);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* Auth Portal */}
-          <div className="lg:col-span-6 ms-panel p-5 space-y-4">
-            <div className="flex items-center gap-1 p-1 rounded-[6px] bg-[var(--bg-void)] border border-[var(--border-subtle)] text-xs">
-              <button
-                type="button"
-                onClick={() => setAuthTab("login")}
-                className={`flex-1 py-1.5 rounded-[4px] font-medium ${
-                  authTab === "login" ? "bg-[var(--accent-mars)] text-white" : "text-[var(--text-secondary)]"
-                }`}
-              >
-                Sign In
-              </button>
-              <button
-                type="button"
-                onClick={() => setAuthTab("register")}
-                className={`flex-1 py-1.5 rounded-[4px] font-medium ${
-                  authTab === "register" ? "bg-[var(--accent-mars)] text-white" : "text-[var(--text-secondary)]"
-                }`}
-              >
-                Register Astronaut
-              </button>
-              <button
-                type="button"
-                onClick={() => setAuthTab("reset")}
-                className={`flex-1 py-1.5 rounded-[4px] font-medium ${
-                  authTab === "reset" ? "bg-[var(--bg-elevated)] text-[var(--text-primary)]" : "text-[var(--text-secondary)]"
-                }`}
-              >
-                Reset Password
-              </button>
+  return (
+    <div className="min-h-screen bg-[#050505] text-white selection:bg-[#FF6A1A] selection:text-white">
+      {/* Minimal Sticky Navigation Bar */}
+      <header className="sticky top-0 z-40 border-b border-[#242424] bg-[#050505]/90 backdrop-blur-md">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
+          <Link href="/" className="flex items-center gap-3 min-w-0">
+            <div className="w-8 h-8 rounded-[6px] bg-[#FF6A1A]/15 border border-[#FF6A1A]/50 flex items-center justify-center shrink-0">
+              <Compass className="w-4 h-4 text-[#FF6A1A]" />
             </div>
-
-            {authTab === "reset" ? (
-              <form onSubmit={handleResetConfirm} className="space-y-3 text-xs">
-                <div>
-                  <label className="block text-[var(--text-secondary)] mb-1">Astronaut Email</label>
-                  <div className="flex gap-2">
-                    <input
-                      type="email"
-                      required
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      placeholder="astronaut@agency.org"
-                      className="flex-1 ms-input"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => void handleResetRequest()}
-                      className="px-3 py-1.5 rounded-[4px] bg-[var(--bg-elevated)] border border-[var(--border-strong)] text-[var(--text-primary)]"
-                    >
-                      Request Token
-                    </button>
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-[var(--text-secondary)] mb-1">Reset Token</label>
-                  <input
-                    type="text"
-                    required
-                    value={resetToken}
-                    onChange={(e) => setResetToken(e.target.value)}
-                    className="w-full ms-input font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[var(--text-secondary)] mb-1">New Password (10+ chars, upper+lower+digit)</label>
-                  <input
-                    type="password"
-                    required
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    className="w-full ms-input"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  className="w-full py-2 rounded-[4px] bg-[var(--accent-telemetry)] text-[#07090C] font-semibold"
-                >
-                  Confirm Password Reset
-                </button>
-              </form>
-            ) : (
-              <form onSubmit={handleAuthSubmit} className="space-y-3.5 text-xs">
-                {authTab === "register" && (
-                  <div>
-                    <label className="block text-[var(--text-secondary)] mb-1">Crew Display Name</label>
-                    <input
-                      type="text"
-                      required
-                      minLength={2}
-                      value={displayName}
-                      onChange={(e) => setDisplayName(e.target.value)}
-                      placeholder="Cmdr. Elena Rostova"
-                      className="w-full ms-input"
-                    />
-                  </div>
-                )}
-                <div>
-                  <label className="block text-[var(--text-secondary)] mb-1">Email</label>
-                  <input
-                    type="email"
-                    required
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="astronaut@marscope.org"
-                    className="w-full ms-input"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[var(--text-secondary)] mb-1">
-                    Password {authTab === "register" && "(min 10 chars, upper, lower, digit)"}
-                  </label>
-                  <input
-                    type="password"
-                    required
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    className="w-full ms-input"
-                  />
-                </div>
-
-                {authError && (
-                  <div className="p-2.5 rounded-[4px] bg-[#DC3545]/15 border border-[#DC3545]/45 text-[#ff6b7a]">
-                    {authError}
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={authBusy}
-                  className="w-full py-2.5 rounded-[4px] bg-[var(--accent-mars)] hover:bg-[var(--accent-mars-hover)] text-white font-semibold flex items-center justify-center gap-2 disabled:opacity-50"
-                >
-                  {authTab === "login" ? <LogIn className="w-4 h-4" /> : <UserPlus className="w-4 h-4" />}
-                  <span>
-                    {authBusy
-                      ? "Authenticating..."
-                      : authTab === "login"
-                      ? "Establish Authenticated Session"
-                      : "Create Astronaut Account"}
-                  </span>
-                </button>
-              </form>
-            )}
-
-            {resetNotice && (
-              <div className="p-2.5 rounded-[4px] bg-[var(--bg-void)] border border-[var(--border-strong)] font-mono text-[11px] text-[var(--accent-telemetry)]">
-                {resetNotice}
+            <div className="min-w-0">
+              <div className="text-sm font-bold tracking-[0.14em] text-white leading-none">MARSCOPE</div>
+              <div className="text-[10px] font-mono tracking-[0.14em] text-[#A1A1AA] mt-1 truncate">
+                MARTIAN SURFACE INTELLIGENCE
               </div>
+            </div>
+          </Link>
+
+          <nav aria-label="Landing navigation" className="hidden md:flex items-center gap-7 text-xs text-[#A1A1AA]">
+            <a href="#platform" className="hover:text-white transition-colors">
+              Platform
+            </a>
+            <a href="#capabilities" className="hover:text-white transition-colors">
+              Capabilities
+            </a>
+            <a href="#mission-planning" className="hover:text-white transition-colors">
+              Mission Planning
+            </a>
+            <a href="#about" className="hover:text-white transition-colors">
+              About
+            </a>
+          </nav>
+
+          <div className="hidden sm:flex items-center gap-3 text-xs">
+            {authenticated ? (
+              <Link
+                href="/mission-control"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-[4px] bg-[#FF6A1A] hover:bg-[#FF7F32] text-white font-semibold transition-colors"
+              >
+                <span>{astronaut?.is_demo ? "OPEN DEMO MISSION" : "OPEN MARSCOPE"}</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </Link>
+            ) : (
+              <>
+                <Link
+                  href="/login"
+                  className="px-3.5 py-2 rounded-[4px] border border-[#242424] hover:border-[#A1A1AA] text-white font-medium transition-colors"
+                >
+                  Sign In
+                </Link>
+                <Link
+                  href="/register"
+                  className="px-4 py-2 rounded-[4px] bg-[#FF6A1A] hover:bg-[#FF7F32] text-white font-semibold transition-colors"
+                >
+                  Get Started
+                </Link>
+              </>
             )}
           </div>
 
-          {/* Honest Platform Readiness Summary */}
-          <div className="lg:col-span-6 space-y-4">
-            <div className="ms-panel p-5 space-y-3">
-              <div className="flex items-center gap-2 text-xs font-mono uppercase tracking-wider text-[var(--accent-telemetry)]">
-                <ShieldCheck className="w-4 h-4" />
-                <span>Authenticated Multi-Astronaut Architecture</span>
+          <div className="flex sm:hidden items-center gap-2">
+            <Link
+              href={authenticated ? "/mission-control" : "/login"}
+              className="px-3 py-1.5 rounded-[4px] bg-[#FF6A1A] text-white text-xs font-semibold"
+            >
+              {authenticated ? "Open" : "Sign In"}
+            </Link>
+            <button
+              type="button"
+              onClick={() => setMobileMenuOpen((v) => !v)}
+              aria-label="Toggle menu"
+              className="p-2 rounded-[4px] border border-[#242424] text-[#A1A1AA] hover:text-white"
+            >
+              {mobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
+            </button>
+          </div>
+        </div>
+
+        {mobileMenuOpen && (
+          <div className="sm:hidden border-t border-[#242424] bg-[#0B0B0B] px-4 py-3 space-y-2 text-xs">
+            <a href="#platform" onClick={() => setMobileMenuOpen(false)} className="block py-1.5 text-[#A1A1AA] hover:text-white">
+              Platform
+            </a>
+            <a href="#capabilities" onClick={() => setMobileMenuOpen(false)} className="block py-1.5 text-[#A1A1AA] hover:text-white">
+              Capabilities
+            </a>
+            <a href="#mission-planning" onClick={() => setMobileMenuOpen(false)} className="block py-1.5 text-[#A1A1AA] hover:text-white">
+              Mission Planning
+            </a>
+            <a href="#about" onClick={() => setMobileMenuOpen(false)} className="block py-1.5 text-[#A1A1AA] hover:text-white">
+              About
+            </a>
+            {!authenticated && (
+              <div className="pt-2 flex gap-2 border-t border-[#242424]">
+                <Link href="/login" className="flex-1 text-center py-2 rounded-[4px] border border-[#242424] text-white">
+                  Sign In
+                </Link>
+                <Link href="/register" className="flex-1 text-center py-2 rounded-[4px] bg-[#FF6A1A] text-white font-semibold">
+                  Get Started
+                </Link>
               </div>
-              <ul className="space-y-2 text-xs text-[var(--text-secondary)] leading-relaxed">
-                <li>• <strong className="text-[var(--text-primary)]">Zero Fabricated Defaults:</strong> Operational mass parameters and landing sites remain explicitly unconfigured until entered or registered.</li>
-                <li>• <strong className="text-[var(--text-primary)]">Cookie + CSRF Isolation:</strong> HttpOnly SameSite cookies paired with per-session CSRF headers and strict mission membership authorization.</li>
-                <li>• <strong className="text-[var(--text-primary)]">Mars Planetary Integrity:</strong> All coordinates validate against IAU2000:49900; terrain elevation and landing-site perimeters sample local NASA PDS DEM GeoTIFFs only.</li>
+            )}
+          </div>
+        )}
+      </header>
+
+      {/* Hero Section — Two-Column with Interactive Rotating 3D Mars */}
+      <section className="relative overflow-hidden border-b border-[#242424] bg-[#050505]">
+        <div
+          className="pointer-events-none absolute inset-0 opacity-[0.06]"
+          style={{
+            backgroundImage:
+              "linear-gradient(to right, #FFFFFF 1px, transparent 1px), linear-gradient(to bottom, #FFFFFF 1px, transparent 1px)",
+            backgroundSize: "64px 64px",
+          }}
+          aria-hidden="true"
+        />
+
+        <div className="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-14 sm:py-20 lg:py-24 grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-8 items-center">
+          <div className="lg:col-span-6 space-y-6 z-10">
+            <div className="inline-flex items-center gap-2 text-[11px] font-mono tracking-[0.18em] text-[#FF6A1A] uppercase">
+              <span className="w-2 h-2 rounded-full bg-[#FF6A1A]" />
+              <span>A NEW PERSPECTIVE ON MARTIAN EXPLORATION</span>
+            </div>
+
+            <h1 className="text-4xl sm:text-5xl lg:text-[54px] font-bold tracking-tight leading-[1.08] text-white">
+              Explore Mars.{" "}
+              <span className="text-[#FF6A1A]">Understand the terrain.</span>{" "}
+              Plan the mission.
+            </h1>
+
+            <p className="text-base sm:text-lg text-[#A1A1AA] leading-relaxed max-w-xl">
+              MARSCOPE brings Martian terrain intelligence, scientific evidence and human exploration
+              planning into one integrated environment. Explore surface data, investigate geological targets
+              and evaluate mission routes with transparent evidence and uncertainty.
+            </p>
+
+            <div className="flex flex-wrap items-center gap-3.5 pt-1">
+              <Link
+                href={authenticated ? "/mission-control" : "/register"}
+                className="inline-flex items-center gap-2 px-6 py-3 rounded-[4px] bg-[#FF6A1A] hover:bg-[#FF7F32] text-white text-xs sm:text-sm font-semibold tracking-wider transition-colors"
+              >
+                <span>{authenticated ? "OPEN MARSCOPE" : "EXPLORE MARSCOPE"}</span>
+                <ArrowRight className="w-4 h-4" />
+              </Link>
+              <Link
+                href="/login?demo=1"
+                className="inline-flex items-center gap-2 px-6 py-3 rounded-[4px] border border-[#242424] hover:border-white bg-[#0B0B0B] text-white text-xs sm:text-sm font-semibold tracking-wider transition-colors"
+              >
+                <span>VIEW DEMO</span>
+              </Link>
+            </div>
+
+            <div className="pt-4 border-t border-[#242424] flex flex-wrap gap-x-6 gap-y-2 text-[11px] font-mono tracking-[0.12em] text-[#A1A1AA]">
+              <span>PLANETARY INTELLIGENCE</span>
+              <span className="text-[#FF6A1A]">•</span>
+              <span>SCIENTIFIC DISCOVERY</span>
+              <span className="text-[#FF6A1A]">•</span>
+              <span>HUMAN-AWARE EXPLORATION</span>
+            </div>
+          </div>
+
+          <div className="lg:col-span-6">
+            <MarsLandingGlobe />
+          </div>
+        </div>
+      </section>
+
+      {/* Section 1 — Planetary Intelligence (#0B0B0B) */}
+      <section id="platform" className="bg-[#0B0B0B] border-b border-[#242424] py-16 sm:py-24">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-center">
+          <div className="lg:col-span-6">
+            <div className="rounded-[6px] border border-[#242424] bg-[#050505] overflow-hidden shadow-2xl">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src="/landing/section-planetary.png"
+                alt="MARSCOPE 3D terrain DEM and orbital imagery explorer"
+                className="w-full h-auto block object-cover"
+              />
+            </div>
+          </div>
+
+          <div className="lg:col-span-6 space-y-5">
+            <div className="text-[11px] font-mono tracking-[0.16em] text-[#FF6A1A] uppercase">
+              01 / PLANETARY INTELLIGENCE
+            </div>
+            <h2 className="text-3xl sm:text-4xl font-bold tracking-tight text-white leading-tight">
+              Understand the surface beneath every step.
+            </h2>
+            <p className="text-sm sm:text-base text-[#A1A1AA] leading-relaxed">
+              Bring Martian surface information together in a spatial environment. Explore terrain,
+              elevation, imagery, coverage and available scientific datasets while keeping resolution,
+              provenance and uncertainty visible.
+            </p>
+            <ul className="space-y-2.5 text-sm text-[#E4E4E7]">
+              {[
+                "Layered planetary datasets.",
+                "Terrain and elevation intelligence.",
+                "Spatial coverage and uncertainty.",
+                "Integrated 2D and 3D exploration.",
+              ].map((item) => (
+                <li key={item} className="flex items-center gap-2.5">
+                  <Check className="w-4 h-4 text-[#FF6A1A] shrink-0" />
+                  <span>{item}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="pt-2">
+              <Link
+                href={authenticated ? "/explorer" : "/login?demo=1"}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-[4px] border border-[#FF6A1A] text-[#FF6A1A] hover:bg-[#FF6A1A] hover:text-white text-xs font-semibold tracking-wider transition-colors"
+              >
+                <span>EXPLORE PLANETARY INTELLIGENCE</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </Link>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Section 2 — Scientific Discovery (#111111) */}
+      <section id="capabilities" className="bg-[#111111] border-b border-[#242424] py-16 sm:py-24">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-center">
+          <div className="lg:col-span-6 space-y-5 order-2 lg:order-1">
+            <div className="text-[11px] font-mono tracking-[0.16em] text-[#FF6A1A] uppercase">
+              02 / SCIENTIFIC DISCOVERY
+            </div>
+            <h2 className="text-3xl sm:text-4xl font-bold tracking-tight text-white leading-tight">
+              Turn observations into scientific questions.
+            </h2>
+            <p className="text-sm sm:text-base text-[#A1A1AA] leading-relaxed">
+              Investigate Martian geological targets through available orbital and rover observations.
+              Connect evidence, inspect competing interpretations and understand what is known, what remains
+              uncertain and what needs further investigation.
+            </p>
+            <ul className="space-y-2.5 text-sm text-[#E4E4E7]">
+              {[
+                "Scientific evidence integration.",
+                "Geological target exploration.",
+                "Mineralogical and compositional context where supported by data.",
+                "Evidence provenance and uncertainty.",
+              ].map((item) => (
+                <li key={item} className="flex items-center gap-2.5">
+                  <Check className="w-4 h-4 text-[#FF6A1A] shrink-0" />
+                  <span>{item}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="pt-2">
+              <Link
+                href={authenticated ? "/evidence" : "/login?demo=1"}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-[4px] border border-[#FF6A1A] text-[#FF6A1A] hover:bg-[#FF6A1A] hover:text-white text-xs font-semibold tracking-wider transition-colors"
+              >
+                <span>DISCOVER THE SCIENCE</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </Link>
+            </div>
+          </div>
+
+          <div className="lg:col-span-6 order-1 lg:order-2">
+            <div className="rounded-[6px] border border-[#242424] bg-[#050505] overflow-hidden shadow-2xl">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src="/landing/section-science.png"
+                alt="MARSCOPE NASA PDS imagery and scientific evidence catalogue"
+                className="w-full h-auto block object-cover"
+              />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Section 3 — Human Exploration and Mission Planning (#0B0B0B) */}
+      <section id="mission-planning" className="bg-[#0B0B0B] border-b border-[#242424] py-16 sm:py-24">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-center">
+          <div className="lg:col-span-6">
+            <div className="rounded-[6px] border border-[#242424] bg-[#050505] overflow-hidden shadow-2xl">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src="/landing/section-mission.png"
+                alt="MARSCOPE terrain-aware EVA route planner"
+                className="w-full h-auto block object-cover"
+              />
+            </div>
+          </div>
+
+          <div className="lg:col-span-6 space-y-5">
+            <div className="text-[11px] font-mono tracking-[0.16em] text-[#FF6A1A] uppercase">
+              03 / HUMAN EXPLORATION &amp; MISSION PLANNING
+            </div>
+            <h2 className="text-3xl sm:text-4xl font-bold tracking-tight text-white leading-tight">
+              Plan exploration with the human mission in mind.
+            </h2>
+            <p className="text-sm sm:text-base text-[#A1A1AA] leading-relaxed">
+              Connect terrain intelligence with exploration planning. Evaluate candidate routes, inspect
+              terrain limitations, plan observation stops and assess outbound and return operations under
+              explicit assumptions.
+            </p>
+            <ul className="space-y-2.5 text-sm text-[#E4E4E7]">
+              {[
+                "Human-aware terrain assessment.",
+                "Route planning and comparison.",
+                "EVA planning and return assessment.",
+                "Crew collaboration and field observations.",
+              ].map((item) => (
+                <li key={item} className="flex items-center gap-2.5">
+                  <Check className="w-4 h-4 text-[#FF6A1A] shrink-0" />
+                  <span>{item}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="pt-2">
+              <Link
+                href={authenticated ? "/planner" : "/login?demo=1"}
+                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-[4px] border border-[#FF6A1A] text-[#FF6A1A] hover:bg-[#FF6A1A] hover:text-white text-xs font-semibold tracking-wider transition-colors"
+              >
+                <span>PLAN A MARSWALK</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </Link>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Final CTA */}
+      <section className="bg-[#050505] border-b border-[#242424] py-20 sm:py-24">
+        <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center space-y-6">
+          <h2 className="text-3xl sm:text-5xl font-bold tracking-tight text-white">
+            The next frontier needs <span className="text-[#FF6A1A]">better intelligence.</span>
+          </h2>
+          <p className="text-sm sm:text-base text-[#A1A1AA] max-w-2xl mx-auto">
+            Explore the Martian surface through connected scientific evidence, spatial intelligence and
+            human-aware mission planning.
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-4 pt-2">
+            <Link
+              href={authenticated ? "/mission-control" : "/login"}
+              className="inline-flex items-center gap-2 px-6 py-3 rounded-[4px] bg-[#FF6A1A] hover:bg-[#FF7F32] text-white text-xs sm:text-sm font-semibold tracking-wider transition-colors"
+            >
+              <span>ENTER MARSCOPE</span>
+              <ArrowRight className="w-4 h-4" />
+            </Link>
+            <Link
+              href="/login?demo=1"
+              className="inline-flex items-center gap-2 px-6 py-3 rounded-[4px] border border-[#242424] hover:border-white bg-[#0B0B0B] text-white text-xs sm:text-sm font-semibold tracking-wider transition-colors"
+            >
+              <span>TRY THE INTERACTIVE DEMO</span>
+            </Link>
+          </div>
+        </div>
+      </section>
+
+      {/* Footer */}
+      <footer id="about" className="bg-[#050505] py-12">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-8 text-xs text-[#A1A1AA]">
+            <div className="md:col-span-5 space-y-2.5">
+              <div className="text-sm font-bold tracking-[0.14em] text-white">MARSCOPE</div>
+              <p className="leading-relaxed max-w-sm">
+                Martian Surface Intelligence &amp; Exploration System unifying NASA PDS orbital terrain,
+                scientific evidence provenance, and human EVA mission planning.
+              </p>
+              <p className="text-[11px] font-mono text-[#71717A]">
+                Built for the NASA Space Apps Challenge (independent open-source project; not affiliated with or endorsed by NASA).
+              </p>
+            </div>
+
+            <div className="md:col-span-3 space-y-2">
+              <div className="font-mono text-[11px] uppercase tracking-wider text-white">Platform</div>
+              <ul className="space-y-1.5">
+                <li>
+                  <Link href="/login" className="hover:text-white">
+                    Sign In
+                  </Link>
+                </li>
+                <li>
+                  <Link href="/register" className="hover:text-white">
+                    Astronaut Registration
+                  </Link>
+                </li>
+                <li>
+                  <Link href="/login?demo=1" className="hover:text-white">
+                    Judge Demo Access
+                  </Link>
+                </li>
               </ul>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <Link href="/explorer" className="ms-panel p-4 hover:border-[var(--accent-telemetry)] transition-colors">
-                <Globe2 className="w-5 h-5 text-[var(--accent-telemetry)] mb-2" />
-                <div className="text-xs font-semibold text-[var(--text-primary)]">Surface Explorer 3D</div>
-                <div className="text-[11px] text-[var(--text-muted)] mt-0.5">Mars Globe + HiRISE DEM mesh</div>
-              </Link>
-              <Link href="/planner" className="ms-panel p-4 hover:border-[var(--accent-mars)] transition-colors">
-                <Route className="w-5 h-5 text-[var(--accent-mars)] mb-2" />
-                <div className="text-xs font-semibold text-[var(--text-primary)]">Uncertainty Route Planner</div>
-                <div className="text-[11px] text-[var(--text-muted)] mt-0.5">A*/Dijkstra + return corridor</div>
-              </Link>
+            <div className="md:col-span-4 space-y-2">
+              <div className="font-mono text-[11px] uppercase tracking-wider text-white">Resources</div>
+              <ul className="space-y-1.5">
+                <li>
+                  <a
+                    href="https://github.com/nssanjeev/Marscope"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="hover:text-white"
+                  >
+                    GitHub Repository
+                  </a>
+                </li>
+                <li>
+                  <span className="text-[#71717A]">Documentation: docs/ACTIVE_NAVIGATION.md, docs/FINAL_VALIDATION_REPORT.md</span>
+                </li>
+              </ul>
             </div>
+          </div>
+
+          <div className="pt-6 border-t border-[#242424] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 text-[11px] text-[#71717A]">
+            <p className="max-w-3xl leading-relaxed">
+              MARSCOPE is an independent exploration decision-support project. Its outputs are subject to
+              source-data availability, model assumptions and scientific limitations. It is not a
+              flight-certified astronaut safety system.
+            </p>
+            <div className="shrink-0 font-mono">© 2026 MARSCOPE</div>
           </div>
         </div>
-      </div>
-    );
-  }
-
-  const activeAlerts = sosEvents.filter((s) => s.status !== "RESOLVED" && s.status !== "CANCELLED");
-
-  return (
-    <div className="max-w-7xl mx-auto space-y-5">
-      <PageHeader
-        title={activeMission ? activeMission.name : "Mission Control Workspace"}
-        badge={activeMission ? activeMission.my_role : "AUTHENTICATED"}
-        description={
-          activeMission
-            ? activeMission.objective || "Active multi-astronaut Mars surface expedition workspace."
-            : `Signed in as ${astronaut?.display_name}. Create a new mission or join with an invitation token.`
-        }
-        actions={
-          <div className="flex items-center gap-2">
-            <Link
-              href="/landing-site"
-              className="px-3 py-1.5 rounded-[4px] bg-[var(--bg-elevated)] border border-[var(--border-strong)] text-xs font-medium text-[var(--text-primary)] hover:border-[var(--accent-telemetry)]"
-            >
-              Landing Site & 3D Bounds
-            </Link>
-            <Link
-              href="/explorer"
-              className="px-3 py-1.5 rounded-[4px] bg-[var(--accent-mars)] text-white text-xs font-semibold hover:bg-[var(--accent-mars-hover)]"
-            >
-              Open 3D Explorer
-            </Link>
-          </div>
-        }
-      />
-
-      {missions.length === 0 || !activeMission ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-          <form onSubmit={handleCreateMission} className="ms-panel p-5 space-y-3 text-xs">
-            <div className="flex items-center gap-2 font-semibold text-sm text-[var(--text-primary)]">
-              <Plus className="w-4 h-4 text-[var(--accent-mars)]" />
-              <span>Create New Surface Mission</span>
-            </div>
-            <input
-              type="text"
-              required
-              minLength={3}
-              value={newMissionName}
-              onChange={(e) => setNewMissionName(e.target.value)}
-              placeholder="Mission name (e.g., Sol 410 Boxwork Reconnaissance)"
-              className="w-full ms-input"
-            />
-            <textarea
-              rows={2}
-              value={newMissionObjective}
-              onChange={(e) => setNewMissionObjective(e.target.value)}
-              placeholder="Scientific & EVA objective"
-              className="w-full ms-input"
-            />
-            <button
-              type="submit"
-              className="px-4 py-2 rounded-[4px] bg-[var(--accent-mars)] text-white font-semibold"
-            >
-              Create Mission (MISSION_LEAD)
-            </button>
-          </form>
-
-          <form onSubmit={handleJoinMission} className="ms-panel p-5 space-y-3 text-xs">
-            <div className="flex items-center gap-2 font-semibold text-sm text-[var(--text-primary)]">
-              <KeyRound className="w-4 h-4 text-[var(--accent-telemetry)]" />
-              <span>Join Existing Mission via Invitation Token</span>
-            </div>
-            <input
-              type="text"
-              required
-              minLength={12}
-              value={inviteCode}
-              onChange={(e) => setInviteCode(e.target.value)}
-              placeholder="Paste single-use or multi-use invitation token"
-              className="w-full ms-input font-mono"
-            />
-            <button
-              type="submit"
-              className="px-4 py-2 rounded-[4px] bg-[var(--accent-telemetry)] text-[#07090C] font-semibold"
-            >
-              Join Mission Crew
-            </button>
-          </form>
-        </div>
-      ) : (
-        <>
-          {/* Summary Metric Row (max 4 concise cards, no visual bloat) */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
-            <div className="ms-panel p-4 flex flex-col justify-between gap-2">
-              <div className="flex items-center justify-between text-xs text-[var(--text-secondary)]">
-                <span>Crew Roster</span>
-                <Users className="w-4 h-4 text-[var(--accent-telemetry)]" />
-              </div>
-              <div className="text-2xl font-mono font-bold text-[var(--text-primary)]">{crew.length}</div>
-              <div className="text-[11px] font-mono text-[var(--text-muted)]">
-                Active members in {activeMission.my_role}
-              </div>
-            </div>
-
-            <div className="ms-panel p-4 flex flex-col justify-between gap-2">
-              <div className="flex items-center justify-between text-xs text-[var(--text-secondary)]">
-                <span>Landing Site</span>
-                <Flag className="w-4 h-4 text-[var(--accent-mars)]" />
-              </div>
-              <div>
-                <StatusIndicator
-                  label={
-                    landingSiteBundle?.landing_site_status === "REGISTERED"
-                      ? landingSiteBundle.landing_site?.dem_coverage_state || "REGISTERED"
-                      : "UNCONFIGURED"
-                  }
-                  tone={
-                    landingSiteBundle?.landing_site_status === "REGISTERED"
-                      ? landingSiteBundle.landing_site?.dem_coverage_state === "COVERED_DEM"
-                        ? "success"
-                        : "warning"
-                      : "unknown"
-                  }
-                />
-              </div>
-              <div className="text-[11px] font-mono text-[var(--text-muted)] truncate">
-                {landingSiteBundle?.landing_site
-                  ? `${landingSiteBundle.landing_site.latitude.toFixed(4)}, ${landingSiteBundle.landing_site.longitude_east.toFixed(4)} E`
-                  : "Register explicit Mars coordinates"}
-              </div>
-            </div>
-
-            <div className="ms-panel p-4 flex flex-col justify-between gap-2">
-              <div className="flex items-center justify-between text-xs text-[var(--text-secondary)]">
-                <span>Field Observations</span>
-                <Microscope className="w-4 h-4 text-[var(--accent-telemetry)]" />
-              </div>
-              <div className="text-2xl font-mono font-bold text-[var(--text-primary)]">{observations.length}</div>
-              <div className="text-[11px] font-mono text-[var(--text-muted)]">
-                Vocabulary-validated mission notes
-              </div>
-            </div>
-
-            <div className="ms-panel p-4 flex flex-col justify-between gap-2">
-              <div className="flex items-center justify-between text-xs text-[var(--text-secondary)]">
-                <span>Emergency SOS</span>
-                <AlertOctagon className={`w-4 h-4 ${activeAlerts.length > 0 ? "text-[#ff6b7a]" : "text-[var(--text-muted)]"}`} />
-              </div>
-              <div className="text-2xl font-mono font-bold text-[var(--text-primary)]">{activeAlerts.length}</div>
-              <div className="text-[11px] font-mono text-[var(--text-muted)]">
-                {activeAlerts.length > 0 ? "Requires crew acknowledgement" : "No active distress alerts"}
-              </div>
-            </div>
-          </div>
-
-          {/* Workspace Tabs */}
-          <div className="flex flex-wrap items-center gap-1 border-b border-[var(--border-subtle)] pb-2 text-xs">
-            {(
-              [
-                ["overview", "Overview"],
-                ["crew", `Crew (${crew.length})`],
-                ["observations", `Observations (${observations.length})`],
-                ["landing", "Landing Site & Perimeter"],
-                ["activity", `Audit Log (${missionEvents.length})`],
-              ] as const
-            ).map(([id, label]) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setOverviewTab(id)}
-                className={`px-3 py-1.5 rounded-[4px] font-medium ${
-                  overviewTab === id
-                    ? "bg-[var(--accent-mars)]/15 text-[var(--text-primary)] border border-[var(--accent-mars)]/45"
-                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-
-          {overviewTab === "overview" && (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 text-xs">
-              <Link href="/crew" className="ms-panel p-4 hover:border-[var(--accent-telemetry)] transition-colors space-y-1.5">
-                <div className="font-semibold text-sm text-[var(--text-primary)] flex items-center gap-2">
-                  <Users className="w-4 h-4 text-[var(--accent-telemetry)]" />
-                  <span>Manage Crew & Positions</span>
-                </div>
-                <p className="text-[var(--text-secondary)]">
-                  Ingest validated IAU2000:49900 telemetry positions, manage location sharing, and inspect connection staleness.
-                </p>
-              </Link>
-              <Link href="/observations" className="ms-panel p-4 hover:border-[var(--accent-mars)] transition-colors space-y-1.5">
-                <div className="font-semibold text-sm text-[var(--text-primary)] flex items-center gap-2">
-                  <Microscope className="w-4 h-4 text-[var(--accent-mars)]" />
-                  <span>Log Field Observations</span>
-                </div>
-                <p className="text-[var(--text-secondary)]">
-                  Submit crew mineral/hazard notes against the controlled planetary species vocabulary with voice memos.
-                </p>
-              </Link>
-              <Link href="/landing-site" className="ms-panel p-4 hover:border-[#1F9D68] transition-colors space-y-1.5">
-                <div className="font-semibold text-sm text-[var(--text-primary)] flex items-center gap-2">
-                  <Compass className="w-4 h-4 text-[#4ade80]" />
-                  <span>3D Landing-Site Perimeter</span>
-                </div>
-                <p className="text-[var(--text-secondary)]">
-                  Register landing coordinates from real datasets and compute DEM slope/roughness planning boundaries in 3D.
-                </p>
-              </Link>
-            </div>
-          )}
-
-          {overviewTab === "crew" && (
-            <div className="ms-panel overflow-hidden">
-              <div className="divide-y divide-[var(--border-subtle)] text-xs">
-                {crew.map((member) => (
-                  <div key={member.astronaut_id} className="p-3.5 flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <div className="font-semibold text-[var(--text-primary)]">
-                        {member.display_name}{" "}
-                        <span className="font-mono text-[10px] text-[var(--text-muted)]">({member.role})</span>
-                      </div>
-                      <div className="font-mono text-[11px] text-[var(--text-secondary)] mt-0.5">
-                        {member.latest_position
-                          ? `${member.latest_position.latitude.toFixed(5)}, ${member.latest_position.longitude_east.toFixed(5)} E (${member.latest_position.source_classification})`
-                          : "No Mars coordinate received"}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <StatusIndicator
-                        label={member.connection_status}
-                        tone={
-                          member.connection_status === "CONNECTED"
-                            ? "success"
-                            : member.connection_status === "POSITION_STALE"
-                            ? "warning"
-                            : "unknown"
-                        }
-                      />
-                      {member.latest_position && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setFocusCoordinate({
-                              lat: member.latest_position!.latitude,
-                              lon: member.latest_position!.longitude_east,
-                              label: member.display_name,
-                            })
-                          }
-                          className="px-2 py-1 rounded-[4px] border border-[var(--border-strong)] text-[11px] hover:border-[var(--accent-telemetry)]"
-                        >
-                          Focus Map
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {overviewTab === "observations" && (
-            <div className="space-y-2">
-              {observations.length === 0 ? (
-                <EmptyState
-                  icon={Microscope}
-                  title="No crew field observations yet"
-                  description="Log mineral discoveries, hazard reports, or sample notes in Field Observations."
-                />
-              ) : (
-                observations.slice(0, 12).map((o) => (
-                  <div key={o.observation_id} className="ms-panel p-3.5 text-xs flex flex-wrap items-start justify-between gap-2">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-semibold text-[var(--text-primary)]">{o.category}</span>
-                        {o.species_display_name && (
-                          <span className="font-mono text-[11px] text-[var(--accent-telemetry)]">
-                            {o.species_display_name}
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-[var(--text-secondary)] mt-1">{o.description}</p>
-                    </div>
-                    <StatusIndicator
-                      label={o.epistemic_state}
-                      tone={o.epistemic_state === "CORROBORATED_BY_EVIDENCE" ? "success" : "warning"}
-                    />
-                  </div>
-                ))
-              )}
-            </div>
-          )}
-
-          {overviewTab === "landing" && (
-            <div className="ms-panel p-4 text-xs space-y-2">
-              {landingSiteBundle?.landing_site ? (
-                <>
-                  <div className="font-semibold text-sm text-[var(--text-primary)]">
-                    {landingSiteBundle.landing_site.name}
-                  </div>
-                  <div className="font-mono text-[var(--text-secondary)]">
-                    {landingSiteBundle.landing_site.latitude.toFixed(5)},{" "}
-                    {landingSiteBundle.landing_site.longitude_east.toFixed(5)} E ({landingSiteBundle.landing_site.crs}) —{" "}
-                    {landingSiteBundle.landing_site.dem_coverage_state}
-                  </div>
-                  {landingSiteBundle.perimeter && (
-                    <div className="p-2.5 rounded-[4px] bg-[var(--bg-void)] border border-[var(--border-subtle)] font-mono text-[11px]">
-                      {landingSiteBundle.perimeter.status} — {landingSiteBundle.perimeter.classification_label}
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="text-[var(--text-secondary)]">
-                  Landing site is unconfigured (`LANDING_SITE_UNCONFIGURED`).{" "}
-                  <Link href="/landing-site" className="text-[var(--accent-telemetry)] underline">
-                    Register explicit landing coordinates
-                  </Link>
-                  .
-                </div>
-              )}
-            </div>
-          )}
-
-          {overviewTab === "activity" && (
-            <div className="ms-panel divide-y divide-[var(--border-subtle)] text-xs font-mono">
-              {missionEvents.slice(0, 25).map((ev) => (
-                <div key={ev.event_id} className="p-3 flex items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <span className="text-[var(--accent-telemetry)]">#{ev.event_seq}</span>{" "}
-                    <span className="text-[var(--text-primary)] font-semibold">{ev.event_type}</span>
-                  </div>
-                  <span className="text-[11px] text-[var(--text-muted)] shrink-0">
-                    {new Date(ev.server_timestamp_utc).toLocaleString()}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </>
-      )}
-
-      {missionMsg && (
-        <div className="p-3 rounded-[6px] bg-[var(--bg-elevated)] border border-[var(--border-strong)] text-xs font-mono text-[var(--accent-telemetry)]">
-          {missionMsg}
-        </div>
-      )}
+      </footer>
     </div>
   );
 }

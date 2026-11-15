@@ -153,7 +153,7 @@ class AuthService:
                        a.suit_mass_kg, a.suit_mass_meta_json,
                        a.equipment_mass_kg, a.equipment_mass_meta_json,
                        a.mobility_constraints, a.emergency_contact,
-                       a.profile_visibility, a.profile_edit_history_json,
+                       a.profile_visibility, a.profile_edit_history_json, a.is_demo,
                        a.created_at_utc AS astro_created_at_utc,
                        a.updated_at_utc AS astro_updated_at_utc
                 FROM auth_sessions s
@@ -361,8 +361,8 @@ class AuthService:
         preview_token: Optional[str] = None
 
         with self._db.transaction() as conn:
-            row = conn.execute("SELECT astronaut_id, is_active FROM astronauts WHERE email = ?", (email,)).fetchone()
-            if row is not None and bool(row["is_active"]):
+            row = conn.execute("SELECT astronaut_id, is_active, is_demo FROM astronauts WHERE email = ?", (email,)).fetchone()
+            if row is not None and bool(row["is_active"]) and not bool(row["is_demo"]):
                 raw_token = generate_opaque_token(24)
                 conn.execute(
                     """
@@ -478,6 +478,7 @@ class AuthService:
             emergency_contact=row["emergency_contact"],
             profile_visibility=row["profile_visibility"],
             profile_edit_history=json.loads(row["profile_edit_history_json"] or "[]"),
+            is_demo=bool(row["is_demo"]) if "is_demo" in row.keys() else False,
             created_at_utc=row[prefix_created],
             updated_at_utc=row[prefix_updated],
         )

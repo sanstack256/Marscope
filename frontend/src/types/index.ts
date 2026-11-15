@@ -3888,8 +3888,19 @@ export interface AstronautProfile {
   emergency_contact?: string | null;
   profile_visibility: "mission_members" | "private";
   profile_edit_history: Array<Record<string, unknown>>;
+  is_demo?: boolean;
   created_at_utc: string;
   updated_at_utc: string;
+}
+
+export interface DemoCredentialsConfig {
+  enabled: boolean;
+  demo_mission_id?: string | null;
+  email?: string | null;
+  password?: string | null;
+  display_name?: string | null;
+  account_label: string;
+  disclaimer: string;
 }
 
 export interface AuthSessionState {
@@ -3915,6 +3926,7 @@ export interface MissionSummary {
   my_role: MissionRole;
   active_member_count: number;
   active_sos_count: number;
+  is_demo?: boolean;
   created_at_utc: string;
   updated_at_utc: string;
 }
@@ -3971,6 +3983,7 @@ export interface CrewMember {
   total_mass_kg?: number | null;
   mass_classification?: string | null;
   emergency_contact?: string | null;
+  is_demo?: boolean;
 }
 
 export interface VoiceNoteRecord {
@@ -4140,6 +4153,156 @@ export interface MissionEventRecord {
   provenance: Record<string, unknown>;
   auth_context: Record<string, unknown>;
   payload: Record<string, unknown>;
+}
+
+export type NavigationState =
+  | "NOT_CONFIGURED"
+  | "READY_FOR_OPERATOR_REVIEW"
+  | "AWAITING_OPERATOR_APPROVAL"
+  | "ACTIVE"
+  | "POSITION_UNAVAILABLE"
+  | "POSITION_STALE"
+  | "ROUTE_DEVIATION_DETECTED"
+  | "OBSTRUCTION_REPORTED"
+  | "REPLANNING_REQUIRED"
+  | "RETURN_REQUESTED"
+  | "RETURN_ROUTE_ACTIVE"
+  | "PAUSED"
+  | "COMPLETED"
+  | "ABORTED"
+  | "EMERGENCY";
+
+export interface NavigationSegmentDetail {
+  segment_id: string;
+  segment_index: number;
+  start_lat: number;
+  start_lon: number;
+  end_lat: number;
+  end_lon: number;
+  crs: string;
+  surface_distance_m: number;
+  start_elevation_m?: number | null;
+  end_elevation_m?: number | null;
+  elevation_gain_m?: number | null;
+  elevation_loss_m?: number | null;
+  slope_deg?: number | null;
+  roughness_m?: number | null;
+  source_dem: string;
+  effective_resolution_m?: number | null;
+  valid_pixel_coverage_pct?: number | null;
+  terrain_uncertainty_m?: number | null;
+  registration_uncertainty_m?: number | null;
+  traversability_evidence_state: string;
+  candidate_obstacles: string[];
+  known_data_gaps: string[];
+  limitation_note: string;
+}
+
+export interface NavigationInstructionDetail {
+  step_index: number;
+  segment_id: string;
+  instruction_text: string;
+  true_north_bearing_deg: number;
+  grid_north_bearing_deg?: number | null;
+  bearing_reference: string;
+  heading_status: "USER_ENTERED" | "DEVICE_REPORTED" | "UNAVAILABLE";
+  distance_m: number;
+  remaining_distance_m: number;
+  elevation_change_m?: number | null;
+  slope_deg?: number | null;
+  support_state: "SUPPORTED" | "LIMITED" | "UNKNOWN";
+  terrain_limitation?: string | null;
+  is_arrival: boolean;
+}
+
+export interface NavigationProgressDetail {
+  progress_status: "AVAILABLE" | "PROGRESS UNAVAILABLE";
+  localization_banner: string;
+  localization_freshness: string;
+  localization_epistemic_classification: string;
+  position_timestamp_utc?: string | null;
+  position_source?: string | null;
+  accuracy_m?: number | null;
+  nearest_segment_index?: number | null;
+  distance_to_next_waypoint_m?: number | null;
+  remaining_route_distance_m?: number | null;
+  completed_fraction?: number | null;
+  cross_track_deviation_m?: number | null;
+  deviation_state:
+    | "NOT_CONFIGURED"
+    | "WITHIN_THRESHOLD"
+    | "DEVIATION_DETECTED"
+    | "UNAVAILABLE_ACCURACY_OR_POSITION";
+  deviation_limitation?: string | null;
+}
+
+export interface TurnbackAssessmentRecord {
+  state:
+    | "WITHIN_CONFIGURED_PLANNING_CONSTRAINTS"
+    | "TURNBACK_REVIEW_REQUIRED"
+    | "RETURN_ROUTE_UNAVAILABLE"
+    | "RESOURCE_BUDGET_INCOMPLETE"
+    | "INSUFFICIENT_LOCALIZATION"
+    | "INSUFFICIENT_TERRAIN_EVIDENCE"
+    | "INDETERMINATE";
+  evaluated_at_utc: string;
+  outbound_distance_m?: number | null;
+  return_distance_m?: number | null;
+  return_estimated_duration_s?: number | null;
+  configured_max_duration_s?: number | null;
+  return_route_available: boolean;
+  return_route_status: string;
+  resource_budget_status: string;
+  missing_inputs: string[];
+  decision_support_note: string;
+  return_route_vertices: Array<Record<string, unknown>>;
+  provenance: Record<string, unknown>;
+}
+
+export interface ObstructionReportRecord {
+  obstruction_id: string;
+  nav_session_id: string;
+  mission_id: string;
+  reported_by: string;
+  segment_index?: number | null;
+  latitude: number;
+  longitude: number;
+  location_source: string;
+  description: string;
+  voice_note_id?: string | null;
+  attachment_note?: string | null;
+  review_state: string;
+  epistemic_classification: string;
+  created_at_utc: string;
+}
+
+export interface NavigationSessionRecord {
+  nav_session_id: string;
+  mission_id: string;
+  astronaut_id: string;
+  state: NavigationState;
+  allowed_transitions: NavigationState[];
+  navigation_mode: "OPERATOR_SUPERVISED_EVA" | "MANUAL_WAYPOINT_CHECK" | "RETURN_TO_BASE";
+  route_id?: string | null;
+  route_dataset_id: string;
+  route_crs: string;
+  return_destination_name: string;
+  return_destination_lat: number;
+  return_destination_lon: number;
+  deviation_threshold_m?: number | null;
+  active_segment_index: number;
+  segments: NavigationSegmentDetail[];
+  instructions: NavigationInstructionDetail[];
+  progress: NavigationProgressDetail;
+  turnback?: TurnbackAssessmentRecord | null;
+  obstructions: ObstructionReportRecord[];
+  candidate_replan?: Record<string, unknown> | null;
+  route_limitations: string[];
+  approved_by?: string | null;
+  approved_at_utc?: string | null;
+  last_state_reason?: string | null;
+  created_at_utc: string;
+  updated_at_utc: string;
 }
 
 

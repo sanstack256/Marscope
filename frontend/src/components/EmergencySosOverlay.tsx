@@ -167,12 +167,17 @@ export function EmergencySosOverlay() {
         subtitle={`Mission: ${activeMission?.name || activeMissionId}`}
       >
         <form onSubmit={handleDispatch} className="space-y-4 text-xs">
-          <div className="rounded-[6px] border border-[#DC3545]/45 bg-[#DC3545]/10 p-3 text-[var(--text-primary)] leading-relaxed">
-            This broadcasts an urgent alert to all active crew members in{" "}
-            <span className="font-semibold">{activeMission?.name}</span>. Your latest validated{" "}
-            <span className="font-mono">IAU2000:49900</span> position (or{" "}
-            <span className="font-mono">POSITION_UNAVAILABLE</span> if none) is attached automatically without
-            fabricating coordinates.
+          <div className="rounded-[6px] border border-[#DC3545]/45 bg-[#DC3545]/10 p-3 text-[var(--text-primary)] leading-relaxed space-y-1.5">
+            <div>
+              This broadcasts an urgent alert to all active crew members in{" "}
+              <span className="font-semibold">{activeMission?.name}</span>. Your latest validated{" "}
+              <span className="font-mono">IAU2000:49900</span> position (or{" "}
+              <span className="font-mono">POSITION_UNAVAILABLE</span> if none) is attached automatically without
+              fabricating coordinates.
+            </div>
+            <div className="font-mono text-[10px] text-[#f5b041]">
+              Channel Notice: Available only through the authenticated MARSCOPE application channel. No SMS, email, push, or satellite provider is configured.
+            </div>
           </div>
 
           <div className="space-y-1.5">

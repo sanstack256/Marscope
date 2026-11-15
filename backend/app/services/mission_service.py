@@ -48,6 +48,15 @@ class MissionService:
         membership_id = str(uuid.uuid4())
 
         with self._db.transaction() as conn:
+            astro_row = conn.execute(
+                "SELECT is_demo FROM astronauts WHERE astronaut_id = ?",
+                (lead_astronaut_id,),
+            ).fetchone()
+            if astro_row is not None and bool(astro_row["is_demo"]):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Demo accounts cannot create production missions.",
+                )
             conn.execute(
                 """
                 INSERT INTO missions (
@@ -99,7 +108,9 @@ class MissionService:
                        (SELECT COUNT(*) FROM sos_events s WHERE s.mission_id = m.mission_id AND s.status NOT IN ('RESOLVED', 'CANCELLED')) AS active_sos_count
                 FROM missions m
                 JOIN mission_memberships mm ON mm.mission_id = m.mission_id
+                JOIN astronauts a ON a.astronaut_id = mm.astronaut_id
                 WHERE mm.astronaut_id = ? AND mm.status = 'ACTIVE'
+                  AND COALESCE(m.is_demo, 0) = COALESCE(a.is_demo, 0)
                 ORDER BY m.updated_at_utc DESC
                 """,
                 (astronaut_id,),
@@ -293,6 +304,19 @@ class MissionService:
                 raise HTTPException(status_code=status.HTTP_410_GONE, detail="Mission invitation usage limit reached.")
 
             mission_id = inv["mission_id"]
+            iso_row = conn.execute(
+                """
+                SELECT m.is_demo AS m_demo, a.is_demo AS a_demo
+                FROM missions m, astronauts a
+                WHERE m.mission_id = ? AND a.astronaut_id = ?
+                """,
+                (mission_id, astronaut_id),
+            ).fetchone()
+            if iso_row is not None and bool(iso_row["m_demo"]) != bool(iso_row["a_demo"]):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Demo and production missions are strictly isolated.",
+                )
             existing = conn.execute(
                 """
                 SELECT membership_id, status FROM mission_memberships
@@ -466,7 +490,7 @@ class MissionService:
                 SELECT mm.astronaut_id, mm.role, mm.status AS membership_status,
                        mm.location_sharing_enabled, mm.joined_at_utc,
                        a.display_name, a.body_mass_kg, a.suit_mass_kg, a.equipment_mass_kg,
-                       a.emergency_contact, a.profile_visibility
+                       a.emergency_contact, a.profile_visibility, a.is_demo
                 FROM mission_memberships mm
                 JOIN astronauts a ON a.astronaut_id = mm.astronaut_id
                 WHERE mm.mission_id = ? AND mm.status = 'ACTIVE'
@@ -513,6 +537,7 @@ class MissionService:
                         total_mass_kg=tot,
                         mass_classification="USER_ASSUMED" if (b is not None or s is not None or e is not None) else "NOT_PROVIDED",
                         emergency_contact=r["emergency_contact"] if can_see_profile else None,
+                        is_demo=bool(r["is_demo"]) if "is_demo" in r.keys() else False,
                     )
                 )
             return roster
@@ -535,6 +560,7 @@ class MissionService:
             my_role=row["my_role"],
             active_member_count=int(row["active_member_count"]),
             active_sos_count=int(row["active_sos_count"]),
+            is_demo=bool(row["is_demo"]) if "is_demo" in row.keys() else False,
             created_at_utc=row["created_at_utc"],
             updated_at_utc=row["updated_at_utc"],
         )

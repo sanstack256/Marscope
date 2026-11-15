@@ -67,8 +67,10 @@ app.include_router(api_router)
 @app.on_event("startup")
 async def _validate_runtime_security() -> None:
     from app.core.security import get_signing_secret
+    from app.services.container import demo_service
 
     get_signing_secret()
+    demo_service.ensure_seeded()
 
 
 def _root_payload():

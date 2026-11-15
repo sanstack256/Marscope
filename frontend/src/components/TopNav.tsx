@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   AlertOctagon,
   Clock,
@@ -20,6 +21,7 @@ import { CommandPalette } from "./ui/CommandPalette";
 import { ContextPopover } from "./ui/ContextPopover";
 
 export function TopNav() {
+  const router = useRouter();
   const [currentTimeUtc, setCurrentTimeUtc] = useState<string>("");
   const [health, setHealth] = useState<SystemHealth | null>(null);
   const [healthError, setHealthError] = useState(false);
@@ -136,8 +138,13 @@ export function TopNav() {
           )}
         </div>
 
-        {/* Right: SOS Alert Pill, Offline Queue, SSE, Command Palette, UTC, Astronaut Chip */}
+        {/* Right: Demo Pill, SOS Alert Pill, Offline Queue, SSE, Command Palette, UTC, Astronaut Chip */}
         <div className="flex items-center gap-2 text-xs">
+          {astronaut?.is_demo && (
+            <span className="px-2 py-0.5 rounded-[4px] bg-[#FF6A1A]/15 border border-[#FF6A1A]/50 text-[#FF6A1A] font-mono font-bold text-[10px] tracking-wider">
+              DEMO MODE
+            </span>
+          )}
           {activeSosList.length > 0 && (
             <button
               type="button"
@@ -220,7 +227,10 @@ export function TopNav() {
                   </Link>
                   <button
                     type="button"
-                    onClick={() => void logout()}
+                    onClick={async () => {
+                      await logout();
+                      router.push("/");
+                    }}
                     className="flex items-center gap-1.5 px-2 py-1.5 rounded-[4px] hover:bg-[#DC3545]/15 text-[#ff6b7a] text-left"
                   >
                     <LogOut className="w-3.5 h-3.5" />
@@ -231,7 +241,7 @@ export function TopNav() {
             </ContextPopover>
           ) : (
             <Link
-              href="/"
+              href="/login"
               className="px-2.5 py-1 rounded-[4px] bg-[var(--accent-mars)] text-white text-xs font-semibold hover:bg-[var(--accent-mars-hover)]"
             >
               Sign In

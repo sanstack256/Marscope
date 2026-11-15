@@ -2,13 +2,16 @@
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
-import { Compass, Flag, Layers, Microscope, Users } from "lucide-react";
+import { Compass, Flag, Layers, Microscope, Route, Users } from "lucide-react";
 import { API_BASE_URL } from "../lib/constants";
 import { useAuthMissionStore } from "../stores/useAuthMissionStore";
 import { useInvestigationStore } from "../stores/useInvestigationStore";
+import { useRoutingStore } from "../stores/useRoutingStore";
 
 export function IntegratedMissionContextBar() {
-  const { authenticated, activeMission, crew, observations, landingSiteBundle } = useAuthMissionStore();
+  const { authenticated, activeMission, crew, observations, landingSiteBundle, streamState } =
+    useAuthMissionStore();
+  const activeRoute = useRoutingStore((s) => s.activeRoute);
   const {
     questions,
     activeQuestionId,
@@ -73,6 +76,18 @@ export function IntegratedMissionContextBar() {
                   : "LANDING_SITE_UNCONFIGURED"}
               </span>
             </Link>
+            <Link
+              href="/active-navigation"
+              className="inline-flex items-center gap-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] font-mono"
+            >
+              <Route className="w-3.5 h-3.5 text-[#4ade80]" />
+              <span>
+                {activeRoute ? `ROUTE: ${(activeRoute.total_surface_distance_m / 1000).toFixed(2)} km` : "ROUTE: NONE"}
+              </span>
+            </Link>
+            <span className="font-mono text-[10px] text-[var(--text-muted)]">
+              STREAM: {streamState.toUpperCase()}
+            </span>
           </>
         ) : (
           <span className="inline-flex items-center gap-1.5 font-mono text-[var(--text-muted)]">

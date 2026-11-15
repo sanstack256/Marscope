@@ -72,6 +72,7 @@ class AstronautProfileResponse(BaseModel):
     emergency_contact: Optional[str] = None
     profile_visibility: Literal["mission_members", "private"] = "mission_members"
     profile_edit_history: List[Dict[str, Any]] = Field(default_factory=list)
+    is_demo: bool = False
     created_at_utc: str
     updated_at_utc: str
 
@@ -193,6 +194,7 @@ class MissionSummaryResponse(BaseModel):
     my_role: MissionRole
     active_member_count: int
     active_sos_count: int = 0
+    is_demo: bool = False
     created_at_utc: str
     updated_at_utc: str
 
@@ -241,6 +243,7 @@ class CrewMemberResponse(BaseModel):
     total_mass_kg: Optional[float] = None
     mass_classification: Optional[str] = None
     emergency_contact: Optional[str] = None
+    is_demo: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -544,3 +547,15 @@ class MissionEventResponse(BaseModel):
     provenance: Dict[str, Any] = Field(default_factory=dict)
     auth_context: Dict[str, Any] = Field(default_factory=dict)
     payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DemoCredentialsConfigResponse(BaseModel):
+    enabled: bool
+    demo_mission_id: Optional[str] = None
+    email: Optional[str] = None
+    password: Optional[str] = None
+    display_name: Optional[str] = None
+    account_label: str = "DEMO"
+    disclaimer: str = (
+        "Public sandbox demonstration account. Isolated from production astronaut missions and global configuration."
+    )

@@ -53,6 +53,7 @@ interface AuthMissionState {
   updateProfile: (patch: Record<string, unknown>) => Promise<AstronautProfile | null>;
 
   loadMissions: () => Promise<void>;
+  resetDemoMission: () => Promise<boolean>;
   selectMission: (missionId: string | null) => Promise<void>;
   createMission: (payload: {
     name: string;
@@ -138,7 +139,7 @@ export const useAuthMissionStore = create<AuthMissionState>((set, get) => ({
   missionEvents: [],
 
   offlineQueue: [],
-  browserOnline: typeof navigator !== "undefined" ? navigator.onLine : true,
+  browserOnline: true,
   streamState: "DISCONNECTED",
   sosDrawerOpen: false,
   isLoadingMissionData: false,
@@ -187,13 +188,13 @@ export const useAuthMissionStore = create<AuthMissionState>((set, get) => ({
         set({ authError: body.detail || "Registration failed." });
         return false;
       }
+      await get().loadMissions();
       set({
         authChecked: true,
         authenticated: true,
         astronaut: body.astronaut,
         authError: null,
       });
-      await get().loadMissions();
       return true;
     } catch (err) {
       set({ authError: err instanceof Error ? err.message : "Network error" });
@@ -213,13 +214,13 @@ export const useAuthMissionStore = create<AuthMissionState>((set, get) => ({
         set({ authError: body.detail || "Invalid credentials." });
         return false;
       }
+      await get().loadMissions();
       set({
         authChecked: true,
         authenticated: true,
         astronaut: body.astronaut,
         authError: null,
       });
-      await get().loadMissions();
       return true;
     } catch (err) {
       set({ authError: err instanceof Error ? err.message : "Network error" });
@@ -234,6 +235,13 @@ export const useAuthMissionStore = create<AuthMissionState>((set, get) => ({
       // ignore network failure on logout
     }
     setPersistedMissionId(null);
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.removeItem("marscope_demo_tour_state");
+      } catch {
+        // ignore
+      }
+    }
     set({
       authenticated: false,
       astronaut: null,
@@ -249,6 +257,17 @@ export const useAuthMissionStore = create<AuthMissionState>((set, get) => ({
       missionEvents: [],
       streamState: "DISCONNECTED",
     });
+  },
+
+  resetDemoMission: async () => {
+    const res = await apiFetch("/demo/reset", { method: "POST" });
+    if (!res.ok) return false;
+    await get().loadMissions();
+    const mId = get().activeMissionId;
+    if (mId) {
+      await get().refreshMissionWorkspace(mId);
+    }
+    return true;
   },
 
   updateProfile: async (patch) => {

@@ -1,14 +1,23 @@
 "use client";
 
 import React, { useEffect } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import { useAuthMissionStore } from "../stores/useAuthMissionStore";
 import { Sidebar } from "./Sidebar";
 import { TopNav } from "./TopNav";
 import { IntegratedMissionContextBar } from "./IntegratedMissionContextBar";
 import { EmergencySosOverlay } from "./EmergencySosOverlay";
+import { DemoTourOverlay } from "./DemoTourOverlay";
+
+const PUBLIC_ROUTES = new Set(["/", "/login", "/register"]);
 
 export function AppShellClient({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const router = useRouter();
+  const isPublicRoute = PUBLIC_ROUTES.has(pathname);
+
   const checkSession = useAuthMissionStore((s) => s.checkSession);
+  const authChecked = useAuthMissionStore((s) => s.authChecked);
   const authenticated = useAuthMissionStore((s) => s.authenticated);
   const activeMissionId = useAuthMissionStore((s) => s.activeMissionId);
   const connectMissionStream = useAuthMissionStore((s) => s.connectMissionStream);
@@ -19,6 +28,7 @@ export function AppShellClient({ children }: { children: React.ReactNode }) {
   }, [checkSession]);
 
   useEffect(() => {
+    setBrowserOnline(typeof navigator !== "undefined" ? navigator.onLine : true);
     const onOnline = () => setBrowserOnline(true);
     const onOffline = () => setBrowserOnline(false);
     window.addEventListener("online", onOnline);
@@ -34,6 +44,25 @@ export function AppShellClient({ children }: { children: React.ReactNode }) {
     return connectMissionStream(activeMissionId);
   }, [authenticated, activeMissionId, connectMissionStream]);
 
+  useEffect(() => {
+    if (!isPublicRoute && authChecked && !authenticated) {
+      const safeNext = pathname && pathname.startsWith("/") && !pathname.startsWith("//") ? pathname : "/mission-control";
+      router.replace(`/login?next=${encodeURIComponent(safeNext)}`);
+    }
+  }, [isPublicRoute, authChecked, authenticated, pathname, router]);
+
+  if (isPublicRoute) {
+    return <div className="w-full min-h-screen overflow-y-auto bg-[#050505] text-white">{children}</div>;
+  }
+
+  if (!authChecked || !authenticated) {
+    return (
+      <div className="w-full h-screen flex items-center justify-center bg-[#050505] text-[#A1A1AA] text-xs font-mono">
+        Verifying MARSCOPE astronaut session...
+      </div>
+    );
+  }
+
   return (
     <>
       <Sidebar />
@@ -45,6 +74,7 @@ export function AppShellClient({ children }: { children: React.ReactNode }) {
         </main>
       </div>
       <EmergencySosOverlay />
+      <DemoTourOverlay />
     </>
   );
 }

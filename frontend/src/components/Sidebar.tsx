@@ -66,6 +66,7 @@ export function Sidebar() {
 
   const sosEvents = useAuthMissionStore((s) => s.sosEvents);
   const activeMission = useAuthMissionStore((s) => s.activeMission);
+  const astronaut = useAuthMissionStore((s) => s.astronaut);
   const activeSosCount = sosEvents.filter(
     (s) => s.status !== "RESOLVED" && s.status !== "CANCELLED"
   ).length;
@@ -98,7 +99,7 @@ export function Sidebar() {
     <div className="flex flex-col h-full bg-[var(--bg-void)] border-r border-[var(--border-subtle)] select-none">
       {/* Brand + Collapse Toggle */}
       <div className="h-[56px] px-3.5 flex items-center justify-between border-b border-[var(--border-subtle)] shrink-0">
-        <Link href="/" onClick={() => setMobileOpen(false)} className="flex items-center gap-2.5 min-w-0">
+        <Link href="/mission-control" onClick={() => setMobileOpen(false)} className="flex items-center gap-2.5 min-w-0">
           <div className="w-8 h-8 rounded-[6px] bg-[var(--accent-mars)]/15 border border-[var(--accent-mars)]/45 flex items-center justify-center shrink-0">
             <Compass className="w-[18px] h-[18px] text-[var(--accent-mars)]" />
           </div>
@@ -196,13 +197,42 @@ export function Sidebar() {
         ))}
       </nav>
 
-      {/* Footer Context Summary */}
+      {/* Footer Context Summary + Astronaut User Icon */}
       {(!collapsed || isMobile) && (
-        <div className="p-3 border-t border-[var(--border-subtle)] text-[11px] font-mono text-[var(--text-muted)]">
-          <div className="truncate text-[var(--text-secondary)] font-semibold">
-            {activeMission ? activeMission.name : "No Active Mission"}
+        <div className="p-3 border-t border-[var(--border-subtle)] text-[11px] font-mono text-[var(--text-muted)] space-y-2.5">
+          <div>
+            <div className="truncate text-[var(--text-secondary)] font-semibold">
+              {activeMission ? activeMission.name : "No Active Mission"}
+            </div>
+            <div className="mt-0.5 truncate">CRS: IAU2000:49900</div>
           </div>
-          <div className="mt-0.5 truncate">CRS: IAU2000:49900</div>
+          <Link
+            href="/profile"
+            onClick={() => setMobileOpen(false)}
+            className="flex items-center gap-2.5 pt-2 border-t border-[var(--border-subtle)]/70 hover:text-[var(--text-primary)] transition-colors"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/astronaut-icon.png"
+              alt="Astronaut"
+              className="w-7 h-7 rounded-full border border-[#FF6A1A]/75 object-cover shrink-0 bg-[#050505]"
+            />
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] font-sans font-semibold text-[var(--text-primary)] leading-tight flex items-center gap-1.5">
+                <span>Astronaut</span>
+                {astronaut?.is_demo && (
+                  <span className="px-1 py-0.5 rounded-[3px] bg-[#FF6A1A]/20 border border-[#FF6A1A]/50 text-[#FF6A1A] text-[9px] font-mono">
+                    DEMO
+                  </span>
+                )}
+              </div>
+              {astronaut && (
+                <div className="text-[10px] font-mono text-[var(--text-muted)] truncate">
+                  {astronaut.display_name}
+                </div>
+              )}
+            </div>
+          </Link>
         </div>
       )}
     </div>

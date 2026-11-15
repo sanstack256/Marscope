@@ -93,6 +93,11 @@ class Settings(BaseSettings):
     AUDIO_UPLOAD_MAX_BYTES: int = 10 * 1024 * 1024
     ALLOW_TEST_PASSWORD_RESET_TOKEN_PREVIEW: bool = False
 
+    # Judge Demonstration Mode Configuration
+    MARSCOPE_DEMO_ENABLED: bool = True
+    MARSCOPE_DEMO_EMAIL: str = "judge.demo@marscope.local"
+    MARSCOPE_DEMO_PASSWORD: Optional[str] = None
+
     # CORS Configuration (strict explicit origins; wildcards rejected)
     CORS_ORIGINS: List[str] = _default_cors_origins()
 

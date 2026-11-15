@@ -30,7 +30,7 @@ export const NAVIGATION_GROUPS: NavGroupDef[] = [
     id: "command",
     label: "Command",
     items: [
-      { href: "/", label: "Mission Control", icon: "Compass" },
+      { href: "/mission-control", label: "Mission Control", icon: "Compass" },
       { href: "/missions", label: "Missions & Access", icon: "ShieldCheck" },
       { href: "/crew", label: "Crew Roster", icon: "Users" },
       { href: "/emergency", label: "Emergency SOS", icon: "AlertOctagon" },

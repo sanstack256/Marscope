@@ -36,6 +36,7 @@ from app.geospatial.services import (
 )
 from app.geospatial.spatial_delivery import SpatialDeliveryService
 from app.terrain.morphology import GeologicalMorphologyService
+from app.services.demo_service import DemoService
 
 # Project root path resolution
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
@@ -226,4 +227,10 @@ navigation_service = NavigationService(
     realtime_hub=mission_realtime_hub,
     position_service=position_service,
     routing_service=routing_service,
+)
+demo_service = DemoService(
+    db=mission_db,
+    event_service=mission_event_service,
+    credentials_file=INDEX_DIR / ".demo_credentials.json",
+    processed_dir=PROCESSED_DIR,
 )

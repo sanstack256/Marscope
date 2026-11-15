@@ -103,7 +103,7 @@ test("navigation architecture organizes into 6 mission domains preserving existi
   assert.equal(NAVIGATION_GROUPS.length, 6);
   const hrefs = new Set(NAVIGATION_PAGES.map((p) => p.href));
   for (const required of [
-    "/",
+    "/mission-control",
     "/missions",
     "/crew",
     "/emergency",

@@ -112,11 +112,23 @@ def require_auth(
 def load_mission_membership(mission_id: str, auth: AuthContext) -> MissionMembershipContext:
     with mission_db.read() as conn:
         mission_row = conn.execute(
-            "SELECT mission_id FROM missions WHERE mission_id = ?",
+            "SELECT mission_id, is_demo FROM missions WHERE mission_id = ?",
             (mission_id,),
         ).fetchone()
         if mission_row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mission not found.")
+
+        mission_is_demo = bool(mission_row["is_demo"]) if "is_demo" in mission_row.keys() else False
+        if bool(auth.profile.is_demo) and not mission_is_demo:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Demo accounts cannot access production missions.",
+            )
+        if not bool(auth.profile.is_demo) and mission_is_demo:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Production astronaut accounts are isolated from demonstration missions.",
+            )
 
         mem_row = conn.execute(
             """

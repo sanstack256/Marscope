@@ -16,12 +16,15 @@ export default function EmergencyConsolePage() {
     activeMissionId,
     activeMission,
     sosEvents,
+    offlineQueue,
     triggerSos,
     acknowledgeSos,
     resolveSos,
     cancelSos,
   } = useAuthMissionStore();
   const setFocusCoordinate = useSpatialStore((s) => s.setFocusCoordinate);
+
+  const [filterMode, setFilterMode] = useState<"ALL" | "ACTIVE" | "CLOSED">("ALL");
 
   const [message, setMessage] = useState("");
   const [voiceNote, setVoiceNote] = useState<VoiceNoteRecord | null>(null);
@@ -41,6 +44,13 @@ export default function EmergencyConsolePage() {
   }
 
   const canResolve = ["MISSION_LEAD", "MISSION_OPERATOR"].includes(activeMission.my_role);
+  const queuedSos = offlineQueue.filter((q) => q.event_kind === "SOS_TRIGGER");
+  const filteredSos = sosEvents.filter((ev) => {
+    const isClosed = ev.status === "RESOLVED" || ev.status === "CANCELLED";
+    if (filterMode === "ACTIVE") return !isClosed;
+    if (filterMode === "CLOSED") return isClosed;
+    return true;
+  });
 
   const handleTrigger = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -97,15 +107,50 @@ export default function EmergencyConsolePage() {
         </button>
       </form>
 
+      <div className="ms-panel p-3 border-[#D98A1F]/40 text-[11px] font-mono text-[#f5b041]">
+        Delivery Channel Notice: Alerts are distributed only through the authenticated MARSCOPE application SSE/REST channel. No external SMS, email, push, or satellite alert provider is configured.
+      </div>
+
+      {queuedSos.length > 0 && (
+        <div className="ms-panel p-3 border-[#DC3545]/60 bg-[#DC3545]/10 text-xs space-y-1">
+          <div className="font-mono font-bold text-[#ff6b7a]">
+            QUEUED_OFFLINE — NOT DELIVERED ({queuedSos.length} pending offline SOS)
+          </div>
+          <div className="text-[var(--text-secondary)]">
+            An offline browser cannot contact remote crew members. Queued SOS events will dispatch when connectivity restores.
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between gap-2 text-xs">
+        <div className="flex gap-2">
+          {(["ALL", "ACTIVE", "CLOSED"] as const).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => setFilterMode(mode)}
+              className={`px-2.5 py-1 rounded-[4px] font-mono border ${
+                filterMode === mode
+                  ? "border-[var(--accent-mars)] bg-[var(--accent-mars)]/15 text-[var(--text-primary)]"
+                  : "border-[var(--border-subtle)] text-[var(--text-secondary)]"
+              }`}
+            >
+              {mode}
+            </button>
+          ))}
+        </div>
+        <span className="font-mono text-[var(--text-secondary)]">Showing {filteredSos.length} of {sosEvents.length} events</span>
+      </div>
+
       <div className="space-y-3">
-        {sosEvents.length === 0 ? (
+        {filteredSos.length === 0 ? (
           <EmptyState
             icon={AlertOctagon}
             title="No SOS Events Recorded"
             description="All emergency activations, device delivery confirmations, crew acknowledgements, and cancellations appear here."
           />
         ) : (
-          sosEvents.map((ev) => (
+          filteredSos.map((ev) => (
             <div
               key={ev.sos_id}
               className={`ms-panel p-4 space-y-2.5 text-xs ${

@@ -280,3 +280,18 @@ All endpoints are served under the `/api` prefix by the FastAPI backend. Standar
 | `GET /api/eva-operations/mission/{mission_id}/dossier` | Exports `MissionOperationsDossier` with deterministic `sha256_integrity_digest` over core configuration, provenance, routes, and budgets. |
 | `GET /api/eva-operations/mission/{mission_id}/environmental-context` | Returns `EvaEnvironmentalContextReport` separating historical MSL RAD/REMS `ARCHIVE_OBSERVATION` records from unavailable live telemetry (`LIVE SURFACE WEATHER UNAVAILABLE`, `LIVE RADIATION TELEMETRY UNAVAILABLE`). |
 | `GET /api/eva-operations/telemetry/status`, `POST .../connect`, `POST .../disconnect`, `POST .../ingest` | Conditional telemetry adapter (`ConditionalTelemetryAdapter`). Defaults disconnected (`TELEMETRY NOT CONNECTED`, `LIVE CREW STATE UNAVAILABLE`). `/ingest` enforces token auth (`MARSCOPE_TRACKING_TOKEN` / `MARSCOPE_OPERATOR_TOKEN`), `IAU2000:49900` Mars CRS, monotonic `sequence_number`, unit checks, and 7-state `TelemetryFreshnessState` decay (`LIVE` -> `RECENT` -> `STALE` -> `EXPIRED`). |
+
+---
+
+## Prompt 2: Active Marswalk Navigation & SSE Reconnection API (`/api/missions/{mission_id}/navigation*`)
+
+| Method & Path | Purpose & Key Contract Fields |
+|---|---|
+| `GET /api/missions/{mission_id}/stream` | Mission-isolated Server-Sent Events (`text/event-stream`). Supports `?since_seq=<n>` query param and `Last-Event-ID: <n>` HTTP header for deterministic missed-event replay (`id: <seq>`) upon reconnect. |
+| `POST /api/missions/{mission_id}/navigation` | Initializes a persisted `NavigationSessionResponse` (`0002_active_navigation_and_ops.sql`) from a computed `route_id` (`RouteService`). Requires `MISSION_LEAD`, `MISSION_OPERATOR`, or `ASTRONAUT` (`403` for `OBSERVER`). |
+| `GET /api/missions/{mission_id}/navigation` | Returns the active navigation session with live `CrewPositionResponse` progress (`unavailable` unless live non-stale `IAU2000:49900` fix is present), `uncertainty_m`, cross-track deviation check, turn-by-turn `instructions` (`°T` & `°G`), and `obstructions`. |
+| `POST /api/missions/{mission_id}/navigation/transition` | Transitions the 15-state navigation lifecycle (`NAVIGATION_READY`, `NAVIGATION_ACTIVE`, `PAUSED`, `OFF_ROUTE_WARNING`, `REPLAN_REQUESTED`, `REPLAN_PROPOSED`, `RETURN_TO_BASE_ACTIVE`, `EMERGENCY_HOLD`, `ARRIVED`, `NAVIGATION_COMPLETED`, `NAVIGATION_CANCELLED`, etc.) with optimistic `expected_version` (`409` on conflict). |
+| `POST /api/missions/{mission_id}/navigation/obstructions` | Records a `USER_REPORTED` / `UNVERIFIED` terrain obstruction (`lat`, `lon_east`, `category`, `severity`, `description`) and emits a real-time mission event (`id: <seq>`). |
+| `POST /api/missions/{mission_id}/navigation/replan` | Computes a candidate route preview (`candidate_route_id`, distance/gain/slope deltas, `requires_operator_approval = true`) without mutating the active route. |
+| `POST /api/missions/{mission_id}/navigation/replan/decision` | Operator approval/rejection (`MISSION_LEAD` or `MISSION_OPERATOR` only; `403` for `ASTRONAUT`/`OBSERVER`) promoting the candidate route or keeping the active route unchanged. |
+| `POST /api/missions/{mission_id}/navigation/turnback` | Independently evaluates EVA return-to-landing-site feasibility via `plan_eva_return_route` (`return_distance_m`, `return_gain_m`, `margin_status`, `limitations`), never reusing outbound distance. |

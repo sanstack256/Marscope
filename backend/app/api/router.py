@@ -10,6 +10,7 @@ from app.api import (
     auth,
     composition,
     datasets,
+    demo,
     destinations,
     eva_operations,
     evidence_intelligence,
@@ -40,6 +41,7 @@ api_router = APIRouter(prefix="/api")
 
 api_router.include_router(health.router)
 api_router.include_router(auth.router)
+api_router.include_router(demo.router)
 api_router.include_router(field_observations.router)
 api_router.include_router(landing_site.router)
 api_router.include_router(missions.router)
