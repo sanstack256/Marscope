@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     HOST: str = "127.0.0.1"
     PORT: int = 8000
     MARSCOPE_DATASETS_DIR: Optional[str] = None
+    MARSCOPE_GCS_BUCKET: Optional[str] = None
+    MARSCOPE_GCS_PREFIX: str = "datasets"
+    MARSCOPE_STARTUP_ACQUIRE_DEMS: bool = False
     TRACKING_INGEST_TOKEN: Optional[str] = None
     OPERATOR_ACTION_TOKEN: Optional[str] = None
 

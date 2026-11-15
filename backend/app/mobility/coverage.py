@@ -87,6 +87,31 @@ def _resolve_raw_dem_open_path(dataset: Dataset, raw_dir: Path) -> Tuple[Path, O
                 raw_file = entry
                 break
     if raw_file is None or not raw_file.exists():
+        from app.ingestion.bootstrap import load_bootstrap_manifest
+        from app.ingestion.gcs_storage import GCSDatasetStore
+
+        gcs_store = GCSDatasetStore.from_env()
+        if gcs_store is not None:
+            manifest_path = raw_dir.parent / "bootstrap_manifest.json"
+            expected_sha = dataset.sha256_checksum
+            expected_size = dataset.file_size_bytes
+            if manifest_path.exists():
+                manifest = load_bootstrap_manifest(manifest_path)
+                for entry in manifest.get("products", []):
+                    if entry.get("dataset_id") == dataset.id:
+                        expected_sha = expected_sha or entry.get("expected_sha256")
+                        expected_size = expected_size or entry.get("expected_size_bytes")
+                        break
+            retrieved = gcs_store.ensure_raw_dataset_on_disk(
+                dataset,
+                raw_dir,
+                expected_sha256=expected_sha,
+                expected_size_bytes=expected_size,
+            )
+            if retrieved is not None and retrieved.exists():
+                raw_file = retrieved
+
+    if raw_file is None or not raw_file.exists():
         raise FileNotFoundError(f"Raw DEM file for '{dataset.id}' is not present in {raw_dir}.")
 
     lbl_path: Optional[Path] = None

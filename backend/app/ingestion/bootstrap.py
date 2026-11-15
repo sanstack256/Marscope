@@ -331,7 +331,11 @@ async def acquire_bootstrap_datasets(
             failed.append({"dataset_id": ds_id, "error": "Dataset missing from catalog."})
             continue
         try:
-            man = await acquisition_service.download_product(ds, overwrite=overwrite)
+            man = await acquisition_service.download_product(
+                ds,
+                overwrite=overwrite,
+                expected_sha256=entry.get("expected_sha256"),
+            )
             catalog_service.register_dataset(ds)
             acquired.append(
                 {

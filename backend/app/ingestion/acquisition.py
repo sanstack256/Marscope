@@ -188,6 +188,27 @@ class AcquisitionService:
         self.manifests_dir.mkdir(parents=True, exist_ok=True)
         self.ledger_path = self.manifests_dir / "acquisition_ledger.jsonl"
         self.query_provenance_path = self.manifests_dir / "query_provenance.jsonl"
+        self._download_lock = asyncio.Lock()
+
+    @staticmethod
+    def _format_exc_detail(
+        exc: Exception,
+        *,
+        http_status: Optional[int] = None,
+        bytes_downloaded: int = 0,
+        declared_size: Optional[int] = None,
+        timeout_seconds: Optional[float] = None,
+    ) -> str:
+        msg = str(exc).strip() or repr(exc)
+        parts = [f"{type(exc).__name__}: {msg}"]
+        if http_status:
+            parts.append(f"http_status={http_status}")
+        parts.append(f"bytes_downloaded={bytes_downloaded}")
+        if declared_size is not None:
+            parts.append(f"declared_size={declared_size}")
+        if timeout_seconds is not None:
+            parts.append(f"timeout_seconds={timeout_seconds}")
+        return " | ".join(parts)
 
     def _append_jsonl(self, path: Path, record: Dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -247,11 +268,34 @@ class AcquisitionService:
     ) -> DatasetManifest:
         """
         Stream a verified NASA scientific product and its companion PDS label (if present),
-        computing SHA-256 on the fly to a sibling temporary file with strict max_bytes,
-        magic-byte validation, non-overwrite guarantees, bounded transient retries, and
-        strictly verified HTTP Range resumption only when the server honors Range/If-Range.
-        Sets explicit acquisition_state transitions without inventing missing metadata.
+        computing SHA-256 incrementally while streaming to a sibling temporary file with strict
+        max_bytes, bounded chunk memory, magic-byte validation, non-overwrite guarantees, bounded
+        transient retries, and strictly verified HTTP Range resumption. Serializes large downloads
+        so multiple products are never streamed concurrently.
         """
+        async with self._download_lock:
+            return await self._download_product_locked(
+                dataset=dataset,
+                timeout_seconds=timeout_seconds,
+                chunk_size=chunk_size,
+                max_bytes=max_bytes,
+                overwrite=overwrite,
+                expected_sha256=expected_sha256,
+                max_retries=max_retries,
+                allow_resume=allow_resume,
+            )
+
+    async def _download_product_locked(
+        self,
+        dataset: Dataset,
+        timeout_seconds: float = 600.0,
+        chunk_size: int = 65536,
+        max_bytes: Optional[int] = 1_500_000_000,
+        overwrite: bool = False,
+        expected_sha256: Optional[str] = None,
+        max_retries: int = 3,
+        allow_resume: bool = True,
+    ) -> DatasetManifest:
         source_url = dataset.original_product_url
         if "{" in source_url:
             raise ValueError(
@@ -358,12 +402,15 @@ class AcquisitionService:
             resume_meta_path.unlink(missing_ok=True)
 
         total_downloaded = 0
+        progress_bytes = 0
         declared_size: Optional[int] = None
         content_type: Optional[str] = None
         http_status = 0
         resumed_from_bytes = 0
         calculated_sha = ""
         sig_meta: Dict[str, Any] = {}
+        effective_chunk_size = max(4096, min(int(chunk_size), 262144))
+        stream_hasher = hashlib.sha256()
 
         try:
             dataset.acquisition_state = AcquisitionState.DOWNLOADING
@@ -403,6 +450,16 @@ class AcquisitionService:
                                 temp_path.unlink(missing_ok=True)
 
                             resumed_from_bytes = existing_partial if is_partial else 0
+                            progress_bytes = resumed_from_bytes
+                            stream_hasher = hashlib.sha256()
+                            if is_partial and temp_path.exists():
+                                with temp_path.open("rb") as pf:
+                                    while True:
+                                        blk = pf.read(65536)
+                                        if not blk:
+                                            break
+                                        stream_hasher.update(blk)
+
                             etag_hdr = response.headers.get("etag")
                             if is_partial:
                                 cr = response.headers.get("content-range", "")
@@ -425,22 +482,28 @@ class AcquisitionService:
                             )
                             mode = "ab" if is_partial else "wb"
                             with temp_path.open(mode) as stream:
-                                # Stream decoded bytes as they arrive (chunk_size=None) so mid-stream
-                                # interruptions persist received bytes immediately for Range resumption.
-                                async for chunk in response.aiter_bytes(chunk_size=None):
-                                    if not chunk:
+                                # Stream raw transport chunks as they arrive (chunk_size=None avoids
+                                # httpx ByteChunker buffering/dropping partial bytes on mid-stream errors)
+                                # and slice writes/hashing to <= effective_chunk_size for bounded memory.
+                                async for raw_chunk in response.aiter_bytes(chunk_size=None):
+                                    if not raw_chunk:
                                         continue
-                                    cur_size = resumed_from_bytes + (stream.tell() - resumed_from_bytes if is_partial else stream.tell())
-                                    if max_bytes is not None and (cur_size + len(chunk)) > max_bytes:
-                                        raise ValueError(
-                                            f"Streamed download exceeded max_bytes limit ({max_bytes} bytes) for '{target_file_path.name}'."
-                                        )
-                                    stream.write(chunk)
+                                    for offset in range(0, len(raw_chunk), effective_chunk_size):
+                                        chunk = raw_chunk[offset : offset + effective_chunk_size]
+                                        if max_bytes is not None and (progress_bytes + len(chunk)) > max_bytes:
+                                            raise ValueError(
+                                                f"Streamed download exceeded max_bytes limit ({max_bytes} bytes) for '{target_file_path.name}'."
+                                            )
+                                        stream.write(chunk)
+                                        stream_hasher.update(chunk)
+                                        progress_bytes += len(chunk)
                                 stream.flush()
                     last_exc = None
                     break
                 except (httpx.TimeoutException, httpx.TransportError, RuntimeError) as exc:
                     last_exc = exc
+                    if temp_path.exists():
+                        progress_bytes = temp_path.stat().st_size
                     transient_http = isinstance(exc, RuntimeError) and any(
                         tok in str(exc) for tok in ("HTTP Error 429", "HTTP Error 500", "HTTP Error 502", "HTTP Error 503", "HTTP Error 504")
                     )
@@ -471,7 +534,7 @@ class AcquisitionService:
                         f"Downloaded JSON '{target_file_path.name}' failed JSON validation: {exc}"
                     ) from exc
 
-            calculated_sha = self._compute_file_sha256(temp_path)
+            calculated_sha = stream_hasher.hexdigest()
             if expected_sha256 and calculated_sha != expected_sha256.strip().lower():
                 raise ValueError(
                     f"SHA-256 checksum mismatch for '{target_file_path.name}': got {calculated_sha}, expected {expected_sha256}."
@@ -497,9 +560,16 @@ class AcquisitionService:
             tmp_sc.write_text(json.dumps(dl_meta, indent=2), encoding="utf-8")
             os.replace(tmp_sc, sidecar)
         except Exception as exc:
+            err_detail = self._format_exc_detail(
+                exc,
+                http_status=http_status or None,
+                bytes_downloaded=progress_bytes,
+                declared_size=declared_size,
+                timeout_seconds=timeout_seconds,
+            )
             dataset.status = DatasetLifecycleStatus.FAILED_DOWNLOAD
             dataset.acquisition_state = AcquisitionState.FAILED
-            dataset.failure_reason = str(exc)
+            dataset.failure_reason = err_detail
             dataset.verification.download_verification = VerificationState.FAILED
             if http_status and http_status not in {200, 206}:
                 dataset.verification.archive_availability = VerificationState.FAILED
@@ -510,8 +580,11 @@ class AcquisitionService:
                     "product_id": dataset.product_id,
                     "source_url": source_url,
                     "http_status": http_status,
+                    "bytes_downloaded": progress_bytes,
+                    "declared_size": declared_size,
+                    "timeout_seconds": timeout_seconds,
                     "outcome": "FAILED",
-                    "error": str(exc),
+                    "error": err_detail,
                     "stage_after": AcquisitionState.FAILED.value,
                 }
             )

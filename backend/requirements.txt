@@ -27,6 +27,9 @@ tifffile>=2024.0.0
 # Graph & Network Optimization
 networkx>=3.2.0
 
+# Cloud Storage Persistence (Google Cloud Run / GCS)
+google-cloud-storage>=2.16.0,<3.0.0
+
 # Testing & Quality Assurance
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
