@@ -629,6 +629,38 @@ export default function MissionReadinessPage() {
         </div>
       )}
 
+      {evaEnvelope?.linked_campaign_id && (
+        <div className="rounded-xl border border-cyan-500/40 bg-cyan-950/20 p-3 text-xs text-cyan-100 flex flex-wrap items-center justify-between gap-2">
+          <div className="space-y-0.5">
+            <div className="font-semibold flex flex-wrap items-center gap-2">
+              <span>Linked Science Campaign Active:</span>
+              <span className="font-mono text-cyan-300">{evaEnvelope.linked_campaign_id}</span>
+              {evaEnvelope.linked_question_id && (
+                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300">
+                  Q: {evaEnvelope.linked_question_id}
+                </span>
+              )}
+              {evaEnvelope.integrated_lifecycle_state && (
+                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-cyan-200">
+                  {evaEnvelope.integrated_lifecycle_state}
+                </span>
+              )}
+            </div>
+            <div className="text-[11px] text-slate-300">
+              EVA events recorded or replanning approved here automatically synchronize staleness and lifecycle state back to the linked Science Campaign.
+            </div>
+          </div>
+          <Link
+            href={`/science-campaign?campaignId=${encodeURIComponent(evaEnvelope.linked_campaign_id)}&missionId=${encodeURIComponent(
+              evaEnvelope.mission_id
+            )}`}
+            className="rounded-lg border border-cyan-500/40 bg-cyan-500/15 hover:bg-cyan-500/25 px-3 py-1.5 text-xs font-mono text-cyan-200"
+          >
+            Return to Science Campaign →
+          </Link>
+        </div>
+      )}
+
       {/* Top Controls + Section F Missing Information Drawer */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
         <div className="xl:col-span-8 rounded-xl border border-slate-800 bg-slate-950/70 p-4 space-y-4">

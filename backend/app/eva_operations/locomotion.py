@@ -25,16 +25,10 @@ from typing import Any, Dict, List, Optional, Sequence
 from pydantic import BaseModel, Field
 
 
-class EpistemicClassification(str, Enum):
-    """Strict Prompt 20 Part 1.1 epistemic classification for every value and parameter."""
+from app.science.provenance_graph import ScientificDataClassification
 
-    DIRECTLY_MEASURED = "DIRECTLY_MEASURED"
-    ARCHIVE_DERIVED = "ARCHIVE_DERIVED"
-    MARSCOPE_DERIVED = "MARSCOPE_DERIVED"
-    MODELLED = "MODELLED"
-    USER_ASSUMED = "USER_ASSUMED"
-    UNAVAILABLE = "UNAVAILABLE"
-    UNVERIFIED = "UNVERIFIED"
+# Unify EpistemicClassification to the single canonical ScientificDataClassification vocabulary.
+EpistemicClassification = ScientificDataClassification
 
 
 class ParameterProvenanceRecord(BaseModel):

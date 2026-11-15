@@ -261,6 +261,9 @@ class MissionOperationalSession(BaseModel):
     """Complete stateful session for a human Marswalk mission (Part 8)."""
 
     mission_id: str
+    linked_campaign_id: Optional[str] = None
+    linked_question_id: Optional[str] = None
+    integrated_lifecycle_state: Optional[str] = None
     workflow_state: MissionWorkflowState
     active_plan_version: int
     active_config: MissionConfigRequest

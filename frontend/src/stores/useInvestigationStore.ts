@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { API_BASE_URL } from "../lib/constants";
+import { useEvaOperationsStore } from "./useEvaOperationsStore";
 import type {
   CampaignBuildRequest,
   CampaignDossierExport,
@@ -10,6 +11,7 @@ import type {
   InferenceValidationResponse,
   IngestionLedgerResponse,
   InstrumentCapabilityRecord,
+  MissionLifecycleSummaryResponse,
   ObservationArchiveComparison,
   ProductDetailInspectionResponse,
   QuestionEvidenceDiscoveryResponse,
@@ -31,6 +33,7 @@ interface InvestigationState {
   selectedStopTargetIds: string[];
   campaigns: CampaignSummary[];
   activeCampaign: ScienceCampaignPlan | null;
+  activeLifecycle: MissionLifecycleSummaryResponse | null;
   freshnessReport: CampaignFreshnessReport | null;
   observations: RecordedFieldObservation[];
   comparisons: ObservationArchiveComparison[];
@@ -41,6 +44,7 @@ interface InvestigationState {
   loadingDiscovery: boolean;
   loadingTargets: boolean;
   loadingCampaign: boolean;
+  loadingApprove: boolean;
   loadingFreshness: boolean;
   loadingObservations: boolean;
   loadingComparison: boolean;
@@ -64,10 +68,17 @@ interface InvestigationState {
     questionId?: string
   ) => Promise<ProductDetailInspectionResponse | null>;
   exportCampaignDossier: (campaignId: string) => Promise<CampaignDossierExport | null>;
+  exportUnifiedDossier: (campaignId: string) => Promise<Record<string, unknown> | null>;
   evaluateTargets: (req?: Partial<TargetEvaluationRequest>) => Promise<TargetEvaluationBatchResponse | null>;
   buildCampaign: (req: CampaignBuildRequest) => Promise<ScienceCampaignPlan | null>;
   fetchCampaigns: () => Promise<void>;
   loadCampaign: (campaignId: string) => Promise<ScienceCampaignPlan | null>;
+  approveCampaign: (
+    campaignId: string,
+    note?: string,
+    operatorId?: string
+  ) => Promise<ScienceCampaignPlan | null>;
+  fetchLifecycle: (campaignId: string) => Promise<MissionLifecycleSummaryResponse | null>;
   checkFreshness: (campaignId: string) => Promise<CampaignFreshnessReport | null>;
   recomputeCampaign: (campaignId: string) => Promise<ScienceCampaignPlan | null>;
   recordObservation: (req: RecordObservationRequest) => Promise<RecordedFieldObservation | null>;
@@ -97,6 +108,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
   selectedStopTargetIds: [],
   campaigns: [],
   activeCampaign: null,
+  activeLifecycle: null,
   freshnessReport: null,
   observations: [],
   comparisons: [],
@@ -107,6 +119,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
   loadingDiscovery: false,
   loadingTargets: false,
   loadingCampaign: false,
+  loadingApprove: false,
   loadingFreshness: false,
   loadingObservations: false,
   loadingComparison: false,
@@ -284,7 +297,9 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
       if (!res.ok) throw new Error(await _parseError(res, "Failed to build science campaign"));
       const plan: ScienceCampaignPlan = await res.json();
       set({ activeCampaign: plan, loadingCampaign: false });
+      useEvaOperationsStore.getState().syncFromCampaignEnvelope(plan.eva_envelope);
       await get().fetchCampaigns();
+      void get().fetchLifecycle(plan.campaign_id);
       return plan;
     } catch (e: unknown) {
       set({
@@ -315,6 +330,8 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
       if (!res.ok) throw new Error(await _parseError(res, "Failed to load campaign"));
       const plan: ScienceCampaignPlan = await res.json();
       set({ activeCampaign: plan, loadingCampaign: false });
+      useEvaOperationsStore.getState().syncFromCampaignEnvelope(plan.eva_envelope);
+      void get().fetchLifecycle(campaignId);
       return plan;
     } catch (e: unknown) {
       set({
@@ -365,7 +382,9 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
       if (!res.ok) throw new Error(await _parseError(res, "Campaign recompute failed"));
       const plan: ScienceCampaignPlan = await res.json();
       set({ activeCampaign: plan, freshnessReport: null, loadingCampaign: false });
+      useEvaOperationsStore.getState().syncFromCampaignEnvelope(plan.eva_envelope);
       await get().fetchCampaigns();
+      void get().fetchLifecycle(campaignId);
       return plan;
     } catch (e: unknown) {
       set({
@@ -392,6 +411,7 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
       }));
       if (req.campaign_id) {
         void get().checkFreshness(req.campaign_id);
+        void get().fetchLifecycle(req.campaign_id);
       }
       return obs;
     } catch (e: unknown) {
@@ -436,6 +456,10 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
         comparisons: [cmp, ...s.comparisons.filter((c) => c.comparison_id !== cmp.comparison_id)],
         loadingComparison: false,
       }));
+      const activeCid = get().activeCampaign?.campaign_id;
+      if (activeCid) {
+        void get().loadCampaign(activeCid);
+      }
       return cmp;
     } catch (e: unknown) {
       set({
@@ -507,6 +531,69 @@ export const useInvestigationStore = create<InvestigationState>((set, get) => ({
       set({
         error: e instanceof Error ? e.message : "Campaign dossier export failed",
       });
+      return null;
+    }
+  },
+
+  exportUnifiedDossier: async (campaignId) => {
+    set({ error: null });
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/science-investigation/campaigns/${encodeURIComponent(campaignId)}/unified-dossier`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) throw new Error(await _parseError(res, "Unified dossier export failed"));
+      return (await res.json()) as Record<string, unknown>;
+    } catch (e: unknown) {
+      set({
+        error: e instanceof Error ? e.message : "Unified dossier export failed",
+      });
+      return null;
+    }
+  },
+
+  approveCampaign: async (
+    campaignId,
+    note = "Operator reviewed science evidence, spatial registration, and EVA engineering envelope.",
+    operatorId = "operator"
+  ) => {
+    set({ loadingApprove: true, error: null });
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/science-investigation/campaigns/${encodeURIComponent(campaignId)}/approve`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ operator_id: operatorId, note }),
+        }
+      );
+      if (!res.ok) throw new Error(await _parseError(res, "Campaign approval failed"));
+      const plan: ScienceCampaignPlan = await res.json();
+      set({ activeCampaign: plan, loadingApprove: false });
+      useEvaOperationsStore.getState().syncFromCampaignEnvelope(plan.eva_envelope);
+      await get().fetchCampaigns();
+      void get().fetchLifecycle(campaignId);
+      return plan;
+    } catch (e: unknown) {
+      set({
+        loadingApprove: false,
+        error: e instanceof Error ? e.message : "Campaign approval failed",
+      });
+      return null;
+    }
+  },
+
+  fetchLifecycle: async (campaignId) => {
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/science-investigation/campaigns/${encodeURIComponent(campaignId)}/lifecycle`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) return null;
+      const summary: MissionLifecycleSummaryResponse = await res.json();
+      set({ activeLifecycle: summary });
+      return summary;
+    } catch {
       return null;
     }
   },

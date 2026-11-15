@@ -151,3 +151,12 @@ rover_association_service = RoverSpatialAssociationService(
     catalog_service=catalog_service,
     composition_index=composition_index,
 )
+
+# Prompt 21 End-to-End Bidirectional Service Integration
+science_investigation_service.attach_integration_services(
+    eva_operations_service=eva_operations_service,
+    morphology_service=morphology_service,
+    spatial_coverage_service=spatial_coverage_service,
+    spatial_registration_service=spatial_registration_service,
+)
+eva_operations_service.attach_science_service(science_investigation_service)

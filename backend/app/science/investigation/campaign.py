@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.eva_operations.constraints import evaluate_eva_constraints
 from app.eva_operations.energy_budget import evaluate_eva_energy_budget
+from app.eva_operations.locomotion import LocomotionModelCategory
 from app.eva_operations.resource_budget import evaluate_eva_resource_budget
 from app.eva_operations.return_planning import plan_eva_return_route
 from app.eva_operations.route_schedule import build_eva_schedule
@@ -29,6 +30,7 @@ from app.eva_operations.uncertainty import summarize_eva_uncertainties
 from app.evidence_intelligence.schemas import CacheValidityState, CorridorAssessRequest
 from app.mobility.terrain_features import mars_great_circle_distance_meters
 from app.routing.graph import RoutePlanningError
+from app.routing.models import UnknownTerrainPolicy
 from app.routing.schemas import RouteComputeRequest, RouteCoordinateInput, RouteObjective, RoutingMode
 from app.science.investigation.observation_plan import build_observation_action_plan
 from app.science.investigation.requirements import evaluate_question_requirements
@@ -42,6 +44,7 @@ from app.science.investigation.schemas import (
     CampaignRouteCandidate,
     CampaignStopPlan,
     CandidateTargetEvaluation,
+    IntegratedMissionLifecycleState,
     RequirementFulfillmentState,
     ScienceCampaignPlan,
     ScienceQuestionDefinition,
@@ -302,6 +305,10 @@ def _run_route_and_eva_for_stops(
     req: CampaignBuildRequest,
     routing_service: Any,
     evidence_service: Any,
+    eva_operations_service: Optional[Any] = None,
+    campaign_id: Optional[str] = None,
+    question_id: Optional[str] = None,
+    register_session: bool = False,
 ) -> Tuple[
     CampaignRouteCandidate,
     Optional[Any],
@@ -340,11 +347,17 @@ def _run_route_and_eva_for_stops(
         raise ValueError("Cannot route campaign without at least one target stop or destination.")
 
     total_dwell_s = sum(dwell_map.get(s.target_id, req.default_stop_dwell_s) for s in ordered_stops)
+    try:
+        unk_policy = UnknownTerrainPolicy(req.unknown_terrain_policy)
+    except Exception:
+        unk_policy = UnknownTerrainPolicy.EXCLUDE_UNKNOWN
     out_constraints = req.constraints.model_copy(
         update={
             "walking_speed_m_per_s": req.walking_speed_mps,
             "return_to_start": False,
             "optimize_target_order": req.optimize_stop_order and len(waypoint_coords) > 1,
+            "unknown_terrain_policy": unk_policy,
+            "operator_unknown_override_reason": req.operator_unknown_override_reason,
         }
     )
 
@@ -414,63 +427,21 @@ def _run_route_and_eva_for_stops(
             failure_reason=str(exc),
         )
         return cand, None, None, None
-    return_plan = plan_eva_return_route(
-        routing_service=routing_service,
-        dataset_id=req.dataset_id,
-        outbound_route=route,
-        walking_speed_mps=req.walking_speed_mps,
-        use_tobler_grade_approximation=req.use_tobler_grade_approximation,
-        stop_dwell_total_s=total_dwell_s,
-        operational_overhead_s=req.operational_overhead_s,
-        usable_budget_s=usable_s,
-        compute_reverse_return_route=True,
-    )
 
-    out_const_s = (
-        round(route.total_surface_distance_m / req.walking_speed_mps, 1)
-        if (req.walking_speed_mps and req.walking_speed_mps > 0)
-        else None
-    )
     stop_dwell_dict = {
         s.target_id: float(dwell_map.get(s.target_id, req.default_stop_dwell_s))
         for s in ordered_stops
     }
-    time_budget = evaluate_eva_time_budget(
-        outbound_constant_s=out_const_s,
-        outbound_tobler_s=route.estimated_duration_seconds,
-        return_constant_s=return_plan.return_duration_constant_s,
-        return_tobler_s=return_plan.return_duration_tobler_s,
-        return_route_computed=return_plan.return_route_computed,
-        stop_dwell_seconds=stop_dwell_dict,
-        operational_overhead_s=req.operational_overhead_s,
-        walking_speed_mps=req.walking_speed_mps,
-        use_tobler_grade_approximation=req.use_tobler_grade_approximation,
-        mission_duration_limit_s=req.mission_duration_limit_s,
-        return_reserve_fraction=req.return_reserve_fraction,
-    )
-    energy_budget = evaluate_eva_energy_budget(
-        outbound_climb_gain_m=route.total_elevation_gain_m,
-        outbound_descent_loss_m=route.total_elevation_loss_m,
-        return_climb_gain_m=return_plan.return_elevation_gain_m,
-        return_descent_loss_m=return_plan.return_elevation_loss_m,
-        astronaut_suit_mass_kg=req.astronaut_suit_mass_kg,
-        payload_mass_kg=req.payload_mass_kg,
-    )
-    resource_budget = evaluate_eva_resource_budget(
-        resources=req.resources,
-        exposure_duration_s=time_budget.total_required_s,
-    )
-    schedule = build_eva_schedule(
-        corridor=corridor,
-        return_plan=return_plan,
-        walking_speed_mps=req.walking_speed_mps,
-        use_tobler_grade_approximation=req.use_tobler_grade_approximation,
-        stop_dwell_seconds=stop_dwell_dict,
-        operational_overhead_s=req.operational_overhead_s,
-        surface_weight_n=energy_budget.surface_weight_n,
-    )
+    loco_cat = None
+    if req.locomotion_category:
+        try:
+            loco_cat = LocomotionModelCategory(req.locomotion_category)
+        except Exception:
+            loco_cat = None
+
+    mission_id_for_camp = f"eva_{campaign_id}" if (register_session and campaign_id) else f"eva_{alt_id}"
     cfg = MissionConfigRequest(
-        mission_id=f"eva_{alt_id}",
+        mission_id=mission_id_for_camp,
         mission_name=req.campaign_name,
         dataset_id=req.dataset_id,
         start=start,
@@ -480,6 +451,10 @@ def _run_route_and_eva_for_stops(
         constraints=out_constraints,
         walking_speed_mps=req.walking_speed_mps,
         use_tobler_grade_approximation=req.use_tobler_grade_approximation,
+        locomotion_category=loco_cat,
+        unknown_terrain_policy=unk_policy,
+        operator_unknown_override_reason=req.operator_unknown_override_reason,
+        confirm_default_policies=req.confirm_default_policies,
         mission_duration_limit_s=req.mission_duration_limit_s,
         return_reserve_fraction=req.return_reserve_fraction,
         operational_overhead_s=req.operational_overhead_s,
@@ -487,76 +462,143 @@ def _run_route_and_eva_for_stops(
         astronaut_suit_mass_kg=req.astronaut_suit_mass_kg,
         payload_mass_kg=req.payload_mass_kg,
         resources=req.resources,
+        linked_campaign_id=campaign_id,
+        linked_question_id=question_id,
     )
-    constraints = evaluate_eva_constraints(
-        config=cfg,
-        route=route,
-        corridor=corridor,
-        time_budget=time_budget,
-        return_plan=return_plan,
-        resource_budget=resource_budget,
-    )
-    any_fail = any(c.status == "FAIL" for c in constraints)
-    if any_fail:
-        env_status = EnvelopeFeasibilityStatus.EXCEEDS_CONFIGURED_CONSTRAINTS
-    elif time_budget.available and energy_budget.available:
-        env_status = EnvelopeFeasibilityStatus.FEASIBLE_WITHIN_CONFIGURED_CONSTRAINTS
-    else:
-        env_status = EnvelopeFeasibilityStatus.INCOMPLETE_USER_CONSTRAINTS
 
-    uncertainties, limitations = summarize_eva_uncertainties(
-        config=cfg,
-        corridor=corridor,
-        time_budget=time_budget,
-        return_plan=return_plan,
-    )
-    missing_inputs = list(
-        dict.fromkeys(
-            time_budget.missing_inputs + energy_budget.missing_inputs + resource_budget.missing_inputs
+    if eva_operations_service is not None:
+        eva_env = eva_operations_service.evaluate_precomputed_route_envelope(
+            config=cfg,
+            route=route,
+            corridor=corridor,
+            register_session=register_session,
+            integrated_lifecycle_state=IntegratedMissionLifecycleState.EVA_OPERATIONAL_EVALUATION.value,
         )
-    )
-    eva_env = EvaMissionEnvelopeResponse(
-        mission_id=cfg.mission_id or alt_id,
-        mission_name=cfg.mission_name,
-        study_region=cfg.study_region,
-        dataset_id=cfg.dataset_id,
-        source_product_id=route.source_product_id,
-        route_id=route.route_id,
-        assessment_id=corridor.assessment_id,
-        envelope_status=env_status,
-        operational_safety_certified=False,
-        missing_inputs=missing_inputs,
-        config=cfg,
-        outbound_summary={
-            "horizontal_distance_m": route.total_horizontal_distance_m,
-            "surface_distance_m": route.total_surface_distance_m,
-            "elevation_gain_m": route.total_elevation_gain_m,
-            "elevation_loss_m": route.total_elevation_loss_m,
-            "max_slope_deg": route.max_slope_deg,
-            "mean_slope_deg": route.mean_slope_deg,
-        },
-        time_budget=time_budget,
-        energy_budget=energy_budget,
-        resource_budget=resource_budget,
-        return_plan=return_plan,
-        schedule=schedule,
-        constraints=constraints,
-        uncertainty_notes=uncertainties,
-        limitations=limitations,
-        cache_validity=CacheValidityState.CURRENT,
-        provenance_graph=ProvenanceDependencyGraph(
-            output_id=cfg.mission_id or alt_id,
-            classification=ScientificDataClassification.MARSCOPE_DERIVED,
-            input_datasets=[req.dataset_id],
-            input_product_ids=[route.source_product_id],
-            input_variables=["multi_stop_route", "return_route", "eva_constraints"],
-            method="campaign_eva_envelope_v2",
-            algorithm_version="2.0.0-p18",
-            validation_state="analytical_planning_envelope_not_safety_certified",
-        ),
-        created_at_utc=datetime.now(timezone.utc).isoformat(),
-        compute_time_ms=0.0,
-    )
+        return_plan = eva_env.return_plan
+        time_budget = eva_env.time_budget
+        energy_budget = eva_env.energy_budget
+        env_status = eva_env.envelope_status
+    else:
+        return_plan = plan_eva_return_route(
+            routing_service=routing_service,
+            dataset_id=req.dataset_id,
+            outbound_route=route,
+            walking_speed_mps=req.walking_speed_mps,
+            use_tobler_grade_approximation=req.use_tobler_grade_approximation,
+            stop_dwell_total_s=total_dwell_s,
+            operational_overhead_s=req.operational_overhead_s,
+            usable_budget_s=usable_s,
+            compute_reverse_return_route=True,
+        )
+        out_const_s = (
+            round(route.total_surface_distance_m / req.walking_speed_mps, 1)
+            if (req.walking_speed_mps and req.walking_speed_mps > 0)
+            else None
+        )
+        time_budget = evaluate_eva_time_budget(
+            outbound_constant_s=out_const_s,
+            outbound_tobler_s=route.estimated_duration_seconds,
+            return_constant_s=return_plan.return_duration_constant_s,
+            return_tobler_s=return_plan.return_duration_tobler_s,
+            return_route_computed=return_plan.return_route_computed,
+            stop_dwell_seconds=stop_dwell_dict,
+            operational_overhead_s=req.operational_overhead_s,
+            walking_speed_mps=req.walking_speed_mps,
+            use_tobler_grade_approximation=req.use_tobler_grade_approximation,
+            mission_duration_limit_s=req.mission_duration_limit_s,
+            return_reserve_fraction=req.return_reserve_fraction,
+        )
+        energy_budget = evaluate_eva_energy_budget(
+            outbound_climb_gain_m=route.total_elevation_gain_m,
+            outbound_descent_loss_m=route.total_elevation_loss_m,
+            return_climb_gain_m=return_plan.return_elevation_gain_m,
+            return_descent_loss_m=return_plan.return_elevation_loss_m,
+            astronaut_suit_mass_kg=req.astronaut_suit_mass_kg,
+            payload_mass_kg=req.payload_mass_kg,
+        )
+        resource_budget = evaluate_eva_resource_budget(
+            resources=req.resources,
+            exposure_duration_s=time_budget.total_required_s,
+        )
+        schedule = build_eva_schedule(
+            corridor=corridor,
+            return_plan=return_plan,
+            walking_speed_mps=req.walking_speed_mps,
+            use_tobler_grade_approximation=req.use_tobler_grade_approximation,
+            stop_dwell_seconds=stop_dwell_dict,
+            operational_overhead_s=req.operational_overhead_s,
+            surface_weight_n=energy_budget.surface_weight_n,
+        )
+        constraints = evaluate_eva_constraints(
+            config=cfg,
+            route=route,
+            corridor=corridor,
+            time_budget=time_budget,
+            return_plan=return_plan,
+            resource_budget=resource_budget,
+        )
+        any_fail = any(c.status == "FAIL" for c in constraints)
+        if any_fail:
+            env_status = EnvelopeFeasibilityStatus.EXCEEDS_CONFIGURED_CONSTRAINTS
+        elif time_budget.available and energy_budget.available:
+            env_status = EnvelopeFeasibilityStatus.FEASIBLE_WITHIN_CONFIGURED_CONSTRAINTS
+        else:
+            env_status = EnvelopeFeasibilityStatus.INCOMPLETE_USER_CONSTRAINTS
+        uncertainties, limitations = summarize_eva_uncertainties(
+            config=cfg,
+            corridor=corridor,
+            time_budget=time_budget,
+            return_plan=return_plan,
+        )
+        missing_inputs = list(
+            dict.fromkeys(
+                time_budget.missing_inputs + energy_budget.missing_inputs + resource_budget.missing_inputs
+            )
+        )
+        eva_env = EvaMissionEnvelopeResponse(
+            mission_id=cfg.mission_id or alt_id,
+            mission_name=cfg.mission_name,
+            study_region=cfg.study_region,
+            dataset_id=cfg.dataset_id,
+            source_product_id=route.source_product_id,
+            route_id=route.route_id,
+            assessment_id=corridor.assessment_id,
+            linked_campaign_id=campaign_id,
+            linked_question_id=question_id,
+            envelope_status=env_status,
+            operational_safety_certified=False,
+            missing_inputs=missing_inputs,
+            config=cfg,
+            outbound_summary={
+                "horizontal_distance_m": route.total_horizontal_distance_m,
+                "surface_distance_m": route.total_surface_distance_m,
+                "elevation_gain_m": route.total_elevation_gain_m,
+                "elevation_loss_m": route.total_elevation_loss_m,
+                "max_slope_deg": route.max_slope_deg,
+                "mean_slope_deg": route.mean_slope_deg,
+            },
+            time_budget=time_budget,
+            energy_budget=energy_budget,
+            resource_budget=resource_budget,
+            return_plan=return_plan,
+            schedule=schedule,
+            constraints=constraints,
+            uncertainty_notes=uncertainties,
+            limitations=limitations,
+            cache_validity=CacheValidityState.CURRENT,
+            provenance_graph=ProvenanceDependencyGraph(
+                output_id=cfg.mission_id or alt_id,
+                classification=ScientificDataClassification.MARSCOPE_DERIVED,
+                input_datasets=[req.dataset_id],
+                input_product_ids=[route.source_product_id],
+                input_variables=["multi_stop_route", "return_route", "eva_constraints"],
+                method="campaign_eva_envelope_v2",
+                algorithm_version="2.0.0-p18",
+                validation_state="analytical_planning_envelope_not_safety_certified",
+            ),
+            created_at_utc=datetime.now(timezone.utc).isoformat(),
+            compute_time_ms=0.0,
+        )
 
     feasible_flag: Optional[bool]
     if env_status == EnvelopeFeasibilityStatus.EXCEEDS_CONFIGURED_CONSTRAINTS or not return_plan.return_route_computed:
@@ -615,6 +657,9 @@ def build_science_campaign_plan(
     routing_service: Any,
     evidence_service: Any,
     recorded_observations: List[Any],
+    eva_operations_service: Optional[Any] = None,
+    morphology_service: Optional[Any] = None,
+    spatial_coverage_service: Optional[Any] = None,
 ) -> ScienceCampaignPlan:
     t0 = time.perf_counter()
 
@@ -648,6 +693,8 @@ def build_science_campaign_plan(
             composition_search_service=composition_search_service,
             composition_index=composition_index,
             recorded_observations=recorded_observations,
+            morphology_service=morphology_service,
+            spatial_coverage_service=spatial_coverage_service,
         )
         by_id = {t.target_id: t for t in eval_batch.targets}
         selected_evals = [by_id[tid] for tid in req.selected_target_ids if tid in by_id]
@@ -688,14 +735,14 @@ def build_science_campaign_plan(
                 "explicit_destination_supplied": False,
             },
             epistemic_classification={
-                "computed": [],
-                "modelled": [],
-                "user_assumed": [
+                ScientificDataClassification.DIRECTLY_MEASURED.value: [],
+                ScientificDataClassification.MARSCOPE_DERIVED.value: [],
+                ScientificDataClassification.MODELLED.value: [],
+                ScientificDataClassification.USER_ASSUMED.value: [
                     f"max_slope_deg={req.constraints.max_slope_deg}",
                 ],
-                "unavailable": ["target_stops", "destination_coordinate"],
-                "unverified": [],
-                "constraint_excluded": [],
+                ScientificDataClassification.UNVERIFIED.value: [],
+                ScientificDataClassification.UNAVAILABLE.value: ["target_stops", "destination_coordinate"],
             },
             request=req,
             requirements_evaluation=req_evals,
@@ -766,6 +813,10 @@ def build_science_campaign_plan(
         req=req,
         routing_service=routing_service,
         evidence_service=evidence_service,
+        eva_operations_service=eva_operations_service,
+        campaign_id=campaign_id,
+        question_id=question.question_id,
+        register_session=True,
     )
 
     alternatives: List[CampaignRouteCandidate] = [primary_cand]
@@ -793,6 +844,10 @@ def build_science_campaign_plan(
                 req=req,
                 routing_service=routing_service,
                 evidence_service=evidence_service,
+                eva_operations_service=eva_operations_service,
+                campaign_id=campaign_id,
+                question_id=question.question_id,
+                register_session=False,
             )
             alternatives.append(alt_c)
 
@@ -839,32 +894,44 @@ def build_science_campaign_plan(
         "payload_mass_kg": req.payload_mass_kg,
         "resources_configured": [r.resource_name for r in req.resources],
         "independent_return_route_computed": bool(return_plan and return_plan.return_route_computed),
+        "constraint_excluded_alternatives": [
+            a.label for a in alternatives if a.feasible_within_constraints is False
+        ],
     }
     unverified_targets = [
         s.name for s in ordered_stops
         if s.evidence_state.value in {"optical_morphology_candidate_unverified", "manual_waypoint_unverified", "conflicting_evidence"}
     ]
+    marscope_derived_items = [
+        "outbound_surface_distance_and_elevation_gain" if primary_route else "route_computation_failed",
+        "independent_reverse_dijkstra_return_path" if (return_plan and return_plan.return_route_computed) else "return_path_unavailable",
+        "corridor_slope_and_tri_roughness",
+    ]
+    modelled_items = [
+        "tobler_grade_duration" if req.use_tobler_grade_approximation else "constant_walking_speed_duration",
+        "mechanical_climb_work_energy_budget" if (eva_env and eva_env.energy_budget.available) else "energy_budget_uncomputed",
+    ]
+    user_assumed_items = [
+        f"max_slope_deg={req.constraints.max_slope_deg}",
+        f"default_stop_dwell_s={req.default_stop_dwell_s}",
+        f"unknown_terrain_policy={req.unknown_terrain_policy}",
+        *( [f"walking_speed_mps={req.walking_speed_mps}"] if req.walking_speed_mps is not None else [] ),
+        *( [f"mission_duration_limit_s={req.mission_duration_limit_s}"] if req.mission_duration_limit_s is not None else [] ),
+        *( [f"return_reserve_fraction={req.return_reserve_fraction}"] if req.return_reserve_fraction is not None else [] ),
+    ]
+    unavail_items = list(dict.fromkeys(missing_list + ["stop_data_volume_mb (no telemetry bitrate configured)"]))
     epistemic_cls = {
-        "computed": [
-            "outbound_surface_distance_and_elevation_gain" if primary_route else "route_computation_failed",
-            "independent_reverse_dijkstra_return_path" if (return_plan and return_plan.return_route_computed) else "return_path_unavailable",
+        ScientificDataClassification.DIRECTLY_MEASURED.value: [
+            s.target_id for s in ordered_stops if s.evidence_state.value == "confirmed_local_observation"
         ],
-        "modelled": [
-            "tobler_grade_duration" if req.use_tobler_grade_approximation else "constant_walking_speed_duration",
-            "mechanical_climb_work_energy_budget" if (eva_env and eva_env.energy_budget.available) else "energy_budget_uncomputed",
-        ],
-        "user_assumed": [
-            f"max_slope_deg={req.constraints.max_slope_deg}",
-            f"default_stop_dwell_s={req.default_stop_dwell_s}",
-            *( [f"walking_speed_mps={req.walking_speed_mps}"] if req.walking_speed_mps is not None else [] ),
-            *( [f"mission_duration_limit_s={req.mission_duration_limit_s}"] if req.mission_duration_limit_s is not None else [] ),
-            *( [f"return_reserve_fraction={req.return_reserve_fraction}"] if req.return_reserve_fraction is not None else [] ),
-        ],
-        "unavailable": list(dict.fromkeys(missing_list + ["stop_data_volume_mb (no telemetry bitrate configured)"])),
-        "unverified": unverified_targets,
-        "constraint_excluded": [
-            a.label for a in alternatives if a.feasible_within_constraints is False
-        ],
+        ScientificDataClassification.ARCHIVE_DERIVED.value: [
+            s.target_id for s in ordered_stops if s.local_observation_count > 0
+        ] if all(hasattr(s, "local_observation_count") for s in ordered_stops) else [],
+        ScientificDataClassification.MARSCOPE_DERIVED.value: marscope_derived_items,
+        ScientificDataClassification.MODELLED.value: modelled_items,
+        ScientificDataClassification.USER_ASSUMED.value: user_assumed_items,
+        ScientificDataClassification.UNAVAILABLE.value: unavail_items,
+        ScientificDataClassification.UNVERIFIED.value: unverified_targets,
     }
 
     uncertainty_and_gaps: List[str] = []
@@ -909,9 +976,39 @@ def build_science_campaign_plan(
         else {}
     )
 
+    lifecycle_state = (
+        IntegratedMissionLifecycleState.MISSION_REVIEW
+        if (eva_env is not None and constraint_complete)
+        else IntegratedMissionLifecycleState.EVA_OPERATIONAL_EVALUATION
+    )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    if eva_env is not None:
+        eva_env.integrated_lifecycle_state = lifecycle_state.value
+        if eva_operations_service is not None:
+            try:
+                sess = eva_operations_service.get_session(eva_env.mission_id)
+                if sess is not None:
+                    sess.integrated_lifecycle_state = lifecycle_state.value
+                    sess.active_envelope.integrated_lifecycle_state = lifecycle_state.value
+                    eva_operations_service._save_session(sess)
+            except Exception:
+                pass
+
     return ScienceCampaignPlan(
         campaign_id=campaign_id,
         campaign_name=req.campaign_name,
+        linked_mission_id=eva_env.mission_id if eva_env else None,
+        plan_version=1,
+        integrated_lifecycle_state=lifecycle_state,
+        operator_approved=False,
+        lifecycle_transitions=[
+            {
+                "timestamp_utc": now_iso,
+                "to_state": lifecycle_state.value,
+                "reason": "Initial integrated science-to-EVA campaign build completed",
+                "operator_approved": False,
+            }
+        ],
         question=question,
         dataset_id=req.dataset_id,
         study_region=question.study_region,

@@ -8,7 +8,13 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 from app.core.security import validate_identifier, verify_operator_auth
 from app.schemas.dataset import Dataset, DatasetLifecycleStatus, DatasetManifest
 from app.schemas.terrain import PlanningSlopeThreshold
-from app.services.container import PROCESSED_DIR, RAW_DIR, acquisition_service, catalog_service
+from app.services.container import (
+    PROCESSED_DIR,
+    RAW_DIR,
+    acquisition_service,
+    catalog_service,
+    science_investigation_service,
+)
 from app.terrain.processor import DEMProcessingService, InsufficientDEMCoverageError
 
 router = APIRouter(prefix="/datasets", tags=["Dataset Catalog & Acquisition"])
@@ -85,6 +91,11 @@ async def download_dataset(dataset_id: str, request: Request) -> DatasetManifest
     try:
         manifest = await acquisition_service.download_product(dataset)
         catalog_service.register_dataset(dataset)
+        science_investigation_service.propagate_external_invalidation(
+            source_type="dataset_downloaded",
+            description=f"Dataset '{dataset_id}' downloaded and integrity-validated; dependent campaigns marked stale for recomputation.",
+            dataset_id=dataset_id,
+        )
         return manifest
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
@@ -222,6 +233,11 @@ async def process_dataset(
             planning_threshold=planning_threshold,
         )
         catalog_service.register_dataset(dataset)
+        science_investigation_service.propagate_external_invalidation(
+            source_type="dataset_processed",
+            description=f"Dataset '{dataset_id}' processed/reprocessed into calibrated terrain derivatives; dependent campaigns marked stale.",
+            dataset_id=dataset_id,
+        )
         return manifest
     except FileNotFoundError as fe:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(fe))

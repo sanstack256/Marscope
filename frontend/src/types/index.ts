@@ -2211,6 +2211,9 @@ export interface EvaMissionEnvelopeResponse {
   limitations: string[];
   cache_validity: string;
   compute_time_ms: number;
+  linked_campaign_id?: string | null;
+  linked_question_id?: string | null;
+  integrated_lifecycle_state?: IntegratedMissionLifecycleState | string | null;
 }
 
 export interface MissionEventRecord {
@@ -2273,6 +2276,9 @@ export interface MissionOperationalSession {
   events: MissionEventRecord[];
   plan_history: MissionVersionHistoryEntry[];
   pending_comparison?: PlanComparisonReport | null;
+  linked_campaign_id?: string | null;
+  linked_question_id?: string | null;
+  integrated_lifecycle_state?: IntegratedMissionLifecycleState | string | null;
 }
 
 export interface MissionSensitivityScenarioOutcome {
@@ -2881,6 +2887,112 @@ export interface CandidateTargetEvaluation {
   eligibility_for_sampling: string;
   prohibited_inference_flags: string[];
   evidence_ids: string[];
+  spatial_registration_detail?: Record<string, unknown> | null;
+  terrain_elevation_m?: number | null;
+  terrain_slope_deg?: number | null;
+  terrain_roughness_tri_m?: number | null;
+  terrain_data_classification?: string | null;
+  spatial_coverage_category?: string | null;
+  morphology_candidate_ids?: string[];
+  morphology_review_status?: string | null;
+}
+
+export type IntegratedMissionLifecycleState =
+  | "SCIENTIFIC_QUESTION"
+  | "MEASUREMENT_REQUIREMENTS"
+  | "EVIDENCE_DISCOVERY"
+  | "EVIDENCE_ASSESSMENT"
+  | "TARGET_EVALUATION"
+  | "CAMPAIGN_DESIGN"
+  | "OBSERVATION_PLAN"
+  | "SPATIAL_ASSESSMENT"
+  | "MOBILITY_ASSESSMENT"
+  | "EVA_OPERATIONAL_EVALUATION"
+  | "MISSION_REVIEW"
+  | "OPERATOR_APPROVAL"
+  | "EXECUTION_NOT_STARTED"
+  | "FIELD_OBSERVATION"
+  | "EVIDENCE_UPDATE"
+  | "HYPOTHESIS_REASSESSMENT"
+  | "CAMPAIGN_FRESHNESS_CHECK"
+  | "REPLAN_IF_REQUIRED";
+
+export type ObservationLifecycleState =
+  | "CAPABILITY_DOCUMENTED"
+  | "PRODUCT_AVAILABLE"
+  | "SPATIALLY_CO_REGISTERED"
+  | "OBSERVATION_PLANNED"
+  | "OBSERVATION_RECORDED"
+  | "EVIDENCE_VALIDATED"
+  | "ARCHIVE_COMPARED"
+  | "MEASUREMENT_NOT_SUPPORTED";
+
+export interface LifecycleTransitionRecord {
+  transition_id: string;
+  from_state?: string | null;
+  to_state: string;
+  trigger: string;
+  actor: string;
+  timestamp_utc: string;
+  detail: string;
+  linked_event_id?: string | null;
+  plan_version?: number | null;
+}
+
+export interface HypothesisReassessmentRecord {
+  reassessment_id: string;
+  observation_id: string;
+  comparison_id: string;
+  target_id?: string | null;
+  outcome: string;
+  previous_target_state?: string | null;
+  updated_target_state?: string | null;
+  hypothesis_impact: string;
+  triggers_replan: boolean;
+  recorded_at_utc: string;
+}
+
+export interface LinkedInvalidationEvent {
+  invalidation_id: string;
+  source_subsystem: string;
+  event_type: string;
+  severity: string;
+  detail: string;
+  affected_ids: string[];
+  recorded_at_utc: string;
+  acknowledged: boolean;
+}
+
+export interface MissionLifecycleSummaryResponse {
+  campaign_id: string;
+  campaign_name: string;
+  question_id: string;
+  dataset_id: string;
+  linked_mission_id?: string | null;
+  plan_version: number;
+  integrated_lifecycle_state: IntegratedMissionLifecycleState | string;
+  operator_approved: boolean;
+  operator_approved_by?: string | null;
+  freshness: CampaignFreshnessReport;
+  eva_session?: {
+    mission_id: string;
+    workflow_state: string;
+    active_plan_version: number;
+    stale: boolean;
+    stale_reasons: string[];
+    events_count: number;
+    pending_replan: boolean;
+  } | null;
+  stop_observation_states: Array<{
+    stop_id: string;
+    target_id: string;
+    observation_lifecycle_state: string;
+    platform_compatibility: string;
+    platform_mismatch_disclosed: boolean;
+  }>;
+  hypothesis_reassessments: HypothesisReassessmentRecord[];
+  lifecycle_transitions: LifecycleTransitionRecord[];
+  linked_invalidation_events: LinkedInvalidationEvent[];
 }
 
 export interface TargetEvaluationBatchResponse {
@@ -2903,6 +3015,10 @@ export interface ObservationActionPlan {
   expected_dwell_s: number;
   estimated_data_volume_mb: number | null;
   data_volume_status?: string;
+  observation_lifecycle_state?: ObservationLifecycleState | string;
+  platform_compatibility?: string;
+  platform_mismatch_disclosed?: boolean;
+  platform_disclosure_note?: string;
   explicit_uncertainty_notes: string[];
   prohibited_shortcut_notes: string[];
 }
@@ -2981,6 +3097,11 @@ export interface CampaignBuildRequest {
   resources?: EvaExplicitResourceSpec[];
   include_alternatives?: boolean;
   optimize_stop_order?: boolean;
+  locomotion_category?: string;
+  unknown_terrain_policy?: string;
+  operator_unknown_override_reason?: string | null;
+  confirm_default_policies?: boolean;
+  expected_plan_version?: number | null;
 }
 
 export interface CampaignSummary {
@@ -2988,6 +3109,10 @@ export interface CampaignSummary {
   campaign_name: string;
   question_id: string;
   dataset_id: string;
+  linked_mission_id?: string | null;
+  plan_version?: number;
+  integrated_lifecycle_state?: IntegratedMissionLifecycleState | string;
+  operator_approved?: boolean;
   plan_status: CampaignPlanStatus;
   feasibility_state?: string;
   freshness_state: CampaignFreshnessState;
@@ -3042,6 +3167,16 @@ export interface ScienceCampaignPlan {
   decision_justification: string[];
   provenance_graph: ProvenanceDependencyGraph;
   data_classification: ScientificDataClassification;
+  linked_mission_id?: string | null;
+  plan_version?: number;
+  integrated_lifecycle_state?: IntegratedMissionLifecycleState | string;
+  operator_approved?: boolean;
+  operator_approved_by?: string | null;
+  operator_approved_at_utc?: string | null;
+  operator_approval_note?: string | null;
+  hypothesis_reassessments?: HypothesisReassessmentRecord[];
+  lifecycle_transitions?: LifecycleTransitionRecord[];
+  linked_invalidation_events?: LinkedInvalidationEvent[];
   created_at_utc: string;
   compute_time_ms: number;
 }
@@ -3057,6 +3192,12 @@ export interface RecordObservationRequest {
   units?: string;
   latitude: number;
   longitude_east: number;
+  coordinate_reference?: string;
+  observer_identity?: string;
+  calibration_metadata?: string | null;
+  raw_attachment_ref?: string | null;
+  client_submission_id?: string | null;
+  expected_plan_version?: number | null;
   sol_or_timestamp?: string | null;
   notes?: string | null;
   measurement_scale_m?: number | null;
@@ -3075,6 +3216,14 @@ export interface RecordedFieldObservation {
   units: string;
   latitude: number;
   longitude_east: number;
+  coordinate_reference?: string;
+  observer_identity?: string;
+  calibration_metadata?: string | null;
+  raw_attachment_ref?: string | null;
+  client_submission_id?: string | null;
+  validation_state?: string;
+  lifecycle_state?: ObservationLifecycleState | string;
+  reassessment_impact?: string | null;
   sol_or_timestamp?: string | null;
   notes?: string | null;
   measurement_scale_m?: number | null;

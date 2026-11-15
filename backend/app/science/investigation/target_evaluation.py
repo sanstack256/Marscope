@@ -135,6 +135,50 @@ def _compute_heuristic_priority(
     return score, breakdown
 
 
+def _sample_dem_terrain_at_point(
+    ref_dtm: Any,
+    ds_root: Any,
+    latitude: float,
+    longitude_east: float,
+) -> Dict[str, Any]:
+    """Sample real local DEM elevation, slope, and TRI roughness around target without nodata interpolation."""
+    try:
+        from pathlib import Path as _P
+        from app.terrain.spatial_terrain import compute_terrain_derivatives_window
+
+        raw_dir = _P(ds_root) / "raw"
+        half_deg = 0.0005  # ~30m window around target
+        rep = compute_terrain_derivatives_window(
+            ref_dtm,
+            raw_dir=raw_dir,
+            min_lat=latitude - half_deg,
+            max_lat=latitude + half_deg,
+            min_lon=(longitude_east % 360.0) - half_deg,
+            max_lon=(longitude_east % 360.0) + half_deg,
+        )
+        elev_d = rep.derivatives.get("elevation")
+        slope_d = rep.derivatives.get("slope")
+        tri_d = rep.derivatives.get("tri")
+        elev = elev_d.stats.get("mean") if (elev_d and elev_d.available and elev_d.stats) else None
+        slope = slope_d.stats.get("mean") if (slope_d and slope_d.available and slope_d.stats) else None
+        tri = tri_d.stats.get("mean") if (tri_d and tri_d.available and tri_d.stats) else None
+        return {
+            "dem_dataset_id": ref_dtm.id,
+            "elevation_m": round(float(elev), 2) if elev is not None else None,
+            "slope_deg": round(float(slope), 2) if slope is not None else None,
+            "roughness_tri_m": round(float(tri), 3) if tri is not None else None,
+            "classification": "MARSCOPE_DERIVED" if elev is not None else "UNAVAILABLE",
+        }
+    except Exception:
+        return {
+            "dem_dataset_id": getattr(ref_dtm, "id", None),
+            "elevation_m": None,
+            "slope_deg": None,
+            "roughness_tri_m": None,
+            "classification": "UNAVAILABLE",
+        }
+
+
 def _evaluate_single_location(
     *,
     target_id: str,
@@ -155,6 +199,9 @@ def _evaluate_single_location(
     astronaut_lat: Optional[float],
     astronaut_lon: Optional[float],
     search_radius_m: float,
+    pair_reg_cache: Optional[Dict[str, Any]] = None,
+    morph_reviews: Optional[Dict[str, Any]] = None,
+    spatial_coverage_service: Optional[Any] = None,
 ) -> CandidateTargetEvaluation:
     is_gale_q = "gale" in question.study_region.lower() or "sharp" in question.study_region.lower()
     known_facts: List[str] = []
@@ -236,13 +283,34 @@ def _evaluate_single_location(
                     f"Regional context frame from '{ds.id}' (~{ds.horizontal_resolution_meters or 'regional'} m/px scale; not valid for local hazard or mineral confirmation)."
                 )
 
-    # Spatial registration assessment against primary HiRISE DTM or Gale reference IAU2000 frame
+    # Spatial registration assessment against primary HiRISE DTM using Prompt 19 pair registration when paired optical exists
+    reg_detail: Optional[Dict[str, Any]] = None
+    terrain_sample: Dict[str, Any] = {
+        "elevation_m": None,
+        "slope_deg": None,
+        "roughness_tri_m": None,
+        "classification": "UNAVAILABLE",
+    }
+    coverage_cat: Optional[str] = None
+    morph_cids: List[str] = []
+    morph_status: Optional[str] = None
+
     if not crs_valid:
         reg_state = SpatialRegistrationState.INCOMPATIBLE_REFERENCE_SYSTEM
         eligibility_states.append(EvidenceEligibilityState.SPATIALLY_UNVERIFIED)
         uncertainty_notes.append(f"Target CRS '{crs}' is incompatible with Mars IAU2000 reference datum.")
     elif covering_dtms:
         ref_dtm = covering_dtms[0]
+        from pathlib import Path as _P
+        ds_root = (
+            _P(catalog_service.catalog_storage_dir).parent
+            if getattr(catalog_service, "catalog_storage_dir", None)
+            else _P(__file__).resolve().parents[4] / "datasets"
+        )
+        ortho_pair = next(
+            (d for d in datasets if d.id in covering_ds and d.id != ref_dtm.id and "ortho" in d.id.lower()),
+            None,
+        )
         reg_rep = evaluate_spatial_registration(
             product_a_id=target_id,
             product_b_id=ref_dtm.id,
@@ -258,17 +326,70 @@ def _evaluate_single_location(
             resolution_a_m=ref_dtm.horizontal_resolution_meters,
             resolution_b_m=ref_dtm.horizontal_resolution_meters,
         )
+        if ortho_pair is not None:
+            pair_key = f"{ref_dtm.id}|{ortho_pair.id}"
+            pair_assess = pair_reg_cache.get(pair_key) if pair_reg_cache is not None else None
+            if pair_assess is None:
+                try:
+                    from app.geospatial.registration import evaluate_product_pair_registration
+
+                    pair_assess = evaluate_product_pair_registration(
+                        ref_dtm,
+                        ortho_pair,
+                        dataset_root_dir=ds_root,
+                        intended_analysis="target_science_co_registration",
+                        attempt_image_matching=False,
+                    )
+                    if pair_reg_cache is not None:
+                        pair_reg_cache[pair_key] = pair_assess
+                except Exception:
+                    pair_assess = None
+            if pair_assess is not None:
+                reg_detail = {
+                    "reference_dtm_id": ref_dtm.id,
+                    "companion_ortho_id": ortho_pair.id,
+                    "pair_registration_state": pair_assess.overall_state.value,
+                    "datum_compatible": (
+                        pair_assess.vertical_datum_comparison.compatible
+                        if pair_assess.vertical_datum_comparison is not None
+                        else None
+                    ),
+                    "crs_compatible": pair_assess.crs_compatible,
+                    "pixel_scale_ratio": pair_assess.pixel_alignment.resolution_ratio,
+                    "relative_alignment_uncertainty_m": (
+                        pair_assess.uncertainty_breakdown.relative_alignment_uncertainty_m
+                    ),
+                    "relative_registration_accuracy": pair_assess.relative_registration_accuracy,
+                }
         try:
             reg_state = SpatialRegistrationState(reg_rep["registration_state"])
         except Exception:
             reg_state = SpatialRegistrationState.REGISTERED_WITH_LIMITATIONS
         uncertainty_notes.append(reg_rep["registration_error_status"])
+        terrain_sample = _sample_dem_terrain_at_point(ref_dtm, ds_root, latitude, longitude_east)
+        if terrain_sample.get("elevation_m") is None:
+            coverage_cat = "UNOBSERVED"
+            uncertainty_notes.append(
+                f"Target coordinate falls in DEM nodata inside '{ref_dtm.id}' swath; terrain metrics UNAVAILABLE."
+            )
+        else:
+            coverage_cat = "MULTI_SENSOR_CO_REGISTERED" if ortho_pair is not None else "DEM_ONLY"
     elif _is_gale_coordinate(latitude, longitude_east):
         reg_state = SpatialRegistrationState.INSUFFICIENT_METADATA
+        coverage_cat = "REGIONAL_LOW_RESOLUTION_ONLY" if covering_ds else "UNOBSERVED"
         uncertainty_notes.append("Target lies inside Gale Crater bounds without a covering verified <=2 m local DTM.")
     else:
         reg_state = SpatialRegistrationState.NOT_REGISTERED
+        coverage_cat = "UNOBSERVED"
         uncertainty_notes.append("No verified local Mars raster covers this coordinate.")
+
+    if morph_reviews:
+        for cid, rec in morph_reviews.items():
+            # Include any operator morphology review linked to the same study dataset/target context
+            c_status = getattr(getattr(rec, "review_status", None), "value", str(getattr(rec, "review_status", "")))
+            if cid:
+                morph_cids.append(cid)
+                morph_status = c_status or morph_status
 
     # Query nearby verified composition index evidence within search_radius_m
     nearby_ev: List[Any] = []
@@ -559,6 +680,14 @@ def _evaluate_single_location(
         scientific_confidence_score=None,
         evidence_eligibility_states=list(dict.fromkeys(eligibility_states)),
         spatial_registration_state=reg_state,
+        spatial_registration_detail=reg_detail,
+        terrain_elevation_m=terrain_sample.get("elevation_m"),
+        terrain_slope_deg=terrain_sample.get("slope_deg"),
+        terrain_roughness_tri_m=terrain_sample.get("roughness_tri_m"),
+        terrain_data_classification=terrain_sample.get("classification"),
+        spatial_coverage_category=coverage_cat,
+        morphology_candidate_ids=morph_cids[:5],
+        morphology_review_status=morph_status,
         uncertainty_notes=list(dict.fromkeys(uncertainty_notes + unknowns_gaps[:2])),
         eligibility_decision=elig_decision,
         eligibility_decision_rationale=elig_rationale,
@@ -579,9 +708,18 @@ def evaluate_targets_for_question(
     composition_search_service: Any,
     composition_index: Any,
     recorded_observations: List[Any],
+    morphology_service: Optional[Any] = None,
+    spatial_coverage_service: Optional[Any] = None,
 ) -> TargetEvaluationBatchResponse:
     evaluated_map: Dict[str, CandidateTargetEvaluation] = {}
     rejected_map: Dict[str, CandidateTargetEvaluation] = {}
+    pair_reg_cache: Dict[str, Any] = {}
+    morph_reviews: Optional[Dict[str, Any]] = None
+    if morphology_service is not None and getattr(morphology_service, "review_store", None) is not None:
+        try:
+            morph_reviews = morphology_service.review_store.load_all()
+        except Exception:
+            morph_reviews = None
 
     registry_targets: List[ScienceTarget] = []
     if req.target_ids:
@@ -612,6 +750,9 @@ def evaluate_targets_for_question(
             astronaut_lat=req.astronaut_latitude,
             astronaut_lon=req.astronaut_longitude,
             search_radius_m=req.search_radius_m,
+            pair_reg_cache=pair_reg_cache,
+            morph_reviews=morph_reviews,
+            spatial_coverage_service=spatial_coverage_service,
         )
         if ev.eligibility_decision == "REJECTED_FOR_CAMPAIGN" and not (req.target_ids and ev.target_id in req.target_ids):
             rejected_map[ev.target_id] = ev
@@ -677,6 +818,9 @@ def evaluate_targets_for_question(
                     astronaut_lat=req.astronaut_latitude,
                     astronaut_lon=req.astronaut_longitude,
                     search_radius_m=req.search_radius_m,
+                    pair_reg_cache=pair_reg_cache,
+                    morph_reviews=morph_reviews,
+                    spatial_coverage_service=spatial_coverage_service,
                 )
                 if ev.eligibility_decision == "REJECTED_FOR_CAMPAIGN" and not (target_id_set and tid in target_id_set):
                     rejected_map[tid] = ev

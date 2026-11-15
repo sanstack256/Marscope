@@ -391,6 +391,8 @@ class MissionConfigRequest(BaseModel):
     payload_mass_kg: Optional[float] = Field(default=None, ge=0.0, le=500.0)
     resources: List[ExplicitResourceSpec] = Field(default_factory=list)
     compute_reverse_return_route: bool = True
+    linked_campaign_id: Optional[str] = None
+    linked_question_id: Optional[str] = None
 
 
 class EvaMissionEnvelopeResponse(BaseModel):
@@ -402,6 +404,9 @@ class EvaMissionEnvelopeResponse(BaseModel):
     route_id: str
     assessment_id: str
     dossier_id: Optional[str] = None
+    linked_campaign_id: Optional[str] = None
+    linked_question_id: Optional[str] = None
+    integrated_lifecycle_state: Optional[str] = None
     envelope_status: EnvelopeFeasibilityStatus
     model_feasibility_status: EnvelopeFeasibilityStatus = EnvelopeFeasibilityStatus.INCOMPLETE_CONSTRAINT_EVALUATION
     workflow_state: str = "CONFIGURED"

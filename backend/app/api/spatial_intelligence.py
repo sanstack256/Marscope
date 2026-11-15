@@ -487,7 +487,7 @@ async def submit_morphology_review(req: MorphologyReviewSubmitRequest, request: 
     if not catalog_service.get_dataset(did):
         raise HTTPException(status_code=404, detail=f"Dataset '{did}' not found.")
     try:
-        return morphology_service.submit_human_review(
+        rec = morphology_service.submit_human_review(
             candidate_id=cid,
             dataset_id=did,
             action=req.action,
@@ -499,6 +499,17 @@ async def submit_morphology_review(req: MorphologyReviewSubmitRequest, request: 
             attached_source_reference=req.attached_source_reference,
             recorded_uncertainty_m=req.recorded_uncertainty_m,
         )
+        try:
+            from app.services.container import science_investigation_service
+
+            science_investigation_service.propagate_external_invalidation(
+                source_type="morphology_human_review",
+                description=f"Morphology review '{req.action.value}' submitted for candidate '{cid}' on dataset '{did}'",
+                dataset_id=did,
+            )
+        except Exception:
+            pass
+        return rec
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

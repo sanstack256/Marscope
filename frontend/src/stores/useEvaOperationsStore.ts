@@ -64,6 +64,8 @@ interface EvaOperationsState {
 
   setSelectedTimelineStep: (index: number | null, segmentId?: string | null) => void;
   setSelectedReturnAlternativeId: (alternativeId: string | null) => void;
+  syncFromCampaignEnvelope: (envelope: EvaMissionEnvelopeResponse | null | undefined) => void;
+  loadLinkedMission: (missionId: string) => Promise<MissionOperationalSession | null>;
   fetchReturnAnalysis: (missionId: string) => Promise<void>;
   fetchSession: (missionId: string) => Promise<void>;
   fetchSensitivity: (missionId: string) => Promise<void>;
@@ -108,6 +110,52 @@ export const useEvaOperationsStore = create<EvaOperationsState>((set, get) => ({
   },
 
   setSelectedReturnAlternativeId: (alternativeId) => set({ selectedReturnAlternativeId: alternativeId }),
+
+  syncFromCampaignEnvelope: (envelope) => {
+    if (!envelope) return;
+    set({
+      evaEnvelope: envelope,
+      environmentalContext: envelope.environmental_context ?? null,
+      telemetryStatus: envelope.telemetry_state ?? null,
+      selectedTimelineIndex: 0,
+      selectedReturnAlternativeId: null,
+      error: null,
+    });
+    if (envelope.mission_id) {
+      void get().fetchSession(envelope.mission_id);
+      void get().fetchSensitivity(envelope.mission_id);
+    }
+  },
+
+  loadLinkedMission: async (missionId) => {
+    set({ loadingEva: true, error: null });
+    try {
+      const res = await fetch(
+        `${API_BASE_URL}/eva-operations/mission/${encodeURIComponent(missionId)}/session`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      const session: MissionOperationalSession = await res.json();
+      set({
+        missionSession: session,
+        evaEnvelope: session.active_envelope,
+        pendingComparison: session.pending_comparison ?? null,
+        environmentalContext: session.active_envelope?.environmental_context ?? null,
+        telemetryStatus: session.active_envelope?.telemetry_state ?? null,
+        loadingEva: false,
+      });
+      void get().fetchSensitivity(missionId);
+      void get().fetchReturnAnalysis(missionId);
+      return session;
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Failed to load linked mission session";
+      set({ error: msg, loadingEva: false });
+      return null;
+    }
+  },
 
   fetchReturnAnalysis: async (missionId) => {
     try {

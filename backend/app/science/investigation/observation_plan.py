@@ -9,13 +9,55 @@ from __future__ import annotations
 from typing import List
 
 from app.schemas.target import InvestigationTargetEvidenceState
+from app.science.investigation.measurement_registry import get_instrument
 from app.science.investigation.schemas import (
     CandidateTargetEvaluation,
+    InstrumentPlatformKind,
     ObservationActionPlan,
+    ObservationLifecycleState,
     RequirementEvaluationRecord,
     RequirementFulfillmentState,
     ScienceQuestionDefinition,
+    SpatialRegistrationState,
 )
+
+
+def _assess_platform_compatibility(instruments: List[str]) -> tuple[str, bool, str]:
+    rover_insts = []
+    orbital_insts = []
+    eva_insts = []
+    for iid in instruments:
+        rec = get_instrument(iid)
+        if rec is None:
+            continue
+        if rec.platform_kind == InstrumentPlatformKind.SURFACE_IN_SITU:
+            host_u = (rec.mission_host or "").upper()
+            if any(tok in host_u for tok in ("MSL", "CURIOSITY", "PERSEVERANCE", "M2020", "ROVER")):
+                rover_insts.append(f"{rec.instrument_id} ({rec.mission_host})")
+            else:
+                eva_insts.append(rec.instrument_id)
+        elif rec.platform_kind == InstrumentPlatformKind.ORBITAL:
+            orbital_insts.append(f"{rec.instrument_id} ({rec.mission_host})")
+        else:
+            eva_insts.append(rec.instrument_id)
+
+    if rover_insts and not eva_insts:
+        return (
+            "rover_surface_payload_not_human_eva_handheld",
+            True,
+            (
+                f"Platform compatibility disclosure: {', '.join(rover_insts)} are MSL rover-mounted payloads, "
+                "NOT astronaut EVA handheld tools. Action plan requires rover-proximal measurements or a validated "
+                "crew-operated portable equivalent rather than assuming astronauts carry rover instrumentation."
+            ),
+        )
+    if orbital_insts and not eva_insts and not rover_insts:
+        return (
+            "orbital_asset_only",
+            True,
+            f"Platform compatibility disclosure: {', '.join(orbital_insts)} are orbital remote-sensing assets only.",
+        )
+    return ("human_eva_and_multi_asset_compatible", False, "Compatible with configured campaign platform rules.")
 
 
 def build_observation_action_plan(
@@ -94,11 +136,39 @@ def build_observation_action_plan(
         )
 
     dedup_insts = list(dict.fromkeys(recommended))
+    plat_compat, plat_mismatch, plat_note = _assess_platform_compatibility(dedup_insts)
+    if plat_mismatch:
+        uncertainty_notes.append(plat_note)
+
+    if (target.eligibility_decision or "").upper().startswith("REJECTED") or (
+        target.eligibility_decision or ""
+    ).upper() == "INELIGIBLE":
+        obs_state = ObservationLifecycleState.MEASUREMENT_NOT_SUPPORTED
+    elif (
+        target.spatial_registration_state
+        in {
+            SpatialRegistrationState.REGISTERED_VALIDATED,
+            SpatialRegistrationState.REGISTERED_WITH_LIMITATIONS,
+            SpatialRegistrationState.PARTIALLY_OVERLAPPING,
+            SpatialRegistrationState.REGISTRATION_UNVERIFIED,
+        }
+        and target.covering_datasets
+        and dedup_insts
+    ):
+        obs_state = ObservationLifecycleState.OBSERVATION_PLANNED
+    elif dedup_insts:
+        obs_state = ObservationLifecycleState.CAPABILITY_DOCUMENTED
+    else:
+        obs_state = ObservationLifecycleState.MEASUREMENT_NOT_SUPPORTED
 
     return ObservationActionPlan(
         stop_id=stop_id,
         target_id=target.target_id,
         target_name=target.name,
+        observation_lifecycle_state=obs_state,
+        platform_compatibility=plat_compat,
+        platform_mismatch_disclosed=plat_mismatch,
+        platform_disclosure_note=plat_note,
         recommended_instruments=dedup_insts,
         measurements_to_collect=list(dict.fromkeys(measurements)),
         context_imaging_checks=context_checks,

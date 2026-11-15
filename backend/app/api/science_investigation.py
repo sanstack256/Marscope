@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
-from app.core.security import validate_identifier
+from fastapi import APIRouter, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field
+from app.core.security import validate_identifier, verify_operator_auth
 
 from app.science.investigation.schemas import (
     CampaignBuildRequest,
@@ -140,6 +141,10 @@ async def build_science_campaign(req: CampaignBuildRequest) -> ScienceCampaignPl
         return science_investigation_service.build_campaign(req)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 # 11
@@ -151,7 +156,11 @@ async def list_science_campaigns() -> List[CampaignSummary]:
 # 12
 @router.get("/campaigns/{campaign_id}", response_model=ScienceCampaignPlan)
 async def get_science_campaign(campaign_id: str) -> ScienceCampaignPlan:
-    plan = science_investigation_service.get_campaign(campaign_id)
+    validate_identifier(campaign_id, field_name="campaign_id")
+    try:
+        plan = science_investigation_service.get_campaign(campaign_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     if plan is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -163,19 +172,32 @@ async def get_science_campaign(campaign_id: str) -> ScienceCampaignPlan:
 # 13
 @router.get("/campaigns/{campaign_id}/freshness", response_model=CampaignFreshnessReport)
 async def check_science_campaign_freshness(campaign_id: str) -> CampaignFreshnessReport:
+    validate_identifier(campaign_id, field_name="campaign_id")
     try:
         return science_investigation_service.check_campaign_freshness(campaign_id)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 # 14
 @router.post("/campaigns/{campaign_id}/recompute", response_model=ScienceCampaignPlan)
-async def recompute_science_campaign(campaign_id: str) -> ScienceCampaignPlan:
+async def recompute_science_campaign(
+    campaign_id: str,
+    expected_plan_version: Optional[int] = Query(default=None, ge=1),
+) -> ScienceCampaignPlan:
+    validate_identifier(campaign_id, field_name="campaign_id")
     try:
-        return science_investigation_service.recompute_campaign(campaign_id)
+        return science_investigation_service.recompute_campaign(
+            campaign_id, expected_plan_version=expected_plan_version
+        )
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 # 15
@@ -183,7 +205,14 @@ async def recompute_science_campaign(campaign_id: str) -> ScienceCampaignPlan:
 async def record_field_observation(
     req: RecordObservationRequest,
 ) -> RecordedFieldObservation:
-    return science_investigation_service.record_observation(req)
+    try:
+        return science_investigation_service.record_observation(req)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 # 16
@@ -269,3 +298,88 @@ async def export_science_campaign_dossier(campaign_id: str) -> Dict[str, Any]:
         return science_investigation_service.export_campaign_dossier(campaign_id)
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+class CampaignApprovalRequest(BaseModel):
+    operator_id: str = Field(default="operator", min_length=1, max_length=80)
+    note: str = Field(default="", max_length=300)
+    expected_plan_version: Optional[int] = Field(default=None, ge=1)
+
+
+class OrchestrationInvalidationRequest(BaseModel):
+    source_type: str = Field(..., min_length=2, max_length=80)
+    description: str = Field(..., min_length=3, max_length=300)
+    dataset_id: Optional[str] = None
+    question_id: Optional[str] = None
+
+
+# 23
+@router.post("/campaigns/{campaign_id}/approve", response_model=ScienceCampaignPlan)
+async def approve_science_campaign(
+    campaign_id: str,
+    req: CampaignApprovalRequest,
+) -> ScienceCampaignPlan:
+    """Explicitly approve a fresh, reviewed science-to-EVA mission baseline (never auto-approved)."""
+    validate_identifier(campaign_id, field_name="campaign_id")
+    try:
+        return science_investigation_service.approve_campaign(
+            campaign_id,
+            operator_id=req.operator_id,
+            note=req.note,
+            expected_plan_version=req.expected_plan_version,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
+# 24
+@router.get("/campaigns/{campaign_id}/lifecycle")
+async def get_campaign_lifecycle(campaign_id: str) -> Dict[str, Any]:
+    """Return synchronized 18-state end-to-end lifecycle, linked EVA session, and stop observation states."""
+    validate_identifier(campaign_id, field_name="campaign_id")
+    try:
+        return science_investigation_service.get_mission_lifecycle_summary(campaign_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+# 25
+@router.get("/campaigns/{campaign_id}/unified-dossier")
+async def export_unified_mission_dossier(campaign_id: str) -> Dict[str, Any]:
+    """Return full 28-item SHA-256 checksummed unified science + spatial + EVA dossier."""
+    validate_identifier(campaign_id, field_name="campaign_id")
+    try:
+        return science_investigation_service.export_campaign_dossier(campaign_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+# 26
+@router.post("/orchestration/invalidate")
+async def trigger_orchestration_invalidation(
+    req: OrchestrationInvalidationRequest,
+    request: Request,
+) -> Dict[str, Any]:
+    """Operator-gated invalidation propagation across affected science campaigns and linked EVA sessions."""
+    verify_operator_auth(
+        request,
+        fail_closed_when_unconfigured=True,
+        operation_name="orchestration upstream invalidation",
+    )
+    did = validate_identifier(req.dataset_id, field_name="dataset_id") if req.dataset_id else None
+    qid = validate_identifier(req.question_id, field_name="question_id") if req.question_id else None
+    affected = science_investigation_service.propagate_external_invalidation(
+        source_type=req.source_type,
+        description=req.description,
+        dataset_id=did,
+        question_id=qid,
+    )
+    return {
+        "propagated": True,
+        "affected_campaign_ids": affected,
+        "count": len(affected),
+    }

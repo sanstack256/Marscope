@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
@@ -78,6 +79,7 @@ export default function ScienceCampaignPage() {
     selectedStopTargetIds,
     campaigns,
     activeCampaign,
+    activeLifecycle,
     freshnessReport,
     observations,
     activeComparison,
@@ -86,6 +88,7 @@ export default function ScienceCampaignPage() {
     loadingDiscovery,
     loadingTargets,
     loadingCampaign,
+    loadingApprove,
     loadingFreshness,
     loadingObservations,
     loadingComparison,
@@ -109,7 +112,9 @@ export default function ScienceCampaignPage() {
     loadCampaign,
     checkFreshness,
     recomputeCampaign,
+    approveCampaign,
     exportCampaignDossier,
+    exportUnifiedDossier,
     recordObservation,
     fetchObservations,
     compareObservation,
@@ -288,6 +293,18 @@ export default function ScienceCampaignPage() {
     const a = document.createElement("a");
     a.href = url;
     a.download = `${campId}-dossier-p18.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportUnifiedDossier = async (campId: string) => {
+    const dossier = await exportUnifiedDossier(campId);
+    if (!dossier || typeof window === "undefined") return;
+    const blob = new Blob([JSON.stringify(dossier, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${campId}-unified-dossier-p21.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -1127,6 +1144,21 @@ export default function ScienceCampaignPage() {
                           Reg: {tgt.spatial_registration_state}
                         </span>
                       )}
+                      {tgt.spatial_coverage_category && (
+                        <span className="px-1.5 py-0.5 rounded bg-indigo-950/50 border border-indigo-500/30 text-indigo-200">
+                          Cov: {tgt.spatial_coverage_category}
+                        </span>
+                      )}
+                      {tgt.terrain_slope_deg != null && (
+                        <span className="px-1.5 py-0.5 rounded bg-slate-900 text-cyan-200">
+                          Elev: {tgt.terrain_elevation_m != null ? `${tgt.terrain_elevation_m.toFixed(1)}m` : "—"} · Slope: {tgt.terrain_slope_deg.toFixed(1)}°
+                        </span>
+                      )}
+                      {tgt.morphology_review_status && (
+                        <span className="px-1.5 py-0.5 rounded bg-slate-900 text-amber-200">
+                          Morph: {tgt.morphology_review_status}
+                        </span>
+                      )}
                     </div>
 
                     {tgt.known_facts[0] && (
@@ -1348,7 +1380,39 @@ export default function ScienceCampaignPage() {
             {/* Campaign Status & Freshness Bar */}
             <div className="rounded-lg border border-[#1e2638] bg-[#0d111a] p-3 flex flex-wrap items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="font-mono font-bold text-white">{activeCampaign.campaign_id}</span>
+                <span className="font-mono font-bold text-white">
+                  {activeCampaign.campaign_id} · v{activeCampaign.plan_version ?? 1}
+                </span>
+                <span className="px-2 py-0.5 rounded border border-cyan-500/40 bg-cyan-500/15 font-mono text-[10px] uppercase text-cyan-200">
+                  {activeLifecycle?.integrated_lifecycle_state ??
+                    activeCampaign.integrated_lifecycle_state ??
+                    "EVA_OPERATIONAL_EVALUATION"}
+                </span>
+                {activeCampaign.linked_mission_id && (
+                  <Link
+                    href={`/mission-readiness?missionId=${encodeURIComponent(
+                      activeCampaign.linked_mission_id
+                    )}&campaignId=${encodeURIComponent(activeCampaign.campaign_id)}`}
+                    className="px-2 py-0.5 rounded border border-indigo-500/40 bg-indigo-500/15 hover:bg-indigo-500/25 font-mono text-[10px] text-indigo-200"
+                  >
+                    Linked EVA: {activeCampaign.linked_mission_id} →
+                  </Link>
+                )}
+                {activeCampaign.operator_approved ? (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-emerald-500/40 bg-emerald-500/15 font-mono text-[10px] text-emerald-200">
+                    <CheckCircle2 className="w-3 h-3" />
+                    APPROVED ({activeCampaign.operator_approved_by ?? "operator"})
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => void approveCampaign(activeCampaign.campaign_id)}
+                    disabled={loadingApprove}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-emerald-500/40 bg-emerald-500/20 hover:bg-emerald-500/30 font-mono text-[10px] text-emerald-200 disabled:opacity-50"
+                  >
+                    <CheckCircle2 className="w-3 h-3" />
+                    {loadingApprove ? "Approving..." : "Operator Approve"}
+                  </button>
+                )}
                 <span
                   className={`px-2 py-0.5 rounded border font-mono text-[10px] uppercase ${stateBadgeClass(
                     activeCampaign.plan_status
@@ -1406,6 +1470,12 @@ export default function ScienceCampaignPage() {
                 >
                   Export Dossier (JSON)
                 </button>
+                <button
+                  onClick={() => void handleExportUnifiedDossier(activeCampaign.campaign_id)}
+                  className="px-2.5 py-1 rounded border border-indigo-500/40 bg-indigo-500/15 text-xs font-mono text-indigo-200"
+                >
+                  Unified Dossier (P21)
+                </button>
               </div>
             </div>
 
@@ -1419,6 +1489,36 @@ export default function ScienceCampaignPage() {
               <div className="rounded-lg border border-amber-500/40 bg-amber-950/25 p-3 text-xs text-amber-200">
                 <strong>Staleness Detected:</strong>{" "}
                 {(freshnessReport?.staleness_reasons ?? activeCampaign.staleness_reasons).join(" · ")}
+              </div>
+            )}
+
+            {((activeCampaign.hypothesis_reassessments?.length ?? 0) > 0 ||
+              (activeCampaign.linked_invalidation_events?.length ?? 0) > 0) && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 text-[11px]">
+                {(activeCampaign.hypothesis_reassessments?.length ?? 0) > 0 && (
+                  <div className="rounded-lg border border-cyan-500/30 bg-cyan-950/15 p-3 space-y-1.5">
+                    <div className="font-bold text-cyan-200">
+                      Hypothesis Reassessments ({activeCampaign.hypothesis_reassessments?.length ?? 0})
+                    </div>
+                    {(activeCampaign.hypothesis_reassessments ?? []).slice(0, 5).map((hr) => (
+                      <div key={hr.reassessment_id} className="font-mono text-[10px] text-slate-300 border-b border-cyan-900/40 pb-1">
+                        <span className="text-cyan-300">{hr.outcome}</span>: {hr.hypothesis_impact}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {(activeCampaign.linked_invalidation_events?.length ?? 0) > 0 && (
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-950/15 p-3 space-y-1.5">
+                    <div className="font-bold text-amber-200">
+                      Cross-Subsystem Invalidation Events ({activeCampaign.linked_invalidation_events?.length ?? 0})
+                    </div>
+                    {(activeCampaign.linked_invalidation_events ?? []).slice(0, 5).map((ie) => (
+                      <div key={ie.invalidation_id} className="font-mono text-[10px] text-slate-300 border-b border-amber-900/40 pb-1">
+                        <span className="text-amber-300">[{ie.source_subsystem}] {ie.event_type}</span>: {ie.detail}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -1593,10 +1693,23 @@ export default function ScienceCampaignPage() {
 
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 text-[11px]">
                     <div className="rounded border border-[#1e2638] bg-[#121622] p-2.5 space-y-1">
-                      <div className="font-semibold text-cyan-300 flex items-center gap-1.5">
-                        <Beaker className="w-3.5 h-3.5" />
-                        Observation Protocol ({sp.observation_plan.recommended_instruments.join(", ")})
+                      <div className="font-semibold text-cyan-300 flex items-center justify-between gap-1.5">
+                        <span className="flex items-center gap-1.5">
+                          <Beaker className="w-3.5 h-3.5" />
+                          Observation Protocol ({sp.observation_plan.recommended_instruments.join(", ")})
+                        </span>
+                        {sp.observation_plan.observation_lifecycle_state && (
+                          <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[9px] text-cyan-200">
+                            {sp.observation_plan.observation_lifecycle_state}
+                          </span>
+                        )}
                       </div>
+                      {sp.observation_plan.platform_mismatch_disclosed && (
+                        <div className="rounded border border-amber-500/40 bg-amber-950/30 px-2 py-1 text-[10px] text-amber-200">
+                          <strong>Platform Notice:</strong>{" "}
+                          {sp.observation_plan.platform_disclosure_note || sp.observation_plan.platform_compatibility}
+                        </div>
+                      )}
                       <div className="text-slate-300">
                         Measurements: {sp.observation_plan.measurements_to_collect.slice(0, 3).join("; ")}
                       </div>

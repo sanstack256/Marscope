@@ -116,6 +116,10 @@ class EvaOperationsService:
         self._missions: Dict[str, EvaMissionEnvelopeResponse] = {}
         self._sessions: Dict[str, MissionOperationalSession] = {}
         self.telemetry_adapter = ConditionalTelemetryAdapter()
+        self.science_service: Optional[Any] = None
+
+    def attach_science_service(self, science_service: Any) -> None:
+        self.science_service = science_service
 
     @staticmethod
     def _derive_mission_id(config: MissionConfigRequest) -> str:
@@ -181,6 +185,28 @@ class EvaOperationsService:
                 constraints=out_constraints,
             )
         )
+        return self._compute_envelope_from_route_and_corridor(
+            cfg=cfg,
+            route=route,
+            corridor=corridor,
+            plan_version=plan_version,
+            workflow_state=workflow_state,
+            t0=t0,
+        )
+
+    def _compute_envelope_from_route_and_corridor(
+        self,
+        *,
+        cfg: MissionConfigRequest,
+        route: Any,
+        corridor: Any,
+        plan_version: int = 1,
+        workflow_state: MissionWorkflowState = MissionWorkflowState.ROUTE_COMPUTED,
+        t0: Optional[float] = None,
+    ) -> EvaMissionEnvelopeResponse:
+        if t0 is None:
+            t0 = time.perf_counter()
+        mid = cfg.mission_id or self._derive_mission_id(cfg)
 
         stops_total_s = sum(max(0.0, float(v)) for v in cfg.stop_dwell_seconds.values())
         usable_s = (
@@ -461,6 +487,8 @@ class EvaOperationsService:
             source_product_id=route.source_product_id,
             route_id=route.route_id,
             assessment_id=corridor.assessment_id,
+            linked_campaign_id=cfg.linked_campaign_id,
+            linked_question_id=cfg.linked_question_id,
             envelope_status=env_status,
             model_feasibility_status=model_status,
             workflow_state=workflow_state.value,
@@ -531,6 +559,8 @@ class EvaOperationsService:
         resp.workflow_state = wf.value
         session = MissionOperationalSession(
             mission_id=mid,
+            linked_campaign_id=cfg.linked_campaign_id,
+            linked_question_id=cfg.linked_question_id,
             workflow_state=wf,
             active_plan_version=1,
             active_config=cfg,
@@ -557,12 +587,118 @@ class EvaOperationsService:
         )
         return resp
 
+    def evaluate_precomputed_route_envelope(
+        self,
+        *,
+        config: MissionConfigRequest,
+        route: Any,
+        corridor: Any,
+        register_session: bool = False,
+        integrated_lifecycle_state: Optional[str] = None,
+    ) -> EvaMissionEnvelopeResponse:
+        """Authoritative Prompt 20 envelope calculation for precomputed multi-stop science routes."""
+        mid = self._derive_mission_id(config)
+        cfg = config.model_copy(update={"mission_id": mid})
+        resp = self._compute_envelope_from_route_and_corridor(
+            cfg=cfg,
+            route=route,
+            corridor=corridor,
+            plan_version=1,
+            workflow_state=MissionWorkflowState.ROUTE_COMPUTED,
+        )
+        resp.integrated_lifecycle_state = integrated_lifecycle_state
+        wf = (
+            MissionWorkflowState.EVALUATION_INCOMPLETE
+            if resp.model_feasibility_status
+            in (
+                EnvelopeFeasibilityStatus.INCOMPLETE_CONSTRAINT_EVALUATION,
+                EnvelopeFeasibilityStatus.BLOCKED_BY_UNKNOWN_INPUTS,
+            )
+            else MissionWorkflowState.EXECUTION_NOT_STARTED
+        )
+        resp.workflow_state = wf.value
+        if register_session:
+            self._configs[mid] = cfg
+            _atomic_write_json(
+                self.storage_dir / f"{mid}.config.json",
+                cfg.model_dump_json(indent=2),
+            )
+            existing = self.get_session(mid)
+            if existing is not None:
+                cand_ver = max([h.plan_version for h in existing.plan_history] or [existing.active_plan_version]) + 1
+                for h in existing.plan_history:
+                    if h.status == "ACTIVE":
+                        h.status = "SUPERSEDED"
+                resp.plan_version = cand_ver
+                existing.active_plan_version = cand_ver
+                existing.active_config = cfg
+                existing.active_envelope = resp
+                existing.linked_campaign_id = cfg.linked_campaign_id or existing.linked_campaign_id
+                existing.linked_question_id = cfg.linked_question_id or existing.linked_question_id
+                existing.integrated_lifecycle_state = integrated_lifecycle_state or existing.integrated_lifecycle_state
+                existing.workflow_state = wf
+                existing.stale = False
+                existing.stale_subsystems = []
+                existing.stale_reasons = []
+                existing.plan_history.append(
+                    MissionVersionHistoryEntry(
+                        plan_version=cand_ver,
+                        created_at_utc=resp.created_at_utc,
+                        status="ACTIVE",
+                        reason="Science campaign recomputed authoritative EVA envelope",
+                        config=cfg,
+                        envelope=resp,
+                    )
+                )
+                self._save_session(existing)
+            else:
+                session = MissionOperationalSession(
+                    mission_id=mid,
+                    linked_campaign_id=cfg.linked_campaign_id,
+                    linked_question_id=cfg.linked_question_id,
+                    integrated_lifecycle_state=integrated_lifecycle_state,
+                    workflow_state=wf,
+                    active_plan_version=1,
+                    active_config=cfg,
+                    active_envelope=resp,
+                    plan_history=[
+                        MissionVersionHistoryEntry(
+                            plan_version=1,
+                            created_at_utc=resp.created_at_utc,
+                            status="ACTIVE",
+                            reason="Linked science campaign EVA operational envelope",
+                            config=cfg,
+                            envelope=resp,
+                        )
+                    ],
+                )
+                self._save_session(session)
+        return resp
+
+    def list_sessions(self) -> List[MissionOperationalSession]:
+        sessions_by_id: Dict[str, MissionOperationalSession] = dict(self._sessions)
+        for s_path in self.storage_dir.glob("*.session.json"):
+            mid = s_path.name[: -len(".session.json")]
+            if mid not in sessions_by_id:
+                try:
+                    loaded = self.get_session(mid)
+                    if loaded is not None:
+                        sessions_by_id[mid] = loaded
+                except ValueError:
+                    continue
+        return list(sessions_by_id.values())
+
     def get_mission(self, mission_id: str) -> Optional[EvaMissionEnvelopeResponse]:
         if mission_id in self._missions:
             return self._missions[mission_id]
         path = self.storage_dir / f"{mission_id}.envelope.json"
         if path.exists():
-            obj = EvaMissionEnvelopeResponse.model_validate_json(path.read_text(encoding="utf-8"))
+            try:
+                obj = EvaMissionEnvelopeResponse.model_validate_json(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise ValueError(
+                    f"Corrupted persisted EVA envelope JSON for mission '{mission_id}' at '{path.name}': {exc}"
+                ) from exc
             self._missions[mission_id] = obj
             return obj
         return None
@@ -572,7 +708,12 @@ class EvaOperationsService:
             return self._sessions[mission_id]
         s_path = self.storage_dir / f"{mission_id}.session.json"
         if s_path.exists():
-            sess = MissionOperationalSession.model_validate_json(s_path.read_text(encoding="utf-8"))
+            try:
+                sess = MissionOperationalSession.model_validate_json(s_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise ValueError(
+                    f"Corrupted persisted EVA session JSON for mission '{mission_id}' at '{s_path.name}': {exc}"
+                ) from exc
             self._sessions[mission_id] = sess
             return sess
         env = self.get_mission(mission_id)
@@ -627,6 +768,20 @@ class EvaOperationsService:
         sess = self.get_session(mission_id)
         if sess is None:
             raise FileNotFoundError(f"Mission '{mission_id}' not found.")
+        # Idempotency guard against duplicate identical event submissions
+        cid = req.payload.get("client_event_id") if isinstance(req.payload, dict) else None
+        if cid:
+            if any(isinstance(e.payload, dict) and e.payload.get("client_event_id") == cid for e in sess.events):
+                return sess
+        elif sess.events:
+            last = sess.events[-1]
+            if (
+                last.event_type == req.event_type
+                and last.description == req.description
+                and last.payload == req.payload
+            ):
+                return sess
+
         inv = list(EVENT_INVALIDATION_RULES.get(req.event_type, ["outbound_route", "return_route"]))
         evt = MissionEventRecord(
             event_id=f"evt_{uuid.uuid4().hex[:10]}",
@@ -646,10 +801,21 @@ class EvaOperationsService:
         if reason_msg not in sess.stale_reasons:
             sess.stale_reasons.append(reason_msg)
         sess.workflow_state = MissionWorkflowState.REPLANNING_REQUIRED
+        sess.integrated_lifecycle_state = "REPLAN_IF_REQUIRED"
         sess.active_envelope.stale = True
         sess.active_envelope.stale_reasons = list(sess.stale_reasons)
         sess.active_envelope.workflow_state = MissionWorkflowState.REPLANNING_REQUIRED.value
+        sess.active_envelope.integrated_lifecycle_state = "REPLAN_IF_REQUIRED"
         self._save_session(sess)
+        if self.science_service is not None and sess.linked_campaign_id and not req.payload.get("_from_science_service"):
+            try:
+                self.science_service.handle_eva_session_event(
+                    campaign_id=sess.linked_campaign_id,
+                    mission_id=mission_id,
+                    event=evt,
+                )
+            except Exception:
+                pass
         return sess
 
     def preview_mission_replan(
@@ -659,12 +825,19 @@ class EvaOperationsService:
         if sess is None:
             raise FileNotFoundError(f"Mission '{mission_id}' not found.")
         cand_ver = max([h.plan_version for h in sess.plan_history] or [sess.active_plan_version]) + 1
-        cand_cfg = req.updated_config.model_copy(update={"mission_id": mission_id})
+        cand_cfg = req.updated_config.model_copy(
+            update={
+                "mission_id": mission_id,
+                "linked_campaign_id": req.updated_config.linked_campaign_id or sess.linked_campaign_id,
+                "linked_question_id": req.updated_config.linked_question_id or sess.linked_question_id,
+            }
+        )
         cand_env = self._compute_envelope_internal(
             cand_cfg,
             plan_version=cand_ver,
             workflow_state=MissionWorkflowState.MISSION_PLAN_REVIEW_REQUIRED,
         )
+        cand_env.integrated_lifecycle_state = "MISSION_REVIEW"
         cmp_report = build_plan_comparison_report(
             mission_id=mission_id,
             prev_env=sess.active_envelope,
@@ -676,6 +849,7 @@ class EvaOperationsService:
         sess.pending_candidate_envelope = cand_env
         sess.pending_comparison = cmp_report
         sess.workflow_state = MissionWorkflowState.MISSION_PLAN_REVIEW_REQUIRED
+        sess.integrated_lifecycle_state = "MISSION_REVIEW"
         sess.active_envelope.workflow_state = MissionWorkflowState.MISSION_PLAN_REVIEW_REQUIRED.value
         sess.plan_history.append(
             MissionVersionHistoryEntry(
@@ -714,9 +888,30 @@ class EvaOperationsService:
         sess.active_envelope.stale = False
         sess.active_envelope.stale_reasons = []
         sess.active_envelope.workflow_state = MissionWorkflowState.EXECUTION_NOT_STARTED.value
+        sess.active_envelope.integrated_lifecycle_state = "EXECUTION_NOT_STARTED"
         sess.stale = False
         sess.stale_subsystems = []
         sess.stale_reasons = []
+        sess.workflow_state = MissionWorkflowState.EXECUTION_NOT_STARTED
+        sess.integrated_lifecycle_state = "EXECUTION_NOT_STARTED"
+        if sess.pending_comparison is not None:
+            sess.pending_comparison.approved_by_operator = True
+            sess.pending_comparison.requires_operator_approval = False
+        sess.pending_candidate_envelope = None
+        sess.pending_candidate_config = None
+        self._save_session(sess)
+        if self.science_service is not None and sess.linked_campaign_id:
+            try:
+                self.science_service.handle_eva_replan_approved(
+                    campaign_id=sess.linked_campaign_id,
+                    mission_id=mission_id,
+                    plan_version=cand_ver,
+                    operator_id=operator_id,
+                    approval_note=approval_note,
+                )
+            except Exception:
+                pass
+        return sess
         sess.workflow_state = MissionWorkflowState.EXECUTION_NOT_STARTED
         if sess.pending_comparison is not None:
             sess.pending_comparison.approved_by_operator = True

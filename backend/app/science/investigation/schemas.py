@@ -410,6 +410,14 @@ class CandidateTargetEvaluation(BaseModel):
     scientific_confidence_score: Optional[float] = None
     evidence_eligibility_states: List[EvidenceEligibilityState] = Field(default_factory=list)
     spatial_registration_state: SpatialRegistrationState = SpatialRegistrationState.INSUFFICIENT_METADATA
+    spatial_registration_detail: Optional[Dict[str, Any]] = None
+    terrain_elevation_m: Optional[float] = None
+    terrain_slope_deg: Optional[float] = None
+    terrain_roughness_tri_m: Optional[float] = None
+    terrain_data_classification: Optional[str] = None
+    spatial_coverage_category: Optional[str] = None
+    morphology_candidate_ids: List[str] = Field(default_factory=list)
+    morphology_review_status: Optional[str] = None
     uncertainty_notes: List[str] = Field(default_factory=list)
     eligibility_decision: str = "CANDIDATE_WITH_LIMITATIONS"
     eligibility_decision_rationale: str = ""
@@ -418,6 +426,42 @@ class CandidateTargetEvaluation(BaseModel):
     eligibility_for_sampling: str
     prohibited_inference_flags: List[str] = Field(default_factory=list)
     evidence_ids: List[str] = Field(default_factory=list)
+
+
+class IntegratedMissionLifecycleState(str, Enum):
+    """18 explicit integrated end-to-end lifecycle states (Prompt 21 Part 1.1)."""
+
+    SCIENTIFIC_QUESTION = "SCIENTIFIC_QUESTION"
+    MEASUREMENT_REQUIREMENTS = "MEASUREMENT_REQUIREMENTS"
+    EVIDENCE_DISCOVERY = "EVIDENCE_DISCOVERY"
+    EVIDENCE_ASSESSMENT = "EVIDENCE_ASSESSMENT"
+    TARGET_EVALUATION = "TARGET_EVALUATION"
+    CAMPAIGN_DESIGN = "CAMPAIGN_DESIGN"
+    OBSERVATION_PLAN = "OBSERVATION_PLAN"
+    SPATIAL_ASSESSMENT = "SPATIAL_ASSESSMENT"
+    MOBILITY_ASSESSMENT = "MOBILITY_ASSESSMENT"
+    EVA_OPERATIONAL_EVALUATION = "EVA_OPERATIONAL_EVALUATION"
+    MISSION_REVIEW = "MISSION_REVIEW"
+    OPERATOR_APPROVAL = "OPERATOR_APPROVAL"
+    EXECUTION_NOT_STARTED = "EXECUTION_NOT_STARTED"
+    FIELD_OBSERVATION = "FIELD_OBSERVATION"
+    EVIDENCE_UPDATE = "EVIDENCE_UPDATE"
+    HYPOTHESIS_REASSESSMENT = "HYPOTHESIS_REASSESSMENT"
+    CAMPAIGN_FRESHNESS_CHECK = "CAMPAIGN_FRESHNESS_CHECK"
+    REPLAN_IF_REQUIRED = "REPLAN_IF_REQUIRED"
+
+
+class ObservationLifecycleState(str, Enum):
+    """8 explicit observation action lifecycle states (Prompt 21 Part 6.2)."""
+
+    CAPABILITY_DOCUMENTED = "CAPABILITY_DOCUMENTED"
+    PRODUCT_AVAILABLE = "PRODUCT_AVAILABLE"
+    SPATIALLY_CO_REGISTERED = "SPATIALLY_CO_REGISTERED"
+    OBSERVATION_PLANNED = "OBSERVATION_PLANNED"
+    OBSERVATION_RECORDED = "OBSERVATION_RECORDED"
+    EVIDENCE_VALIDATED = "EVIDENCE_VALIDATED"
+    ARCHIVE_COMPARED = "ARCHIVE_COMPARED"
+    MEASUREMENT_NOT_SUPPORTED = "MEASUREMENT_NOT_SUPPORTED"
 
 
 class TargetEvaluationBatchResponse(BaseModel):
@@ -436,6 +480,10 @@ class ObservationActionPlan(BaseModel):
     stop_id: str
     target_id: str
     target_name: str
+    observation_lifecycle_state: ObservationLifecycleState = ObservationLifecycleState.OBSERVATION_PLANNED
+    platform_compatibility: str = "unspecified"
+    platform_mismatch_disclosed: bool = False
+    platform_disclosure_note: str = ""
     recommended_instruments: List[str] = Field(default_factory=list)
     measurements_to_collect: List[str] = Field(default_factory=list)
     context_imaging_checks: List[str] = Field(default_factory=list)
@@ -524,6 +572,11 @@ class CampaignBuildRequest(BaseModel):
     resources: List[ExplicitResourceSpec] = Field(default_factory=list)
     include_alternatives: bool = True
     optimize_stop_order: bool = True
+    locomotion_category: Optional[str] = None
+    unknown_terrain_policy: str = "EXCLUDE_UNKNOWN"
+    operator_unknown_override_reason: Optional[str] = None
+    confirm_default_policies: bool = False
+    expected_plan_version: Optional[int] = None
 
 
 class CampaignSummary(BaseModel):
@@ -531,6 +584,10 @@ class CampaignSummary(BaseModel):
     campaign_name: str
     question_id: str
     dataset_id: str
+    linked_mission_id: Optional[str] = None
+    plan_version: int = 1
+    integrated_lifecycle_state: IntegratedMissionLifecycleState = IntegratedMissionLifecycleState.EVA_OPERATIONAL_EVALUATION
+    operator_approved: bool = False
     plan_status: CampaignPlanStatus
     feasibility_state: CampaignFeasibilityModelState = CampaignFeasibilityModelState.NOT_EVALUATED
     freshness_state: CampaignFreshnessState
@@ -552,6 +609,16 @@ class CampaignFreshnessReport(BaseModel):
 class ScienceCampaignPlan(BaseModel):
     campaign_id: str
     campaign_name: str
+    linked_mission_id: Optional[str] = None
+    plan_version: int = 1
+    integrated_lifecycle_state: IntegratedMissionLifecycleState = IntegratedMissionLifecycleState.EVA_OPERATIONAL_EVALUATION
+    operator_approved: bool = False
+    operator_approved_by: Optional[str] = None
+    operator_approved_at_utc: Optional[str] = None
+    operator_approval_note: Optional[str] = None
+    hypothesis_reassessments: List[Dict[str, Any]] = Field(default_factory=list)
+    lifecycle_transitions: List[Dict[str, Any]] = Field(default_factory=list)
+    linked_invalidation_events: List[Dict[str, Any]] = Field(default_factory=list)
     question: ScienceQuestionDefinition
     dataset_id: str
     study_region: str
@@ -598,6 +665,12 @@ class RecordObservationRequest(BaseModel):
     units: str = "dimensionless"
     latitude: float = Field(..., ge=-90.0, le=90.0)
     longitude_east: float = Field(..., ge=-180.0, le=360.0)
+    coordinate_reference: str = "IAU2000:49900"
+    observer_identity: str = "crew_geologist"
+    calibration_metadata: Optional[str] = None
+    raw_attachment_ref: Optional[str] = None
+    client_submission_id: Optional[str] = None
+    expected_plan_version: Optional[int] = None
     sol_or_timestamp: Optional[str] = None
     notes: Optional[str] = None
     measurement_scale_m: Optional[float] = Field(default=None, gt=0.0)
@@ -619,10 +692,18 @@ class RecordedFieldObservation(BaseModel):
     units: str
     latitude: float
     longitude_east: float
+    coordinate_reference: str = "IAU2000:49900"
+    observer_identity: str = "crew_geologist"
+    calibration_metadata: Optional[str] = None
+    raw_attachment_ref: Optional[str] = None
+    client_submission_id: Optional[str] = None
     sol_or_timestamp: Optional[str] = None
     notes: Optional[str] = None
     measurement_scale_m: Optional[float] = None
     quality_flag: str
+    validation_state: str = "RECORDED_UNVALIDATED"
+    lifecycle_state: ObservationLifecycleState = ObservationLifecycleState.OBSERVATION_RECORDED
+    reassessment_impact: Optional[str] = None
     prohibited_inference_warning: Optional[str] = None
     recorded_at_utc: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 

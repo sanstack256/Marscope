@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import "./globals.css";
 import { Sidebar } from "../components/Sidebar";
 import { TopNav } from "../components/TopNav";
+import { IntegratedMissionContextBar } from "../components/IntegratedMissionContextBar";
 
 export const metadata: Metadata = {
   title: "MARSCOPE — Martian Surface Intelligence & Exploration System",
@@ -23,6 +25,9 @@ export default function RootLayout({
         {/* Primary Viewport Area */}
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
           <TopNav />
+          <Suspense fallback={null}>
+            <IntegratedMissionContextBar />
+          </Suspense>
           <main className="flex-1 overflow-y-auto p-6 md:p-8 bg-[#0b0d13]">
             {children}
           </main>
