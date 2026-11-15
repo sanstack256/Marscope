@@ -15,7 +15,9 @@ import asyncio
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -70,10 +72,72 @@ def compute_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def default_datasets_dir() -> Path:
+    configured = (os.getenv("MARSCOPE_DATASETS_DIR") or "").strip()
+    if configured:
+        return Path(configured).resolve()
+    return Path(__file__).resolve().parents[3] / "datasets"
+
+
+def default_seed_datasets_dir() -> Path:
+    configured = (os.getenv("MARSCOPE_SEED_DATASETS_DIR") or "").strip()
+    if configured:
+        return Path(configured).resolve()
+    repo_root = Path(__file__).resolve().parents[3]
+    seed_candidate = repo_root / "seed_datasets"
+    if seed_candidate.exists():
+        return seed_candidate
+    return repo_root / "datasets"
+
+
+def seed_catalog_metadata_if_empty(
+    datasets_dir: Optional[Path] = None,
+    seed_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """
+    Initialize an empty persistent volume (e.g., Railway /data/datasets) with
+    tracked catalog JSONs and bootstrap_manifest.json from the image's read-only
+    seed directory. Never fabricates or copies raw/, processed/, or index/ data.
+    """
+    ds_root = (datasets_dir or default_datasets_dir()).resolve()
+    src_root = (seed_dir or default_seed_datasets_dir()).resolve()
+
+    for sub in ("catalog", "manifests", "raw", "processed", "index", "private_attachments"):
+        (ds_root / sub).mkdir(parents=True, exist_ok=True)
+
+    copied_files: List[str] = []
+    if ds_root != src_root and src_root.exists():
+        seed_manifest = src_root / "bootstrap_manifest.json"
+        target_manifest = ds_root / "bootstrap_manifest.json"
+        if seed_manifest.exists() and not target_manifest.exists():
+            shutil.copy2(seed_manifest, target_manifest)
+            copied_files.append("bootstrap_manifest.json")
+
+        seed_catalog = src_root / "catalog"
+        target_catalog = ds_root / "catalog"
+        if seed_catalog.is_dir():
+            for item in sorted(seed_catalog.rglob("*.json")):
+                rel = item.relative_to(seed_catalog)
+                dest = target_catalog / rel
+                if not dest.exists():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(item, dest)
+                    copied_files.append(f"catalog/{rel.as_posix()}")
+
+    return {
+        "datasets_dir": str(ds_root),
+        "seed_dir": str(src_root),
+        "copied_files": copied_files,
+    }
+
+
 def load_bootstrap_manifest(manifest_path: Optional[Path] = None) -> Dict[str, Any]:
-    path = manifest_path or (
-        Path(__file__).resolve().parents[3] / "datasets" / "bootstrap_manifest.json"
-    )
+    if manifest_path is not None:
+        path = manifest_path
+    else:
+        ds_manifest = default_datasets_dir() / "bootstrap_manifest.json"
+        seed_manifest = default_seed_datasets_dir() / "bootstrap_manifest.json"
+        path = ds_manifest if ds_manifest.exists() else seed_manifest
     if not path.exists():
         raise FileNotFoundError(f"Bootstrap manifest not found: {path}")
     return json.loads(path.read_text(encoding="utf-8"))
@@ -90,8 +154,13 @@ def verify_local_datasets(
     Mode A: Inspect local files against the authoritative bootstrap manifest without
     network access or modifying tracked catalogs.
     """
-    ds_root = datasets_dir or (Path(__file__).resolve().parents[3] / "datasets")
-    manifest = load_bootstrap_manifest(manifest_path or (ds_root / "bootstrap_manifest.json"))
+    ds_root = datasets_dir or default_datasets_dir()
+    candidate_manifest = manifest_path or (ds_root / "bootstrap_manifest.json")
+    if not candidate_manifest.exists() and manifest_path is None:
+        seed_manifest = default_seed_datasets_dir() / "bootstrap_manifest.json"
+        if seed_manifest.exists():
+            candidate_manifest = seed_manifest
+    manifest = load_bootstrap_manifest(candidate_manifest)
     entries = list(manifest.get("products") or [])
     statuses: List[BootstrapProductStatus] = []
 

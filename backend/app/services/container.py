@@ -10,6 +10,7 @@ from pathlib import Path
 import os
 from app.core.config import settings
 from app.ingestion.acquisition import AcquisitionService
+from app.ingestion.bootstrap import seed_catalog_metadata_if_empty
 from app.ingestion.catalog import DatasetCatalogService
 from app.mobility.service import HumanMobilityService
 from app.routing.service import ScienceAwareRoutingService
@@ -43,6 +44,7 @@ _configured_datasets_dir = (
     settings.MARSCOPE_DATASETS_DIR or os.getenv("MARSCOPE_DATASETS_DIR") or ""
 ).strip()
 DATASETS_DIR = Path(_configured_datasets_dir).resolve() if _configured_datasets_dir else (REPO_ROOT / "datasets")
+seed_catalog_metadata_if_empty(DATASETS_DIR)
 
 CATALOG_DIR = DATASETS_DIR / "catalog"
 MANIFESTS_DIR = DATASETS_DIR / "manifests"
@@ -176,6 +178,7 @@ from app.services.mission_service import MissionService
 from app.services.sos_service import SosService
 from app.services.field_observation_service import FieldObservationService
 from app.services.landing_site_service import LandingSiteService
+from app.services.navigation_service import NavigationService
 
 PRIVATE_ATTACHMENTS_DIR = DATASETS_DIR / "private_attachments"
 PRIVATE_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -216,4 +219,11 @@ landing_site_service = LandingSiteService(
     catalog_service=catalog_service,
     destination_service=destination_service,
     processed_dir=PROCESSED_DIR,
+)
+navigation_service = NavigationService(
+    db=mission_db,
+    event_service=mission_event_service,
+    realtime_hub=mission_realtime_hub,
+    position_service=position_service,
+    routing_service=routing_service,
 )

@@ -64,6 +64,13 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(api_router)
 
 
+@app.on_event("startup")
+async def _validate_runtime_security() -> None:
+    from app.core.security import get_signing_secret
+
+    get_signing_secret()
+
+
 def _root_payload():
     return {
         "system": settings.PROJECT_NAME,

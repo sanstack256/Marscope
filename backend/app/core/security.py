@@ -33,6 +33,11 @@ def get_signing_secret() -> bytes:
     configured = (settings.MARSCOPE_SECRET_KEY or os.getenv("MARSCOPE_SECRET_KEY") or "").strip()
     if configured:
         return configured.encode("utf-8")
+    env = (settings.ENVIRONMENT or os.getenv("ENVIRONMENT") or "").strip().lower()
+    if env == "production":
+        raise RuntimeError(
+            "MARSCOPE_SECRET_KEY must be set in production (refusing to fall back to an ephemeral process secret)."
+        )
     return _PROCESS_FALLBACK_SECRET.encode("utf-8")
 
 

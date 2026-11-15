@@ -29,7 +29,12 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.ingestion.acquisition import AcquisitionService  # noqa: E402
-from app.ingestion.bootstrap import acquire_bootstrap_datasets, verify_local_datasets  # noqa: E402
+from app.ingestion.bootstrap import (  # noqa: E402
+    acquire_bootstrap_datasets,
+    default_datasets_dir,
+    seed_catalog_metadata_if_empty,
+    verify_local_datasets,
+)
 from app.ingestion.catalog import DatasetCatalogService  # noqa: E402
 from app.science.composition.index import CompositionSpatialIndex  # noqa: E402
 from app.terrain.processor import DEMProcessingService  # noqa: E402
@@ -42,8 +47,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--datasets-dir",
         type=Path,
-        default=REPO_ROOT / "datasets",
-        help="Path to MARSCOPE datasets directory (default: <repo>/datasets).",
+        default=default_datasets_dir(),
+        help="Path to MARSCOPE datasets directory (default: MARSCOPE_DATASETS_DIR or <repo>/datasets).",
     )
     parser.add_argument("--verify", action="store_true", help="Mode A: verify local raw/processed artifacts against bootstrap_manifest.json without network.")
     parser.add_argument("--acquire", action="store_true", help="Mode B: acquire missing authoritative products from NASA/PDS/UArizona URLs.")
@@ -63,6 +68,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     ds_dir: Path = args.datasets_dir.resolve()
+    seed_catalog_metadata_if_empty(ds_dir)
     raw_dir = ds_dir / "raw"
     processed_dir = ds_dir / "processed"
     catalog_dir = ds_dir / "catalog"

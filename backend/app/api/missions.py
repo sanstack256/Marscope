@@ -9,7 +9,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Header, Query, status
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import (
@@ -220,12 +220,24 @@ def list_mission_events(
 @router.get("/{mission_id}/stream")
 async def stream_mission_realtime_events(
     mission_id: str,
+    since_seq: Optional[int] = Query(default=None, ge=0),
+    last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
     auth: AuthContext = Depends(require_auth),
 ):
     load_mission_membership(mission_id, auth)
     sub = mission_realtime_hub.subscribe(mission_id, auth.astronaut_id)
 
+    resume_seq: Optional[int] = since_seq
+    if resume_seq is None and last_event_id is not None:
+        try:
+            parsed = int(last_event_id.strip())
+            if parsed >= 0:
+                resume_seq = parsed
+        except ValueError:
+            resume_seq = None
+
     async def event_generator():
+        last_emitted_seq = resume_seq if resume_seq is not None else 0
         try:
             yield mission_realtime_hub.format_sse(
                 "connected",
@@ -234,12 +246,25 @@ async def stream_mission_realtime_events(
                     "astronaut_id": auth.astronaut_id,
                     "server_timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     "active_subscribers": mission_realtime_hub.active_subscriber_count(mission_id),
+                    "resumed_from_seq": resume_seq,
                 },
             )
+            if resume_seq is not None:
+                missed = mission_event_service.list_events(mission_id, since_seq=resume_seq, limit=200)
+                for ev in missed:
+                    if ev.seq <= last_emitted_seq:
+                        continue
+                    last_emitted_seq = ev.seq
+                    yield mission_realtime_hub.format_sse(ev.event_type, ev.model_dump(), event_id=ev.seq)
             while True:
                 try:
                     msg = await asyncio.wait_for(sub.queue.get(), timeout=15.0)
-                    yield mission_realtime_hub.format_sse(msg["event_type"], msg)
+                    msg_seq = msg.get("seq")
+                    if isinstance(msg_seq, int):
+                        if msg_seq <= last_emitted_seq:
+                            continue
+                        last_emitted_seq = msg_seq
+                    yield mission_realtime_hub.format_sse(msg["event_type"], msg, event_id=msg_seq)
                 except asyncio.TimeoutError:
                     yield mission_realtime_hub.format_sse(
                         "heartbeat",
@@ -255,7 +280,7 @@ async def stream_mission_realtime_events(
         event_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },

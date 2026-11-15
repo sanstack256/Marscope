@@ -101,5 +101,7 @@ class MissionRealtimeHub:
             pass
 
     @staticmethod
-    def format_sse(event_name: str, data: Dict[str, Any]) -> str:
-        return f"event: {event_name}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+    def format_sse(event_name: str, data: Dict[str, Any], event_id: Optional[int | str] = None) -> str:
+        eid = event_id if event_id is not None else data.get("seq")
+        prefix = f"id: {eid}\n" if eid is not None else ""
+        return f"{prefix}event: {event_name}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"

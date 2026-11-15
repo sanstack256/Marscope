@@ -59,20 +59,29 @@ async def test_api_root_docs_and_health_routes() -> None:
         assert api_root["health_check"] == "/api/health"
 
 
-def test_vercel_json_and_backend_manifests_consistent() -> None:
+def test_split_deployment_manifests_consistent() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     vercel_cfg = json.loads((repo_root / "vercel.json").read_text(encoding="utf-8"))
-    assert vercel_cfg["services"]["frontend"]["root"] == "frontend/"
-    assert vercel_cfg["services"]["frontend"]["framework"] == "nextjs"
-    assert vercel_cfg["services"]["backend"]["root"] == "backend/"
-    assert vercel_cfg["services"]["backend"]["framework"] == "fastapi"
-    assert vercel_cfg["services"]["backend"]["entrypoint"] == "app.main:app"
+    assert "services" not in vercel_cfg, "Vercel must host only the Next.js frontend"
+    assert vercel_cfg["framework"] == "nextjs"
+    assert "frontend" in vercel_cfg["installCommand"]
+    assert "frontend" in vercel_cfg["buildCommand"]
+    assert vercel_cfg["outputDirectory"] == "frontend/.next"
 
-    rewrites = vercel_cfg["rewrites"]
-    assert rewrites[0]["source"] == "/api/:path*"
-    assert rewrites[0]["destination"] == {"service": "backend"}
-    assert rewrites[1]["source"] == "/(.*)"
-    assert rewrites[1]["destination"] == {"service": "frontend"}
+    railway_cfg = json.loads((repo_root / "railway.json").read_text(encoding="utf-8"))
+    assert railway_cfg["build"]["builder"] == "DOCKERFILE"
+    assert railway_cfg["build"]["dockerfilePath"] == "backend/Dockerfile"
+    assert railway_cfg["deploy"]["healthcheckPath"] == "/api/health"
+
+    dockerfile_text = (repo_root / "backend" / "Dockerfile").read_text(encoding="utf-8")
+    assert "MARSCOPE_DATASETS_DIR=/data/datasets" in dockerfile_text
+    assert "/app/backend/start.sh" in dockerfile_text
+    assert "/api/health" in dockerfile_text
+
+    start_sh_text = (repo_root / "backend" / "start.sh").read_text(encoding="utf-8")
+    assert "--host 0.0.0.0" in start_sh_text
+    assert "${PORT:-8000}" in start_sh_text
+    assert "seed_catalog_metadata_if_empty" in start_sh_text
 
     pyproject_text = (repo_root / "backend" / "pyproject.toml").read_text(encoding="utf-8")
     req_text = (repo_root / "backend" / "requirements.txt").read_text(encoding="utf-8")
@@ -95,3 +104,35 @@ def test_vercel_json_and_backend_manifests_consistent() -> None:
     ):
         assert pkg in pyproject_text, f"Missing {pkg} in backend/pyproject.toml"
         assert pkg in req_text, f"Missing {pkg} in backend/requirements.txt"
+
+
+def test_seed_catalog_metadata_without_fabricating_data(tmp_path: Path) -> None:
+    from app.ingestion.bootstrap import seed_catalog_metadata_if_empty, verify_local_datasets
+
+    volume_ds = tmp_path / "datasets"
+    result = seed_catalog_metadata_if_empty(datasets_dir=volume_ds)
+    assert (volume_ds / "bootstrap_manifest.json").is_file()
+    assert (volume_ds / "catalog" / "hirise_dteec_009149_1750.json").is_file()
+    assert "bootstrap_manifest.json" in result["copied_files"]
+    # Must NOT fabricate raw or processed NASA data files
+    assert list((volume_ds / "raw").iterdir()) == []
+    assert list((volume_ds / "processed").iterdir()) == []
+
+    report = verify_local_datasets(datasets_dir=volume_ds, strict=False)
+    assert report.verified_count == 0
+    assert report.missing_mandatory_count > 0
+    strict_report = verify_local_datasets(datasets_dir=volume_ds, strict=True)
+    assert strict_report.preflight_passed is False
+
+
+def test_production_signing_secret_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core import config, security
+
+    monkeypatch.setattr(config.settings, "ENVIRONMENT", "production")
+    monkeypatch.setattr(config.settings, "MARSCOPE_SECRET_KEY", "")
+    monkeypatch.delenv("MARSCOPE_SECRET_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="MARSCOPE_SECRET_KEY"):
+        security.get_signing_secret()
+
+    monkeypatch.setenv("MARSCOPE_SECRET_KEY", "a" * 32)
+    assert security.get_signing_secret() == b"a" * 32

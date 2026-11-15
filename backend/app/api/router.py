@@ -21,6 +21,7 @@ from app.api import (
     localization,
     missions,
     mobility,
+    navigation,
     observations,
     physics,
     routing,
@@ -42,6 +43,7 @@ api_router.include_router(auth.router)
 api_router.include_router(field_observations.router)
 api_router.include_router(landing_site.router)
 api_router.include_router(missions.router)
+api_router.include_router(navigation.router)
 api_router.include_router(sos.router)
 api_router.include_router(imagery.router)
 api_router.include_router(datasets.router)
