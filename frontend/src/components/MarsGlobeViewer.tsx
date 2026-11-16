@@ -4,6 +4,16 @@ import { useEffect, useRef, useState } from "react";
 import type * as CesiumTypes from "cesium";
 import { API_BASE_URL } from "../lib/constants";
 import { fetchHeightGridForCesium } from "../lib/terrainNoData";
+import {
+  applyMarsGlobeControllerConfig,
+  clampZoomStepMeters,
+  computePointerTravelPx,
+  formatCursorReadout,
+  isDragGesture,
+  MARS_GLOBE_CAMERA_LIMITS,
+  normalizeLongitudeEast360,
+  type ScreenPosition2D,
+} from "../lib/marsGlobeControls";
 import { useLayerStore } from "../stores/useLayerStore";
 import { useAuthMissionStore } from "../stores/useAuthMissionStore";
 import { useMissionStore } from "../stores/useMissionStore";
@@ -218,17 +228,15 @@ export function MarsGlobeViewer({
   const reportedErrorRef = useRef<Record<string, string>>({});
   const selectionModeRef = useRef(selectionMode);
   const onSelectCoordinateRef = useRef(onSelectCoordinate);
-
-  useEffect(() => {
-    selectionModeRef.current = selectionMode;
-    onSelectCoordinateRef.current = onSelectCoordinate;
-  }, [selectionMode, onSelectCoordinate]);
+  const cursorReadoutRef = useRef<HTMLSpanElement | null>(null);
+  const isDraggingRef = useRef(false);
+  const dragStartPosRef = useRef<ScreenPosition2D | null>(null);
+  const maxDragTravelPxRef = useRef(0);
 
   const [viewerReady, setViewerReady] = useState(false);
   const [viewerError, setViewerError] = useState<string | null>(null);
   const [initNonce, setInitNonce] = useState(0);
   const [viewMode, setViewMode] = useState<SceneViewMode>("3D");
-  const [cursorCoords, setCursorCoords] = useState<{ lat: number; lon: number } | null>(null);
   const [cameraTelemetry, setCameraTelemetry] = useState<{
     altitudeKm: number;
     headingDeg: number;
@@ -251,6 +259,17 @@ export function MarsGlobeViewer({
   const compositionCandidates = useMissionStore((s) => s.compositionCandidates);
   const selectedCandidateId = useMissionStore((s) => s.selectedCandidateId);
   const evaluateDestination = useMissionStore((s) => s.evaluateDestination);
+  const evaluateDestinationRef = useRef(evaluateDestination);
+
+  useEffect(() => {
+    selectionModeRef.current = selectionMode;
+    onSelectCoordinateRef.current = onSelectCoordinate;
+    evaluateDestinationRef.current = evaluateDestination;
+    const canvas = viewerRef.current?.scene?.canvas;
+    if (canvas && !isDraggingRef.current) {
+      canvas.style.cursor = selectionMode ? "crosshair" : "grab";
+    }
+  }, [selectionMode, onSelectCoordinate, evaluateDestination]);
 
   const activeRoute = useRoutingStore((s) => s.activeRoute);
   const startPoint = useRoutingStore((s) => s.startPoint);
@@ -263,6 +282,9 @@ export function MarsGlobeViewer({
     let handler: CesiumTypes.ScreenSpaceEventHandler | null = null;
     let removeCameraListener: (() => void) | null = null;
     let resizeObserver: ResizeObserver | null = null;
+    let resizeRaf: number | null = null;
+    let hoverRaf: number | null = null;
+    let removeWindowListeners: (() => void) | null = null;
     const terrainAbortController = new AbortController();
 
     async function initCesium() {
@@ -390,22 +412,106 @@ export function MarsGlobeViewer({
         };
         updateTelemetry();
 
-        // Pointer interaction handlers: hover coordinates + click destination inspection
-        handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+        // Pointer interaction handlers: deliberate click-vs-drag, rAF-throttled DOM hover readout, and flight cancellation
+        const canvas = viewer.scene.canvas;
+        canvas.style.cursor = selectionModeRef.current ? "crosshair" : "grab";
+
+        const defaultIdleReadout = () =>
+          selectionModeRef.current
+            ? "CLICK GLOBE TO SELECT COORDINATES (DRAG TO ROTATE)"
+            : "CLICK SURFACE TO INSPECT & SELECT";
+
+        const beginDrag = (pos: ScreenPosition2D) => {
+          isDraggingRef.current = true;
+          dragStartPosRef.current = { x: pos.x, y: pos.y };
+          maxDragTravelPxRef.current = 0;
+          viewer.camera.cancelFlight();
+          canvas.style.cursor = "grabbing";
+          viewer.scene.requestRender();
+        };
+
+        const endDrag = () => {
+          if (!isDraggingRef.current) return;
+          isDraggingRef.current = false;
+          canvas.style.cursor = selectionModeRef.current ? "crosshair" : "grab";
+          viewer.scene.requestRender();
+        };
+
+        window.addEventListener("pointerup", endDrag);
+        window.addEventListener("pointercancel", endDrag);
+        window.addEventListener("blur", endDrag);
+        removeWindowListeners = () => {
+          window.removeEventListener("pointerup", endDrag);
+          window.removeEventListener("pointercancel", endDrag);
+          window.removeEventListener("blur", endDrag);
+        };
+
+        handler = new Cesium.ScreenSpaceEventHandler(canvas);
+        handler.setInputAction((down: CesiumTypes.ScreenSpaceEventHandler.PositionedEvent) => {
+          beginDrag(down.position);
+        }, Cesium.ScreenSpaceEventType.LEFT_DOWN);
+        handler.setInputAction((down: CesiumTypes.ScreenSpaceEventHandler.PositionedEvent) => {
+          beginDrag(down.position);
+        }, Cesium.ScreenSpaceEventType.RIGHT_DOWN);
+        handler.setInputAction((down: CesiumTypes.ScreenSpaceEventHandler.PositionedEvent) => {
+          beginDrag(down.position);
+        }, Cesium.ScreenSpaceEventType.MIDDLE_DOWN);
+        handler.setInputAction(endDrag, Cesium.ScreenSpaceEventType.LEFT_UP);
+        handler.setInputAction(endDrag, Cesium.ScreenSpaceEventType.RIGHT_UP);
+        handler.setInputAction(endDrag, Cesium.ScreenSpaceEventType.MIDDLE_UP);
+        handler.setInputAction(() => {
+          viewer.camera.cancelFlight();
+          viewer.scene.requestRender();
+        }, Cesium.ScreenSpaceEventType.WHEEL);
+        handler.setInputAction(() => {
+          isDraggingRef.current = true;
+          maxDragTravelPxRef.current = 999;
+          viewer.camera.cancelFlight();
+          viewer.scene.requestRender();
+        }, Cesium.ScreenSpaceEventType.PINCH_START);
+        handler.setInputAction(endDrag, Cesium.ScreenSpaceEventType.PINCH_END);
+
+        let latestHoverPos: ScreenPosition2D | null = null;
         handler.setInputAction((movement: CesiumTypes.ScreenSpaceEventHandler.MotionEvent) => {
-          const pos = viewer.camera.pickEllipsoid(movement.endPosition, marsEllipsoid);
-          if (pos) {
-            const carto = marsEllipsoid.cartesianToCartographic(pos);
-            setCursorCoords({
-              lat: Cesium.Math.toDegrees(carto.latitude),
-              lon: Cesium.Math.toDegrees(carto.longitude),
-            });
-          } else {
-            setCursorCoords(null);
+          if (isDraggingRef.current && dragStartPosRef.current) {
+            const travel = computePointerTravelPx(dragStartPosRef.current, movement.endPosition);
+            if (travel > maxDragTravelPxRef.current) {
+              maxDragTravelPxRef.current = travel;
+            }
+            viewer.scene.requestRender();
+            return;
           }
+          latestHoverPos = { x: movement.endPosition.x, y: movement.endPosition.y };
+          if (hoverRaf !== null) return;
+          hoverRaf = window.requestAnimationFrame(() => {
+            hoverRaf = null;
+            if (destroyed || viewer.isDestroyed() || !latestHoverPos || !cursorReadoutRef.current) return;
+            const pos = viewer.camera.pickEllipsoid(
+              new Cesium.Cartesian2(latestHoverPos.x, latestHoverPos.y),
+              marsEllipsoid
+            );
+            if (pos) {
+              const carto = marsEllipsoid.cartesianToCartographic(pos);
+              cursorReadoutRef.current.textContent = formatCursorReadout(
+                Cesium.Math.toDegrees(carto.latitude),
+                Cesium.Math.toDegrees(carto.longitude)
+              );
+            } else {
+              cursorReadoutRef.current.textContent = defaultIdleReadout();
+            }
+          });
         }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
         handler.setInputAction((click: CesiumTypes.ScreenSpaceEventHandler.PositionedEvent) => {
+          const wasDrag = isDragGesture(
+            dragStartPosRef.current,
+            click.position,
+            maxDragTravelPxRef.current
+          );
+          dragStartPosRef.current = null;
+          maxDragTravelPxRef.current = 0;
+          if (wasDrag) return;
+
           const picked = viewer.scene.pick(click.position);
           const pickedEntityId =
             picked && typeof picked === "object" && "id" in picked && picked.id && typeof picked.id === "object" && "id" in picked.id
@@ -451,7 +557,12 @@ export function MarsGlobeViewer({
               if (abortControllerRef.current) abortControllerRef.current.abort();
               const controller = new AbortController();
               abortControllerRef.current = controller;
-              evaluateDestination(matched.latitude, matched.longitude_east, matched.cluster_label, controller.signal);
+              evaluateDestinationRef.current(
+                matched.latitude,
+                matched.longitude_east,
+                matched.cluster_label,
+                controller.signal
+              );
               return;
             }
           }
@@ -460,8 +571,7 @@ export function MarsGlobeViewer({
           if (!pos) return;
           const carto = marsEllipsoid.cartesianToCartographic(pos);
           const lat = Number(Cesium.Math.toDegrees(carto.latitude).toFixed(6));
-          const lonRaw = Cesium.Math.toDegrees(carto.longitude);
-          const lonEast = Number((((lonRaw % 360) + 360) % 360).toFixed(6));
+          const lonEast = Number(normalizeLongitudeEast360(Cesium.Math.toDegrees(carto.longitude)).toFixed(6));
 
           if (selectionModeRef.current && onSelectCoordinateRef.current) {
             onSelectCoordinateRef.current(lat, lonEast);
@@ -473,28 +583,23 @@ export function MarsGlobeViewer({
           }
           const controller = new AbortController();
           abortControllerRef.current = controller;
-          evaluateDestination(lat, lonEast, undefined, controller.signal);
+          evaluateDestinationRef.current(lat, lonEast, undefined, controller.signal);
         }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
-        const scc = viewer.scene.screenSpaceCameraController;
-        scc.minimumZoomDistance = 5;
-        scc.minimumCollisionTerrainHeight = 5;
-        scc.maximumZoomDistance = 25000000;
-        scc.inertiaSpin = 0.45;
-        scc.inertiaTranslate = 0.45;
-        scc.inertiaZoom = 0.35;
-        scc.zoomFactor = 5.0;
-        scc.enableCollisionDetection = true;
-        scc.enableTilt = true;
-        scc.enableLook = true;
+        viewer.camera.constrainedAxis = Cesium.Cartesian3.UNIT_Z;
+        applyMarsGlobeControllerConfig(viewer.scene.screenSpaceCameraController);
         viewer.scene.requestRender();
 
         if (typeof ResizeObserver !== "undefined" && containerRef.current) {
           resizeObserver = new ResizeObserver(() => {
-            if (!viewer.isDestroyed()) {
-              viewer.resize();
-              viewer.scene.requestRender();
-            }
+            if (resizeRaf !== null) return;
+            resizeRaf = window.requestAnimationFrame(() => {
+              resizeRaf = null;
+              if (!destroyed && !viewer.isDestroyed()) {
+                viewer.resize();
+                viewer.scene.requestRender();
+              }
+            });
           });
           resizeObserver.observe(containerRef.current);
         }
@@ -510,11 +615,15 @@ export function MarsGlobeViewer({
 
     return () => {
       destroyed = true;
+      isDraggingRef.current = false;
       terrainAbortController.abort();
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
+      if (hoverRaf !== null) window.cancelAnimationFrame(hoverRaf);
+      if (resizeRaf !== null) window.cancelAnimationFrame(resizeRaf);
       if (resizeObserver) resizeObserver.disconnect();
+      if (removeWindowListeners) removeWindowListeners();
       if (removeCameraListener) removeCameraListener();
       if (handler && !handler.isDestroyed()) handler.destroy();
       if (viewerRef.current && !viewerRef.current.isDestroyed()) {
@@ -523,7 +632,7 @@ export function MarsGlobeViewer({
       viewerRef.current = null;
       managedLayersRef.current = {};
     };
-  }, [evaluateDestination, initNonce]);
+  }, [initNonce]);
 
   useEffect(() => {
     const viewer = viewerRef.current;
@@ -948,7 +1057,9 @@ export function MarsGlobeViewer({
     const Cesium = cesiumRef.current;
     const marsEllipsoid = ellipsoidRef.current;
     if (!viewerReady || !viewer || viewer.isDestroyed() || !Cesium || !marsEllipsoid || !focusCoordinate) return;
+    if (isDraggingRef.current) return;
     const lon180 = focusCoordinate.lon > 180 ? focusCoordinate.lon - 360 : focusCoordinate.lon;
+    viewer.camera.cancelFlight();
     viewer.camera.flyTo({
       destination: marsEllipsoid.cartographicToCartesian(
         Cesium.Cartographic.fromDegrees(lon180, focusCoordinate.lat, focusCoordinate.heightM ?? 6500)
@@ -1173,15 +1284,13 @@ export function MarsGlobeViewer({
     const viewer = viewerRef.current;
     const marsEllipsoid = ellipsoidRef.current;
     if (!viewer || !marsEllipsoid) return;
+    viewer.camera.cancelFlight();
     const carto = marsEllipsoid.cartesianToCartographic(viewer.camera.position);
     if (!carto) return;
-    const height = Math.max(5, carto.height);
-    if (factor < 1) {
-      const step = Math.min(height - 5, Math.max(25, height * (1.0 - factor)));
-      if (step > 0) viewer.camera.zoomIn(step);
-    } else {
-      const step = Math.min(25000000 - height, Math.max(50, height * (factor - 1.0)));
-      if (step > 0) viewer.camera.zoomOut(step);
+    const { direction, stepM } = clampZoomStepMeters(carto.height, factor, MARS_GLOBE_CAMERA_LIMITS);
+    if (stepM > 0) {
+      if (direction === "in") viewer.camera.zoomIn(stepM);
+      else viewer.camera.zoomOut(stepM);
     }
     viewer.scene.requestRender();
   };
@@ -1192,6 +1301,7 @@ export function MarsGlobeViewer({
     const Cesium = cesiumRef.current;
     const marsEllipsoid = ellipsoidRef.current;
     if (!viewer || !Cesium || !marsEllipsoid) return;
+    viewer.camera.cancelFlight();
     const baseLat = selectedDestination?.latitude ?? activeRoute?.vertices[0]?.lat ?? startPoint?.lat ?? -4.749;
     const baseLonRaw = selectedDestination?.normalized_longitude_180 ?? activeRoute?.vertices[0]?.lon_east ?? startPoint?.lon_east ?? 137.397;
     const baseLon = baseLonRaw > 180 ? baseLonRaw - 360 : baseLonRaw;
@@ -1449,9 +1559,9 @@ export function MarsGlobeViewer({
       {/* Bottom Scale & Live Cursor Coordinate Bar */}
       <div className="absolute bottom-3 left-3 right-3 z-10 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
         <div className="bg-[#0d111a]/90 backdrop-blur border border-[#1e2638] rounded-lg px-3 py-1.5 text-[11px] font-mono text-slate-300 flex items-center gap-3 pointer-events-auto">
-          <span>
-            {cursorCoords
-              ? `CURSOR: ${cursorCoords.lat.toFixed(4)}°, ${cursorCoords.lon.toFixed(4)}° E`
+          <span ref={cursorReadoutRef}>
+            {selectionMode
+              ? "CLICK GLOBE TO SELECT COORDINATES (DRAG TO ROTATE)"
               : "CLICK SURFACE TO INSPECT & SELECT"}
           </span>
           <span className="text-slate-600">|</span>
