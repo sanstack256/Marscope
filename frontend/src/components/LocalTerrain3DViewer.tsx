@@ -38,6 +38,7 @@ import { useRoutingStore, type CameraPresetType } from "@/stores/useRoutingStore
 import { useSpatialStore, type MeasurePoint } from "@/stores/useSpatialStore";
 import type {
   GeoJsonGeometry,
+  LandingSitePerimeter,
   MorphologicalFeatureCandidate,
   PickedSurfacePoint,
   RoverOrbitalAssociationRecord,
@@ -221,6 +222,15 @@ interface LocalTerrain3DViewerProps {
   morphologyCandidates?: MorphologicalFeatureCandidate[];
   roverAssociations?: RoverOrbitalAssociationRecord[];
   showSpatialTools?: boolean;
+  landingSiteMarker?: {
+    lat: number;
+    lonEast: number;
+    name: string;
+    elevationM: number | null;
+    isNoData?: boolean;
+  } | null;
+  perimeterData?: LandingSitePerimeter | null;
+  onTerrainReadyChange?: (ready: boolean, error: string | null) => void;
 }
 
 export function LocalTerrain3DViewer({
@@ -236,6 +246,9 @@ export function LocalTerrain3DViewer({
   morphologyCandidates,
   roverAssociations,
   showSpatialTools = false,
+  landingSiteMarker = null,
+  perimeterData = null,
+  onTerrainReadyChange,
 }: LocalTerrain3DViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const hoverHudRef = useRef<HTMLDivElement | null>(null);
@@ -277,6 +290,10 @@ export function LocalTerrain3DViewer({
   } | null>(null);
   const [tilesLoadedCount, setTilesLoadedCount] = useState(0);
   const [tileError, setTileError] = useState<string | null>(null);
+
+  useEffect(() => {
+    onTerrainReadyChange?.(tilesLoadedCount > 0 && !tilesLoading && !tileError, tileError);
+  }, [tilesLoadedCount, tilesLoading, tileError, onTerrainReadyChange]);
   const [showTargets, setShowTargets] = useState(true);
   const [showRoute, setShowRoute] = useState(true);
   const [showTileBoundaries, setShowTileBoundaries] = useState(false);
@@ -1961,44 +1978,84 @@ export function LocalTerrain3DViewer({
       }
     }
 
-    // Prompt 1 Multi-Astronaut Overlays in 3D Terrain Scene
-    if (showLandingSiteOverlay && landingSiteBundle?.landing_site) {
-      const ls = landingSiteBundle.landing_site;
-      const elev = ls.elevation_m ?? lookupElevNear(ls.latitude, ls.longitude_east);
-      addBeaconPin(
-        toSceneVec(ls.latitude, ls.longitude_east, elev, 2.5),
-        "#1F9D68",
-        1.45,
-        { kind: "landing_site", landingSite: ls },
-        "start"
-      );
-
-      const perimGeo = landingSiteBundle.perimeter?.geometry_geojson as
-        | { geometry?: GeoJsonGeometry }
-        | GeoJsonGeometry
-        | null
-        | undefined;
+    const activePerimeter = perimeterData ?? landingSiteBundle?.perimeter ?? null;
+    const renderGeoJsonRings = (
+      featureObj: Record<string, unknown> | GeoJsonGeometry | null | undefined,
+      colorHex: string,
+      yOffset: number
+    ) => {
+      if (!featureObj) return;
       const geomObj =
-        perimGeo && "geometry" in perimGeo && perimGeo.geometry
-          ? perimGeo.geometry
-          : (perimGeo as GeoJsonGeometry | null);
-      if (geomObj && geomObj.coordinates) {
-        const rings: Array<Array<[number, number]>> = [];
-        if (geomObj.type === "Polygon") {
-          const r0 = (geomObj.coordinates as unknown[][])[0];
-          if (Array.isArray(r0)) rings.push(r0 as Array<[number, number]>);
-        } else if (geomObj.type === "MultiPolygon") {
-          for (const poly of geomObj.coordinates as unknown[][][]) {
-            if (Array.isArray(poly?.[0])) rings.push(poly[0] as Array<[number, number]>);
-          }
+        "geometry" in featureObj && featureObj.geometry
+          ? (featureObj.geometry as GeoJsonGeometry)
+          : (featureObj as GeoJsonGeometry);
+      if (!geomObj?.coordinates) return;
+      const rings: Array<Array<[number, number]>> = [];
+      if (geomObj.type === "Polygon") {
+        const r0 = (geomObj.coordinates as unknown[][])[0];
+        if (Array.isArray(r0)) rings.push(r0 as Array<[number, number]>);
+      } else if (geomObj.type === "MultiPolygon") {
+        for (const poly of geomObj.coordinates as unknown[][][]) {
+          if (Array.isArray(poly?.[0])) rings.push(poly[0] as Array<[number, number]>);
         }
-        rings.forEach((ring) => {
-          if (ring.length < 3) return;
-          const pts = ring.map(([lon, lat]) => toSceneVec(lat, lon, lookupElevNear(lat, lon), 4.0));
-          const geom = new THREE.BufferGeometry().setFromPoints(pts);
-          const mat = new THREE.LineBasicMaterial({ color: "#22B8CF", transparent: true, opacity: 0.95 });
-          overlayGroup.add(new THREE.Line(geom, mat));
+      }
+      rings.forEach((ring) => {
+        if (ring.length < 3) return;
+        const pts = ring.map(([lon, lat]) => toSceneVec(lat, lon, lookupElevNear(lat, lon), yOffset));
+        const geom = new THREE.BufferGeometry().setFromPoints(pts);
+        const mat = new THREE.LineBasicMaterial({ color: colorHex, transparent: true, opacity: 0.95 });
+        overlayGroup.add(new THREE.Line(geom, mat));
+      });
+    };
+
+    const markerLat = landingSiteMarker?.lat ?? landingSiteBundle?.landing_site?.latitude ?? null;
+    const markerLon = landingSiteMarker?.lonEast ?? landingSiteBundle?.landing_site?.longitude_east ?? null;
+    const markerName = landingSiteMarker?.name ?? landingSiteBundle?.landing_site?.name ?? "Landing Site";
+    const markerExplicitElev = landingSiteMarker
+      ? landingSiteMarker.isNoData
+        ? null
+        : landingSiteMarker.elevationM
+      : landingSiteBundle?.landing_site?.elevation_m ?? null;
+
+    if (showLandingSiteOverlay && markerLat != null && markerLon != null) {
+      const sampledElev = lookupElevNear(markerLat, markerLon);
+      const validElev = sampledElev !== null ? sampledElev : markerExplicitElev;
+      if (validElev !== null) {
+        const markerPos = toSceneVec(markerLat, markerLon, validElev, 2.5);
+        addBeaconPin(
+          markerPos,
+          "#38bdf8",
+          1.45,
+          { kind: "landing_site", name: markerName },
+          "destination"
+        );
+        const ringGeom = new THREE.RingGeometry(4.5, 6.2, 32);
+        ringGeom.rotateX(-Math.PI / 2);
+        const ringMat = new THREE.MeshBasicMaterial({
+          color: "#38bdf8",
+          side: THREE.DoubleSide,
+          transparent: true,
+          opacity: 0.85,
         });
+        const ringMesh = new THREE.Mesh(ringGeom, ringMat);
+        ringMesh.position.copy(markerPos);
+        ringMesh.position.y += 0.6;
+        overlayGroup.add(ringMesh);
+      }
+    }
+
+    if (showLandingSiteOverlay && activePerimeter) {
+      if (activePerimeter.geometry_geojson) {
+        renderGeoJsonRings(activePerimeter.geometry_geojson, "#22c55e", 4.0);
+      }
+      if (activePerimeter.excluded_regions_geojson) {
+        renderGeoJsonRings(activePerimeter.excluded_regions_geojson, "#f97316", 3.6);
+      }
+      const unknownGeo =
+        activePerimeter.unknown_regions_geojson ||
+        ((activePerimeter.provenance?.unknown_regions_geojson as Record<string, unknown> | undefined) ?? null);
+      if (unknownGeo) {
+        renderGeoJsonRings(unknownGeo, "#a855f7", 3.8);
       }
     }
 
@@ -2073,6 +2130,8 @@ export function LocalTerrain3DViewer({
     effectiveRoverAssoc,
     measurePoints,
     landingSiteBundle,
+    landingSiteMarker,
+    perimeterData,
     crewPositions,
     fieldObservations,
     sosEvents,

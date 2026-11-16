@@ -488,6 +488,11 @@ class LandingSiteResponse(BaseModel):
     terrain_dataset_id: Optional[str] = None
     dem_coverage_state: Literal["COVERED_DEM", "OUTSIDE_EVALUATED_DEM_COVERAGE", "UNVERIFIED_EXTERNAL"]
     registration_state: LandingSiteRegistrationState
+    dataset_selection_reason: Optional[str] = None
+    native_resolution_m: Optional[float] = None
+    vertical_datum: Optional[str] = None
+    sample_is_nodata: bool = False
+    nodata_reason: Optional[str] = None
     updated_by: str
     history: List[Dict[str, Any]] = Field(default_factory=list)
     created_at_utc: str
@@ -511,6 +516,7 @@ class LandingSitePerimeterResponse(BaseModel):
     coverage_fraction: Optional[float] = None
     geometry_geojson: Optional[Dict[str, Any]] = None
     excluded_regions_geojson: Optional[Dict[str, Any]] = None
+    unknown_regions_geojson: Optional[Dict[str, Any]] = None
     constraints_used: Dict[str, Any] = Field(default_factory=dict)
     constraints_missing: List[str] = Field(default_factory=list)
     limitations: List[str] = Field(default_factory=list)
@@ -519,6 +525,32 @@ class LandingSitePerimeterResponse(BaseModel):
     approved_by: Optional[str] = None
     approved_at_utc: Optional[str] = None
     created_at_utc: str
+
+
+class CoveringDemCandidate(BaseModel):
+    dataset_id: str
+    product_id: str
+    product_title: str
+    native_resolution_m: Optional[float] = None
+    crs: str = "IAU2000:49900"
+    vertical_datum: Optional[str] = None
+    provenance: Optional[str] = None
+    source_type: Literal["PROCESSED_DEM", "CATALOG_DEM"] = "CATALOG_DEM"
+    local_slope_suitable: bool = False
+    suitability_summary: Optional[str] = None
+    selection_reason: str
+
+
+class LandingSiteCoverageDiscoveryResponse(BaseModel):
+    latitude: float
+    longitude_east: float
+    crs: str = "IAU2000:49900"
+    covered: bool
+    selected_dataset: Optional[CoveringDemCandidate] = None
+    covering_datasets: List[CoveringDemCandidate] = Field(default_factory=list)
+    elevation_m: Optional[float] = None
+    sample_is_nodata: bool = False
+    unavailable_reason: Optional[str] = None
 
 
 class LandingSiteBundleResponse(BaseModel):

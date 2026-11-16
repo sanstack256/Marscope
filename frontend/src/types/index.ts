@@ -4100,6 +4100,11 @@ export interface LandingSiteRecord {
   terrain_dataset_id?: string | null;
   dem_coverage_state: "COVERED_DEM" | "OUTSIDE_EVALUATED_DEM_COVERAGE" | "UNVERIFIED_EXTERNAL";
   registration_state: "LANDING_SITE_UNCONFIGURED" | "REGISTERED";
+  dataset_selection_reason?: string | null;
+  native_resolution_m?: number | null;
+  vertical_datum?: string | null;
+  sample_is_nodata?: boolean;
+  nodata_reason?: string | null;
   updated_by: string;
   history: Array<Record<string, unknown>>;
   created_at_utc: string;
@@ -4122,6 +4127,7 @@ export interface LandingSitePerimeter {
   coverage_fraction?: number | null;
   geometry_geojson?: Record<string, unknown> | null;
   excluded_regions_geojson?: Record<string, unknown> | null;
+  unknown_regions_geojson?: Record<string, unknown> | null;
   constraints_used: Record<string, unknown>;
   constraints_missing: string[];
   limitations: string[];
@@ -4130,6 +4136,32 @@ export interface LandingSitePerimeter {
   approved_by?: string | null;
   approved_at_utc?: string | null;
   created_at_utc: string;
+}
+
+export interface CoveringDemCandidate {
+  dataset_id: string;
+  product_id: string;
+  product_title: string;
+  native_resolution_m?: number | null;
+  crs: string;
+  vertical_datum?: string | null;
+  provenance?: string | null;
+  source_type: "PROCESSED_DEM" | "CATALOG_DEM";
+  local_slope_suitable: boolean;
+  suitability_summary?: string | null;
+  selection_reason: string;
+}
+
+export interface LandingSiteCoverageDiscovery {
+  latitude: number;
+  longitude_east: number;
+  crs: string;
+  covered: boolean;
+  selected_dataset?: CoveringDemCandidate | null;
+  covering_datasets: CoveringDemCandidate[];
+  elevation_m?: number | null;
+  sample_is_nodata: boolean;
+  unavailable_reason?: string | null;
 }
 
 export interface LandingSiteBundle {

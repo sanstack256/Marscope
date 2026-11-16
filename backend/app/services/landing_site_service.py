@@ -35,16 +35,26 @@ from app.geospatial.crs import (
     validate_mars_coordinates,
     validate_mars_crs,
 )
+from app.mobility.coverage import _resolve_raw_dem_open_path, is_dataset_asset_available
+from app.mobility.resolution import evaluate_dem_resolution_suitability
 from app.schemas.mission_collab import (
     ComputePerimeterRequest,
+    CoveringDemCandidate,
     GazetteerSiteRecord,
     LandingSiteBundleResponse,
+    LandingSiteCoverageDiscoveryResponse,
     LandingSitePerimeterResponse,
     LandingSiteResponse,
     RegisterLandingSiteRequest,
 )
 from app.services.mission_event_service import MissionEventService
 from app.services.realtime_hub import MissionRealtimeHub
+from app.terrain.roughness import calculate_roughness_tri_with_metadata
+from app.terrain.slope import calculate_slope
+from rasterio.crs import CRS
+from rasterio.vrt import WarpedVRT
+
+MARS_GEOG_CRS = CRS.from_proj4("+proj=longlat +R=3396190 +no_defs")
 
 
 ALGORITHM_ID = "dem_bfs_slope_roughness_boundary"
@@ -61,6 +71,7 @@ class LandingSiteService:
         catalog_service: Any,
         destination_service: Any,
         processed_dir: Path,
+        raw_dir: Optional[Path] = None,
     ) -> None:
         self._db = db
         self._events = event_service
@@ -68,6 +79,7 @@ class LandingSiteService:
         self._catalog = catalog_service
         self._destination = destination_service
         self._processed_dir = processed_dir
+        self._raw_dir = raw_dir or (processed_dir.parent / "raw")
 
     # ------------------------------------------------------------------
     # Catalog-Backed Mars Gazetteer Search (No Hardcoded Fake Coordinates)
@@ -109,33 +121,35 @@ class LandingSiteService:
             except Exception:
                 continue
 
-        # 2. Catalog datasets that provide explicit verified planetary bounding boxes
+        # 2. Catalog DEM/imagery datasets that provide explicit verified planetary coverage
+        seen_ids = {r.dataset_id for r in records}
         try:
             for ds in self._catalog.list_datasets():
-                bbox = getattr(ds, "bounding_box", None)
-                if not bbox:
+                if ds.id in seen_ids:
                     continue
-                min_lat = getattr(bbox, "min_lat", None)
-                max_lat = getattr(bbox, "max_lat", None)
-                min_lon = getattr(bbox, "min_lon", None)
-                max_lon = getattr(bbox, "max_lon", None)
-                if None in (min_lat, max_lat, min_lon, max_lon):
+                if "DEM" not in (ds.product_type or "").upper():
                     continue
-                c_lat = (float(min_lat) + float(max_lat)) / 2.0
-                c_lon = normalize_longitude_360((float(min_lon) + float(max_lon)) / 2.0)
+                cov = getattr(ds, "coverage", None)
+                if not cov:
+                    continue
+                c_lat = (float(cov.min_latitude) + float(cov.max_latitude)) / 2.0
+                c_lon = normalize_longitude_360((float(cov.min_longitude) + float(cov.max_longitude)) / 2.0)
+                available = is_dataset_asset_available(ds, self._raw_dir)
+                if not available:
+                    continue
                 records.append(
                     GazetteerSiteRecord(
-                        record_id=f"catalog:{ds.dataset_id}",
-                        name=f"{ds.name} Center",
-                        region=ds.region,
+                        record_id=f"catalog:{ds.id}",
+                        name=f"{ds.product_title} Center",
+                        region=ds.map_projection or ds.source_archive,
                         latitude=round(c_lat, 6),
                         longitude_east=round(c_lon, 6),
-                        crs="IAU2000:49900",
+                        crs=ds.coordinate_reference_system or "IAU2000:49900",
                         source="DATASET_CATALOG_MATCH",
-                        dataset_id=ds.dataset_id,
+                        dataset_id=ds.id,
                         coverage_verified=True,
                         elevation_m=None,
-                        uncertainty_m=None,
+                        uncertainty_m=ds.horizontal_resolution_meters,
                     )
                 )
         except Exception:
@@ -150,6 +164,244 @@ class LandingSiteService:
                 or q in r.dataset_id.lower()
             ]
         return records
+
+    # ------------------------------------------------------------------
+    # Dynamic DEM Coverage Discovery & Point Sampling
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _bounds_contain(
+        min_lat: float,
+        max_lat: float,
+        min_lon: float,
+        max_lon: float,
+        lat: float,
+        lon_east: float,
+    ) -> bool:
+        if not (min_lat <= lat <= max_lat):
+            return False
+        lon_360 = normalize_longitude_360(lon_east)
+        lon_180 = normalize_longitude_180(lon_east)
+        if min_lon <= max_lon:
+            return (min_lon <= lon_360 <= max_lon) or (min_lon <= lon_180 <= max_lon)
+        return (lon_360 >= min_lon or lon_360 <= max_lon) or (lon_180 >= min_lon or lon_180 <= max_lon)
+
+    def _discover_covering_candidates(
+        self,
+        lat: float,
+        lon_east: float,
+    ) -> List[Tuple[CoveringDemCandidate, Optional[Dict[str, Any]], Optional[Any]]]:
+        """Find all available processed or catalog/GCS DEMs whose coverage contains (lat, lon_east)."""
+        found: List[Tuple[CoveringDemCandidate, Optional[Dict[str, Any]], Optional[Any]]] = []
+        seen_ids: set[str] = set()
+
+        # 1. Precomputed processed DEMs (if present on disk)
+        for mpath in sorted(self._processed_dir.glob("*.processing.json")):
+            try:
+                m = json.loads(mpath.read_text(encoding="utf-8"))
+                files = m.get("files") or {}
+                dem_fname = files.get("dem")
+                if not dem_fname:
+                    continue
+                dem_path = self._processed_dir / dem_fname
+                if not dem_path.exists():
+                    continue
+                bounds = m.get("analysis_footprint_bounds") or m.get("requested_bounds")
+                if not bounds:
+                    with rasterio.open(dem_path) as src:
+                        sb = src.bounds
+                        bounds = {"min_lat": sb.bottom, "max_lat": sb.top, "min_lon": sb.left, "max_lon": sb.right}
+                if not self._bounds_contain(
+                    float(bounds["min_lat"]),
+                    float(bounds["max_lat"]),
+                    float(bounds["min_lon"]),
+                    float(bounds["max_lon"]),
+                    lat,
+                    lon_east,
+                ):
+                    continue
+                ds_id = str(m.get("source_dataset_id") or mpath.stem.replace(".processing", ""))
+                dx_m = float(m.get("dx_meters")) if m.get("dx_meters") else None
+                suit = evaluate_dem_resolution_suitability(
+                    native_resolution_m=dx_m,
+                    effective_resolution_m=dx_m,
+                    dem_available=True,
+                )
+                local_ok = bool(suit["local_slope_analysis"].supported)
+                cand = CoveringDemCandidate(
+                    dataset_id=ds_id,
+                    product_id=str(m.get("source_product_id") or ds_id),
+                    product_title=(m.get("summary") or {}).get("study_area_name") or ds_id,
+                    native_resolution_m=dx_m,
+                    crs=str(m.get("crs") or "IAU2000:49900"),
+                    vertical_datum=m.get("vertical_datum") or "MOLA Areoid",
+                    provenance=f"Validated processed DEM ({dem_fname})",
+                    source_type="PROCESSED_DEM",
+                    local_slope_suitable=local_ok,
+                    suitability_summary=suit["local_slope_analysis"].explanation,
+                    selection_reason=(
+                        f"Selected processed DEM '{ds_id}' ({dx_m:.2f} m/px) covering ({lat:.4f}, {lon_east:.4f} E)."
+                        if dx_m
+                        else f"Selected processed DEM '{ds_id}' covering ({lat:.4f}, {lon_east:.4f} E)."
+                    ),
+                )
+                seen_ids.add(ds_id)
+                found.append((cand, m, None))
+            except Exception:
+                continue
+
+        # 2. Catalog DEMs available locally or in GCS
+        try:
+            for ds in self._catalog.list_datasets():
+                if ds.id in seen_ids:
+                    continue
+                if "DEM" not in (ds.product_type or "").upper():
+                    continue
+                cov = getattr(ds, "coverage", None)
+                if not cov:
+                    continue
+                if not self._bounds_contain(
+                    float(cov.min_latitude),
+                    float(cov.max_latitude),
+                    float(cov.min_longitude),
+                    float(cov.max_longitude),
+                    lat,
+                    lon_east,
+                ):
+                    continue
+                if not is_dataset_asset_available(ds, self._raw_dir):
+                    continue
+                res_m = ds.horizontal_resolution_meters
+                suit = evaluate_dem_resolution_suitability(
+                    native_resolution_m=res_m,
+                    effective_resolution_m=res_m,
+                    dem_available=True,
+                )
+                local_ok = bool(suit["local_slope_analysis"].supported)
+                cand = CoveringDemCandidate(
+                    dataset_id=ds.id,
+                    product_id=ds.product_id,
+                    product_title=ds.product_title,
+                    native_resolution_m=res_m,
+                    crs=ds.coordinate_reference_system or "IAU2000:49900",
+                    vertical_datum=ds.calibration_status or "MOLA Areoid",
+                    provenance=f"{ds.source_archive} ({ds.doi_or_pds_id or ds.product_id})",
+                    source_type="CATALOG_DEM",
+                    local_slope_suitable=local_ok,
+                    suitability_summary=suit["local_slope_analysis"].explanation,
+                    selection_reason=(
+                        f"Selected '{ds.id}' ({res_m:.2f} m/px) — highest-resolution verified DEM covering ({lat:.4f}, {lon_east:.4f} E)."
+                        if res_m
+                        else f"Selected '{ds.id}' covering ({lat:.4f}, {lon_east:.4f} E)."
+                    ),
+                )
+                seen_ids.add(ds.id)
+                found.append((cand, None, ds))
+        except Exception:
+            pass
+
+        found.sort(
+            key=lambda item: (
+                0 if item[0].source_type == "PROCESSED_DEM" else 1,
+                item[0].native_resolution_m if item[0].native_resolution_m is not None else 1e12,
+            )
+        )
+        return found
+
+    def _sample_raw_catalog_dem_point(
+        self,
+        ds: Any,
+        lat: float,
+        lon_east: float,
+    ) -> Tuple[Optional[float], bool, Optional[str]]:
+        """Sample a single verified elevation value from a raw/GCS catalog DEM."""
+        open_path, _ = _resolve_raw_dem_open_path(ds, self._raw_dir)
+        with rasterio.open(open_path) as src:
+            def _sample(reader: Any) -> Tuple[Optional[float], bool, Optional[str]]:
+                rb = reader.bounds
+                s_lon = normalize_longitude_360(lon_east) if rb.right > 180.0 else normalize_longitude_180(lon_east)
+                if not (rb.left <= s_lon <= rb.right and rb.bottom <= lat <= rb.top):
+                    return None, False, f"Coordinate ({lat:.4f}, {lon_east:.4f} E) falls outside raster footprint."
+                row, col = reader.index(s_lon, lat)
+                if row < 0 or row >= reader.height or col < 0 or col >= reader.width:
+                    return None, False, f"Coordinate ({lat:.4f}, {lon_east:.4f} E) falls outside raster pixel grid."
+                win = Window(col, row, 1, 1)
+                val = float(reader.read(1, window=win)[0, 0])
+                nodata = reader.nodatavals[0]
+                if not np.isfinite(val) or (nodata is not None and np.isfinite(nodata) and val == float(nodata)):
+                    return None, True, f"Coordinate ({lat:.4f}, {lon_east:.4f} E) falls on a NO-DATA pixel in '{ds.id}'."
+                return round(val, 3), False, None
+
+            if src.crs and src.crs.is_projected:
+                with WarpedVRT(src, crs=MARS_GEOG_CRS) as vrt:
+                    return _sample(vrt)
+            return _sample(src)
+
+    def discover_coverage(self, latitude: float, longitude_east: float) -> LandingSiteCoverageDiscoveryResponse:
+        try:
+            lat, lon_v = validate_mars_coordinates(latitude, longitude_east, "Planetocentric", "East")
+        except CRSError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        lon_east = normalize_longitude_360(lon_v)
+
+        matches = self._discover_covering_candidates(lat, lon_east)
+        if not matches:
+            return LandingSiteCoverageDiscoveryResponse(
+                latitude=lat,
+                longitude_east=lon_east,
+                crs="IAU2000:49900",
+                covered=False,
+                selected_dataset=None,
+                covering_datasets=[],
+                elevation_m=None,
+                sample_is_nodata=False,
+                unavailable_reason=(
+                    f"No available verified DEM in the catalog or GCS covers ({lat:.4f}, {lon_east:.4f} E). "
+                    "Terrain elevation and perimeter evaluation cannot be performed outside DEM coverage."
+                ),
+            )
+
+        candidates = [m[0] for m in matches]
+        selected_cand, processed_manifest, catalog_ds = matches[0]
+        elev_m: Optional[float] = None
+        sample_is_nodata = False
+        unavailable_reason: Optional[str] = None
+
+        if processed_manifest is not None:
+            try:
+                pt = self._destination.sample_processed_terrain_point(
+                    latitude=lat,
+                    longitude=lon_east,
+                    crs="IAU2000:49900",
+                    latitude_convention="Planetocentric",
+                    longitude_direction="East",
+                )
+                if pt.available and pt.elevation_m is not None:
+                    elev_m = float(pt.elevation_m)
+                else:
+                    sample_is_nodata = True
+                    unavailable_reason = pt.unavailable_reason
+            except Exception as exc:
+                unavailable_reason = str(exc)
+        elif catalog_ds is not None:
+            try:
+                elev_m, sample_is_nodata, unavailable_reason = self._sample_raw_catalog_dem_point(
+                    catalog_ds, lat, lon_east
+                )
+            except Exception as exc:
+                unavailable_reason = f"Failed to sample covering DEM '{selected_cand.dataset_id}': {exc}"
+
+        return LandingSiteCoverageDiscoveryResponse(
+            latitude=lat,
+            longitude_east=lon_east,
+            crs="IAU2000:49900",
+            covered=True,
+            selected_dataset=selected_cand,
+            covering_datasets=candidates,
+            elevation_m=elev_m,
+            sample_is_nodata=sample_is_nodata,
+            unavailable_reason=unavailable_reason,
+        )
 
     # ------------------------------------------------------------------
     # Landing-Site Registration & Read
@@ -205,6 +457,12 @@ class LandingSiteService:
         elev_m: Optional[float] = None
         dataset_id: Optional[str] = None
         coverage_state = "OUTSIDE_EVALUATED_DEM_COVERAGE"
+        selection_reason: Optional[str] = None
+        native_resolution_m: Optional[float] = None
+        vertical_datum: Optional[str] = None
+        sample_is_nodata = False
+        nodata_reason: Optional[str] = None
+
         try:
             pt = self._destination.sample_processed_terrain_point(
                 latitude=lat,
@@ -216,9 +474,33 @@ class LandingSiteService:
             if pt.available and pt.elevation_m is not None:
                 elev_m = float(pt.elevation_m)
                 dataset_id = pt.source_dataset_id or pt.source_product_id
+                native_resolution_m = pt.resolution_m
                 coverage_state = "COVERED_DEM"
+            elif pt.unavailable_reason and "NO-DATA" in pt.unavailable_reason.upper():
+                sample_is_nodata = True
+                nodata_reason = pt.unavailable_reason
+                dataset_id = pt.source_dataset_id
+                native_resolution_m = pt.resolution_m
         except Exception:
-            coverage_state = "OUTSIDE_EVALUATED_DEM_COVERAGE"
+            pass
+
+        if coverage_state != "COVERED_DEM" and not sample_is_nodata:
+            discovery = self.discover_coverage(lat, lon_east)
+            if discovery.covered and discovery.selected_dataset is not None:
+                sel = discovery.selected_dataset
+                dataset_id = sel.dataset_id
+                native_resolution_m = sel.native_resolution_m
+                vertical_datum = sel.vertical_datum
+                selection_reason = sel.selection_reason
+                if discovery.elevation_m is not None and not discovery.sample_is_nodata:
+                    elev_m = float(discovery.elevation_m)
+                    coverage_state = "COVERED_DEM"
+                elif discovery.sample_is_nodata:
+                    sample_is_nodata = True
+                    nodata_reason = discovery.unavailable_reason
+                    coverage_state = "OUTSIDE_EVALUATED_DEM_COVERAGE"
+            else:
+                nodata_reason = discovery.unavailable_reason
 
         now_iso = datetime.now(timezone.utc).isoformat()
         with self._db.transaction() as conn:
@@ -329,6 +611,12 @@ class LandingSiteService:
             )
 
         bundle = self.get_bundle(mission_id)
+        if bundle.landing_site is not None:
+            bundle.landing_site.dataset_selection_reason = selection_reason
+            bundle.landing_site.native_resolution_m = native_resolution_m
+            bundle.landing_site.vertical_datum = vertical_datum
+            bundle.landing_site.sample_is_nodata = sample_is_nodata
+            bundle.landing_site.nodata_reason = nodata_reason
         self._hub.publish_mission_event(
             mission_id,
             event_type="LANDING_SITE_REGISTERED",
@@ -499,28 +787,35 @@ class LandingSiteService:
     # ------------------------------------------------------------------
 
     def _select_covering_manifest(self, lat: float, lon_east: float) -> Optional[Dict[str, Any]]:
-        candidates: List[Dict[str, Any]] = []
-        for mpath in self._processed_dir.glob("*.processing.json"):
-            try:
-                m = json.loads(mpath.read_text(encoding="utf-8"))
-                files = m.get("files") or {}
-                if not all(files.get(k) for k in ("dem", "slope", "roughness")):
-                    continue
-                dem_path = self._processed_dir / files["dem"]
-                if not dem_path.exists():
-                    continue
-                with rasterio.open(dem_path) as src:
-                    sb = src.bounds
-                    s_lon = normalize_longitude_360(lon_east) if sb.right > 180.0 else normalize_longitude_180(lon_east)
-                    if sb.left <= s_lon <= sb.right and sb.bottom <= lat <= sb.top:
-                        m["_resolved_lon"] = s_lon
-                        candidates.append(m)
-            except Exception:
-                continue
-        if not candidates:
+        matches = self._discover_covering_candidates(lat, lon_east)
+        if not matches:
             return None
-        candidates.sort(key=lambda item: float(item.get("dx_meters", 1e12)))
-        return candidates[0]
+
+        for cand, processed_manifest, catalog_ds in matches:
+            if not cand.local_slope_suitable:
+                continue
+            if processed_manifest is not None:
+                files = processed_manifest.get("files") or {}
+                if all(files.get(k) for k in ("dem", "slope", "roughness")):
+                    dem_path = self._processed_dir / files["dem"]
+                    if dem_path.exists():
+                        with rasterio.open(dem_path) as src:
+                            sb = src.bounds
+                            s_lon = normalize_longitude_360(lon_east) if sb.right > 180.0 else normalize_longitude_180(lon_east)
+                            if sb.left <= s_lon <= sb.right and sb.bottom <= lat <= sb.top:
+                                out = dict(processed_manifest)
+                                out["_resolved_lon"] = s_lon
+                                return out
+            elif catalog_ds is not None:
+                return {
+                    "_catalog_dataset": catalog_ds,
+                    "source_dataset_id": catalog_ds.id,
+                    "source_product_id": catalog_ds.product_id,
+                    "dx_meters": catalog_ds.horizontal_resolution_meters,
+                    "dy_meters": catalog_ds.horizontal_resolution_meters,
+                    "crs": catalog_ds.coordinate_reference_system or "IAU2000:49900",
+                }
+        return None
 
     def _run_dem_bfs_perimeter(
         self,
@@ -533,189 +828,302 @@ class LandingSiteService:
         max_radius_m: float,
         min_contiguous_cells: int,
     ) -> Dict[str, Any]:
+        dataset_id = str(manifest.get("source_dataset_id", "unknown"))
+        catalog_ds = manifest.get("_catalog_dataset")
+
+        if catalog_ds is not None:
+            open_path, _ = _resolve_raw_dem_open_path(catalog_ds, self._raw_dir)
+            with rasterio.open(open_path) as raw_src:
+                if raw_src.crs and raw_src.crs.is_projected:
+                    with WarpedVRT(raw_src, crs=MARS_GEOG_CRS) as vrt:
+                        return self._evaluate_bfs_from_dem_reader(
+                            dem_src=vrt,
+                            slope_src=None,
+                            rough_src=None,
+                            manifest=manifest,
+                            dataset_id=dataset_id,
+                            center_lat=center_lat,
+                            center_lon_east=center_lon_east,
+                            max_slope_deg=max_slope_deg,
+                            max_roughness_m=max_roughness_m,
+                            max_radius_m=max_radius_m,
+                            min_contiguous_cells=min_contiguous_cells,
+                        )
+                return self._evaluate_bfs_from_dem_reader(
+                    dem_src=raw_src,
+                    slope_src=None,
+                    rough_src=None,
+                    manifest=manifest,
+                    dataset_id=dataset_id,
+                    center_lat=center_lat,
+                    center_lon_east=center_lon_east,
+                    max_slope_deg=max_slope_deg,
+                    max_roughness_m=max_roughness_m,
+                    max_radius_m=max_radius_m,
+                    min_contiguous_cells=min_contiguous_cells,
+                )
+
         files = manifest["files"]
         dem_path = self._processed_dir / files["dem"]
         slope_path = self._processed_dir / files["slope"]
         rough_path = self._processed_dir / files["roughness"]
-        dataset_id = manifest.get("source_dataset_id", "unknown")
 
         with rasterio.open(dem_path) as dem_src, rasterio.open(slope_path) as slope_src, rasterio.open(rough_path) as rough_src:
-            dx_native = float(manifest.get("dx_meters") or 0.0)
-            dy_native = float(manifest.get("dy_meters") or 0.0)
-            if dx_native <= 0 or dy_native <= 0:
-                dx_native, dy_native = angular_displacement_to_metric(
-                    center_lat, abs(dem_src.transform.a), abs(dem_src.transform.e)
-                )
+            return self._evaluate_bfs_from_dem_reader(
+                dem_src=dem_src,
+                slope_src=slope_src,
+                rough_src=rough_src,
+                manifest=manifest,
+                dataset_id=dataset_id,
+                center_lat=center_lat,
+                center_lon_east=center_lon_east,
+                max_slope_deg=max_slope_deg,
+                max_roughness_m=max_roughness_m,
+                max_radius_m=max_radius_m,
+                min_contiguous_cells=min_contiguous_cells,
+            )
 
-            # Determine bounding pixel window around max_radius_m
-            deg_per_px_x = abs(dem_src.transform.a)
-            deg_per_px_y = abs(dem_src.transform.e)
-            half_cols = max(8, int(math.ceil(max_radius_m / max(dx_native, 0.5))) + 2)
-            half_rows = max(8, int(math.ceil(max_radius_m / max(dy_native, 0.5))) + 2)
+    def _evaluate_bfs_from_dem_reader(
+        self,
+        *,
+        dem_src: Any,
+        slope_src: Optional[Any],
+        rough_src: Optional[Any],
+        manifest: Dict[str, Any],
+        dataset_id: str,
+        center_lat: float,
+        center_lon_east: float,
+        max_slope_deg: float,
+        max_roughness_m: float,
+        max_radius_m: float,
+        min_contiguous_cells: int,
+    ) -> Dict[str, Any]:
+        dx_native = float(manifest.get("dx_meters") or 0.0)
+        dy_native = float(manifest.get("dy_meters") or 0.0)
+        if dx_native <= 0 or dy_native <= 0:
+            dx_native, dy_native = angular_displacement_to_metric(
+                center_lat, abs(dem_src.transform.a), abs(dem_src.transform.e)
+            )
 
-            s_lon = float(manifest.get("_resolved_lon", center_lon_east))
-            c_row, c_col = dem_src.index(s_lon, center_lat)
+        deg_per_px_x = abs(dem_src.transform.a)
+        deg_per_px_y = abs(dem_src.transform.e)
+        half_cols = max(8, int(math.ceil(max_radius_m / max(dx_native, 0.5))) + 2)
+        half_rows = max(8, int(math.ceil(max_radius_m / max(dy_native, 0.5))) + 2)
 
-            r0 = max(0, c_row - half_rows)
-            r1 = min(dem_src.height, c_row + half_rows + 1)
-            c0 = max(0, c_col - half_cols)
-            c1 = min(dem_src.width, c_col + half_cols + 1)
-            win = Window(c0, r0, c1 - c0, r1 - r0)
+        rb = dem_src.bounds
+        s_lon = normalize_longitude_360(center_lon_east) if rb.right > 180.0 else normalize_longitude_180(center_lon_east)
+        c_row, c_col = dem_src.index(s_lon, center_lat)
 
-            dem_arr = dem_src.read(1, window=win).astype(np.float64)
-            slope_arr = slope_src.read(1, window=win).astype(np.float64)
-            rough_arr = rough_src.read(1, window=win).astype(np.float64)
+        r0 = max(0, c_row - half_rows)
+        r1 = min(dem_src.height, c_row + half_rows + 1)
+        c0 = max(0, c_col - half_cols)
+        c1 = min(dem_src.width, c_col + half_cols + 1)
+        win = Window(c0, r0, c1 - c0, r1 - r0)
 
-            dem_nodata = dem_src.nodatavals[0]
+        h_win = max(1, r1 - r0)
+        w_win = max(1, c1 - c0)
+        stride = max(1, int(math.ceil(max(h_win, w_win) / 72.0)))
+
+        dem_arr = dem_src.read(1, window=win).astype(np.float64)
+        dem_g = dem_arr[::stride, ::stride]
+        dem_nodata = dem_src.nodatavals[0]
+        valid_dem = np.isfinite(dem_g)
+        if dem_nodata is not None and np.isfinite(dem_nodata):
+            valid_dem &= dem_g != float(dem_nodata)
+
+        step_m_x = dx_native * stride
+        step_m_y = dy_native * stride
+        gh, gw = dem_g.shape
+        seed_r = min(gh - 1, max(0, (c_row - r0) // stride))
+        seed_c = min(gw - 1, max(0, (c_col - c0) // stride))
+
+        if slope_src is not None and rough_src is not None:
+            slope_g = slope_src.read(1, window=win).astype(np.float64)[::stride, ::stride]
+            rough_g = rough_src.read(1, window=win).astype(np.float64)[::stride, ::stride]
             slope_nodata = slope_src.nodatavals[0]
             rough_nodata = rough_src.nodatavals[0]
-
-            # Stride downsample if window is very large (keep execution deterministic and crisp <= 90x90 grid)
-            h, w = dem_arr.shape
-            stride = max(1, int(math.ceil(max(h, w) / 72.0)))
-            dem_g = dem_arr[::stride, ::stride]
-            slope_g = slope_arr[::stride, ::stride]
-            rough_g = rough_arr[::stride, ::stride]
-
-            gh, gw = dem_g.shape
-            seed_r = min(gh - 1, max(0, (c_row - r0) // stride))
-            seed_c = min(gw - 1, max(0, (c_col - c0) // stride))
-
-            valid_dem = np.isfinite(dem_g)
-            if dem_nodata is not None and np.isfinite(dem_nodata):
-                valid_dem &= dem_g != float(dem_nodata)
-
             valid_slope = np.isfinite(slope_g)
             if slope_nodata is not None and np.isfinite(slope_nodata):
                 valid_slope &= slope_g != float(slope_nodata)
-
             valid_rough = np.isfinite(rough_g)
             if rough_nodata is not None and np.isfinite(rough_nodata):
                 valid_rough &= rough_g != float(rough_nodata)
+        else:
+            dem_for_deriv = np.where(valid_dem, dem_g, np.nan)
+            slope_g, _ = calculate_slope(
+                dem_for_deriv,
+                step_m_x,
+                step_m_y,
+                nodata_mask=~valid_dem,
+                vertical_units="meters",
+            )
+            rough_g, _ = calculate_roughness_tri_with_metadata(
+                dem_for_deriv,
+                dx_meters=step_m_x,
+                dy_meters=step_m_y,
+                nodata_mask=~valid_dem,
+                vertical_units="meters",
+            )
+            valid_slope = np.isfinite(slope_g)
+            valid_rough = np.isfinite(rough_g)
 
-            known_mask = valid_dem & valid_slope & valid_rough
-            step_m_x = dx_native * stride
-            step_m_y = dy_native * stride
+        known_mask = valid_dem & valid_slope & valid_rough
 
-            # Distance filter inside requested max_radius_m
-            rr, cc = np.ogrid[:gh, :gw]
-            dist_m = np.hypot((rr - seed_r) * step_m_y, (cc - seed_c) * step_m_x)
-            in_radius = dist_m <= max_radius_m
+        rr, cc = np.ogrid[:gh, :gw]
+        dist_m = np.hypot((rr - seed_r) * step_m_y, (cc - seed_c) * step_m_x)
+        in_radius = dist_m <= max_radius_m
 
-            passable = known_mask & in_radius & (slope_g <= max_slope_deg) & (rough_g <= max_roughness_m)
+        passable = known_mask & in_radius & (slope_g <= max_slope_deg) & (rough_g <= max_roughness_m)
 
-            visited = np.zeros((gh, gw), dtype=bool)
-            q: deque[Tuple[int, int]] = deque()
-            if passable[seed_r, seed_c]:
-                visited[seed_r, seed_c] = True
-                q.append((seed_r, seed_c))
-            while q:
-                cr, cc_i = q.popleft()
-                for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                    nr, nc = cr + dr, cc_i + dc
-                    if 0 <= nr < gh and 0 <= nc < gw and not visited[nr, nc] and passable[nr, nc]:
-                        visited[nr, nc] = True
-                        q.append((nr, nc))
+        visited = np.zeros((gh, gw), dtype=bool)
+        q: deque[Tuple[int, int]] = deque()
+        if passable[seed_r, seed_c]:
+            visited[seed_r, seed_c] = True
+            q.append((seed_r, seed_c))
+        while q:
+            cr, cc_i = q.popleft()
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nr, nc = cr + dr, cc_i + dc
+                if 0 <= nr < gh and 0 <= nc < gw and not visited[nr, nc] and passable[nr, nc]:
+                    visited[nr, nc] = True
+                    q.append((nr, nc))
 
-            passable_count = int(visited.sum())
-            radius_cells = max(1, int(in_radius.sum()))
-            coverage_fraction = round(float(known_mask[in_radius].sum()) / float(radius_cells), 4)
+        passable_count = int(visited.sum())
+        known_count = int((known_mask & in_radius).sum())
+        unknown_mask = in_radius & (~known_mask)
+        unknown_count = int(unknown_mask.sum())
+        excluded_mask = in_radius & known_mask & (~visited)
+        excluded_count = int(excluded_mask.sum())
+        radius_cells = max(1, int(in_radius.sum()))
+        coverage_fraction = round(float(known_count) / float(radius_cells), 4)
+        max_boundary_dist_m = round(float(dist_m[visited].max()), 2) if passable_count > 0 else 0.0
 
-            cell_dlon = deg_per_px_x * stride
-            cell_dlat = deg_per_px_y * stride
+        cell_dlon = deg_per_px_x * stride
+        cell_dlat = deg_per_px_y * stride
 
-            def _cell_box(gr: int, gc: int) -> Polygon:
-                raw_r = r0 + gr * stride
-                raw_c = c0 + gc * stride
-                lon_w, lat_n = dem_src.xy(raw_r - 0.5, raw_c - 0.5, offset="ul")
-                lon_e = lon_w + cell_dlon
-                lat_s = lat_n - cell_dlat
-                lon_w_360 = normalize_longitude_360(lon_w)
-                lon_e_360 = lon_w_360 + cell_dlon
-                return Polygon(
-                    [
-                        (lon_w_360, lat_s),
-                        (lon_e_360, lat_s),
-                        (lon_e_360, lat_n),
-                        (lon_w_360, lat_n),
-                        (lon_w_360, lat_s),
-                    ]
-                )
+        def _cell_box(gr: int, gc: int) -> Polygon:
+            raw_r = r0 + gr * stride
+            raw_c = c0 + gc * stride
+            lon_w, lat_n = dem_src.xy(raw_r - 0.5, raw_c - 0.5, offset="ul")
+            lat_s = lat_n - cell_dlat
+            lon_w_360 = normalize_longitude_360(lon_w)
+            lon_e_360 = lon_w_360 + cell_dlon
+            return Polygon(
+                [
+                    (lon_w_360, lat_s),
+                    (lon_e_360, lat_s),
+                    (lon_e_360, lat_n),
+                    (lon_w_360, lat_n),
+                    (lon_w_360, lat_s),
+                ]
+            )
 
-            if passable_count < min_contiguous_cells:
-                return {
-                    "status": "INDETERMINATE_OUTSIDE_DEM" if not bool(known_mask[seed_r, seed_c]) else "EVALUATED_WITH_VALIDATED_DEM",
-                    "dataset_id": dataset_id,
-                    "native_resolution_m": round(dx_native, 3),
-                    "coverage_fraction": coverage_fraction,
-                    "geometry_geojson": None,
-                    "excluded_regions_geojson": None,
-                    "limitations": [
-                        f"Only {passable_count} contiguous DEM cells satisfy slope <= {max_slope_deg} deg and roughness <= {max_roughness_m} m.",
-                        "Center cell or contiguous corridor violates terrain constraints; no traversable polygon emitted.",
-                        f"Coarse evaluation stride={stride} ({round(step_m_x, 2)} m/cell).",
-                    ],
-                    "provenance": {
-                        "method": ALGORITHM_ID,
-                        "version": ALGORITHM_VERSION,
-                        "dataset_id": dataset_id,
-                        "stride": stride,
-                        "effective_cell_m": round(step_m_x, 3),
-                        "passable_cells": passable_count,
-                    },
-                }
+        excluded_polys = [_cell_box(int(r), int(c)) for r, c in np.argwhere(excluded_mask)]
+        excluded_geom = unary_union(excluded_polys) if excluded_polys else None
+        unknown_polys = [_cell_box(int(r), int(c)) for r, c in np.argwhere(unknown_mask)]
+        unknown_geom = unary_union(unknown_polys) if unknown_polys else None
 
-            passable_polys = [_cell_box(int(r), int(c)) for r, c in np.argwhere(visited)]
-            perimeter_geom = unary_union(passable_polys)
+        unknown_feature = (
+            {
+                "type": "Feature",
+                "properties": {
+                    "reason": "DEM no-data or insufficient neighborhood for slope/TRI",
+                    "unknown_cells": unknown_count,
+                },
+                "geometry": mapping(unknown_geom),
+            }
+            if unknown_geom is not None
+            else None
+        )
+        excluded_feature = (
+            {
+                "type": "Feature",
+                "properties": {
+                    "reason": "Exceeds slope/roughness limits or disconnected from landing site",
+                    "excluded_cells": excluded_count,
+                },
+                "geometry": mapping(excluded_geom),
+            }
+            if excluded_geom is not None
+            else None
+        )
 
-            excluded_mask = in_radius & (~visited)
-            excluded_polys = [_cell_box(int(r), int(c)) for r, c in np.argwhere(excluded_mask)]
-            excluded_geom = unary_union(excluded_polys) if excluded_polys else None
-
+        if passable_count < min_contiguous_cells:
             return {
-                "status": "EVALUATED_WITH_VALIDATED_DEM",
+                "status": "INDETERMINATE_OUTSIDE_DEM" if not bool(known_mask[seed_r, seed_c]) else "EVALUATED_WITH_VALIDATED_DEM",
                 "dataset_id": dataset_id,
                 "native_resolution_m": round(dx_native, 3),
                 "coverage_fraction": coverage_fraction,
-                "geometry_geojson": {
-                    "type": "Feature",
-                    "properties": {
-                        "classification": PLANNING_BOUNDARY_LABEL,
-                        "dataset_id": dataset_id,
-                        "passable_cells": passable_count,
-                        "area_approx_m2": round(passable_count * step_m_x * step_m_y, 1),
-                        "effective_cell_m": round(step_m_x, 2),
-                    },
-                    "geometry": mapping(perimeter_geom),
-                },
-                "excluded_regions_geojson": (
-                    {
-                        "type": "Feature",
-                        "properties": {
-                            "reason": "Exceeds slope/roughness limits, disconnected, or DEM no-data",
-                            "excluded_cells": len(excluded_polys),
-                        },
-                        "geometry": mapping(excluded_geom),
-                    }
-                    if excluded_geom is not None
-                    else None
-                ),
+                "geometry_geojson": None,
+                "excluded_regions_geojson": excluded_feature,
                 "limitations": [
-                    PLANNING_BOUNDARY_LABEL,
-                    f"Sub-resolution hazards below {round(dx_native, 2)} m native DEM pixel spacing cannot be resolved.",
-                    "Boundary reflects DEM slope and TRI roughness constraints only; regolith bearing strength and radiation are excluded.",
+                    f"Only {passable_count} contiguous DEM cells satisfy slope <= {max_slope_deg} deg and roughness <= {max_roughness_m} m.",
+                    "Center cell or contiguous corridor violates terrain constraints or lacks valid DEM samples; no traversable polygon emitted.",
+                    f"Evaluation stride={stride} ({round(step_m_x, 2)} m/cell); known={known_count}, excluded={excluded_count}, unknown={unknown_count}.",
                 ],
                 "provenance": {
                     "method": ALGORITHM_ID,
                     "version": ALGORITHM_VERSION,
                     "dataset_id": dataset_id,
                     "source_product_id": manifest.get("source_product_id"),
+                    "crs": manifest.get("crs", "IAU2000:49900"),
                     "stride": stride,
                     "effective_cell_m": round(step_m_x, 3),
                     "passable_cells": passable_count,
+                    "known_cells": known_count,
+                    "excluded_cells": excluded_count,
+                    "unknown_cells": unknown_count,
+                    "radius_cells": radius_cells,
+                    "max_boundary_distance_m": max_boundary_dist_m,
                     "coverage_fraction": coverage_fraction,
+                    "unknown_regions_geojson": unknown_feature,
                 },
             }
+
+        passable_polys = [_cell_box(int(r), int(c)) for r, c in np.argwhere(visited)]
+        perimeter_geom = unary_union(passable_polys)
+
+        return {
+            "status": "EVALUATED_WITH_VALIDATED_DEM",
+            "dataset_id": dataset_id,
+            "native_resolution_m": round(dx_native, 3),
+            "coverage_fraction": coverage_fraction,
+            "geometry_geojson": {
+                "type": "Feature",
+                "properties": {
+                    "classification": PLANNING_BOUNDARY_LABEL,
+                    "dataset_id": dataset_id,
+                    "passable_cells": passable_count,
+                    "area_approx_m2": round(passable_count * step_m_x * step_m_y, 1),
+                    "effective_cell_m": round(step_m_x, 2),
+                },
+                "geometry": mapping(perimeter_geom),
+            },
+            "excluded_regions_geojson": excluded_feature,
+            "limitations": [
+                PLANNING_BOUNDARY_LABEL,
+                f"Sub-resolution hazards below {round(dx_native, 2)} m native DEM pixel spacing cannot be resolved.",
+                "Boundary reflects DEM slope and TRI roughness constraints only; regolith bearing strength and radiation are excluded.",
+            ],
+            "provenance": {
+                "method": ALGORITHM_ID,
+                "version": ALGORITHM_VERSION,
+                "dataset_id": dataset_id,
+                "source_product_id": manifest.get("source_product_id"),
+                "crs": manifest.get("crs", "IAU2000:49900"),
+                "stride": stride,
+                "effective_cell_m": round(step_m_x, 3),
+                "passable_cells": passable_count,
+                "known_cells": known_count,
+                "excluded_cells": excluded_count,
+                "unknown_cells": unknown_count,
+                "radius_cells": radius_cells,
+                "area_approx_m2": round(passable_count * step_m_x * step_m_y, 1),
+                "max_boundary_distance_m": max_boundary_dist_m,
+                "coverage_fraction": coverage_fraction,
+                "unknown_regions_geojson": unknown_feature,
+            },
+        }
 
     def _persist_perimeter_result(
         self,
@@ -815,6 +1223,7 @@ class LandingSiteService:
 
     @staticmethod
     def _row_to_perimeter(row: sqlite3.Row) -> LandingSitePerimeterResponse:
+        provenance = json.loads(row["provenance_json"] or "{}")
         return LandingSitePerimeterResponse(
             perimeter_id=row["perimeter_id"],
             mission_id=row["mission_id"],
@@ -828,10 +1237,11 @@ class LandingSiteService:
             coverage_fraction=float(row["coverage_fraction"]) if row["coverage_fraction"] is not None else None,
             geometry_geojson=json.loads(row["geometry_geojson"]) if row["geometry_geojson"] else None,
             excluded_regions_geojson=json.loads(row["excluded_regions_geojson"]) if row["excluded_regions_geojson"] else None,
+            unknown_regions_geojson=provenance.get("unknown_regions_geojson"),
             constraints_used=json.loads(row["constraints_used_json"] or "{}"),
             constraints_missing=json.loads(row["constraints_missing_json"] or "[]"),
             limitations=json.loads(row["limitations_json"] or "[]"),
-            provenance=json.loads(row["provenance_json"] or "{}"),
+            provenance=provenance,
             operator_approved=bool(row["operator_approved"]),
             approved_by=row["approved_by"],
             approved_at_utc=row["approved_at_utc"],

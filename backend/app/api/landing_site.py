@@ -18,6 +18,7 @@ from app.schemas.mission_collab import (
     ComputePerimeterRequest,
     GazetteerSiteRecord,
     LandingSiteBundleResponse,
+    LandingSiteCoverageDiscoveryResponse,
     RegisterLandingSiteRequest,
 )
 from app.services.container import landing_site_service
@@ -32,6 +33,19 @@ def search_mars_gazetteer(
 ) -> List[GazetteerSiteRecord]:
     _ = auth
     return landing_site_service.search_gazetteer(q)
+
+
+@router.get(
+    "/missions/landing-site/discover-coverage",
+    response_model=LandingSiteCoverageDiscoveryResponse,
+)
+def discover_landing_site_coverage(
+    lat: float = Query(..., ge=-90.0, le=90.0),
+    lon: float = Query(..., ge=-180.0, le=360.0),
+    auth: AuthContext = Depends(require_auth),
+) -> LandingSiteCoverageDiscoveryResponse:
+    _ = auth
+    return landing_site_service.discover_coverage(lat, lon)
 
 
 @router.get("/missions/{mission_id}/landing-site", response_model=LandingSiteBundleResponse)

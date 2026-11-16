@@ -197,7 +197,17 @@ function createMarscopeDemTerrainProvider(
   return customProvider;
 }
 
-export function MarsGlobeViewer() {
+export interface MarsGlobeViewerProps {
+  selectionMode?: boolean;
+  onSelectCoordinate?: (lat: number, lonEast: number) => void;
+  pendingMarker?: { lat: number; lonEast: number; label?: string } | null;
+}
+
+export function MarsGlobeViewer({
+  selectionMode = false,
+  onSelectCoordinate,
+  pendingMarker = null,
+}: MarsGlobeViewerProps = {}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewerRef = useRef<CesiumTypes.Viewer | null>(null);
   const cesiumRef = useRef<typeof CesiumTypes | null>(null);
@@ -206,9 +216,17 @@ export function MarsGlobeViewer() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const lastReportedRenderedRef = useRef<Record<string, boolean>>({});
   const reportedErrorRef = useRef<Record<string, string>>({});
+  const selectionModeRef = useRef(selectionMode);
+  const onSelectCoordinateRef = useRef(onSelectCoordinate);
+
+  useEffect(() => {
+    selectionModeRef.current = selectionMode;
+    onSelectCoordinateRef.current = onSelectCoordinate;
+  }, [selectionMode, onSelectCoordinate]);
 
   const [viewerReady, setViewerReady] = useState(false);
   const [viewerError, setViewerError] = useState<string | null>(null);
+  const [initNonce, setInitNonce] = useState(0);
   const [viewMode, setViewMode] = useState<SceneViewMode>("3D");
   const [cursorCoords, setCursorCoords] = useState<{ lat: number; lon: number } | null>(null);
   const [cameraTelemetry, setCameraTelemetry] = useState<{
@@ -220,6 +238,13 @@ export function MarsGlobeViewer() {
   const availableLayers = useLayerStore((s) => s.availableLayers);
   const layerStates = useLayerStore((s) => s.layerStates);
   const layerOrder = useLayerStore((s) => s.layerOrder);
+  const fetchLayers = useLayerStore((s) => s.fetchLayers);
+
+  useEffect(() => {
+    if (availableLayers.length === 0) {
+      void fetchLayers();
+    }
+  }, [availableLayers.length, fetchLayers]);
 
   const selectedDestination = useMissionStore((s) => s.selectedDestination);
   const localizationStatus = useMissionStore((s) => s.localizationStatus);
@@ -237,6 +262,7 @@ export function MarsGlobeViewer() {
     let destroyed = false;
     let handler: CesiumTypes.ScreenSpaceEventHandler | null = null;
     let removeCameraListener: (() => void) | null = null;
+    let resizeObserver: ResizeObserver | null = null;
     const terrainAbortController = new AbortController();
 
     async function initCesium() {
@@ -434,14 +460,20 @@ export function MarsGlobeViewer() {
           if (!pos) return;
           const carto = marsEllipsoid.cartesianToCartographic(pos);
           const lat = Number(Cesium.Math.toDegrees(carto.latitude).toFixed(6));
-          const lon = Number(Cesium.Math.toDegrees(carto.longitude).toFixed(6));
+          const lonRaw = Cesium.Math.toDegrees(carto.longitude);
+          const lonEast = Number((((lonRaw % 360) + 360) % 360).toFixed(6));
+
+          if (selectionModeRef.current && onSelectCoordinateRef.current) {
+            onSelectCoordinateRef.current(lat, lonEast);
+            return;
+          }
 
           if (abortControllerRef.current) {
             abortControllerRef.current.abort();
           }
           const controller = new AbortController();
           abortControllerRef.current = controller;
-          evaluateDestination(lat, lon, undefined, controller.signal);
+          evaluateDestination(lat, lonEast, undefined, controller.signal);
         }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
         const scc = viewer.scene.screenSpaceCameraController;
@@ -456,6 +488,16 @@ export function MarsGlobeViewer() {
         scc.enableTilt = true;
         scc.enableLook = true;
         viewer.scene.requestRender();
+
+        if (typeof ResizeObserver !== "undefined" && containerRef.current) {
+          resizeObserver = new ResizeObserver(() => {
+            if (!viewer.isDestroyed()) {
+              viewer.resize();
+              viewer.scene.requestRender();
+            }
+          });
+          resizeObserver.observe(containerRef.current);
+        }
 
         viewerRef.current = viewer;
         setViewerReady(true);
@@ -472,6 +514,7 @@ export function MarsGlobeViewer() {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
+      if (resizeObserver) resizeObserver.disconnect();
       if (removeCameraListener) removeCameraListener();
       if (handler && !handler.isDestroyed()) handler.destroy();
       if (viewerRef.current && !viewerRef.current.isDestroyed()) {
@@ -480,7 +523,42 @@ export function MarsGlobeViewer() {
       viewerRef.current = null;
       managedLayersRef.current = {};
     };
-  }, [evaluateDestination]);
+  }, [evaluateDestination, initNonce]);
+
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    const Cesium = cesiumRef.current;
+    const marsEllipsoid = ellipsoidRef.current;
+    if (!viewerReady || !viewer || viewer.isDestroyed() || !Cesium || !marsEllipsoid) return;
+    const existing = viewer.entities.getById("landing-site-pending-marker");
+    if (existing) viewer.entities.remove(existing);
+    if (pendingMarker) {
+      const lon180 = pendingMarker.lonEast > 180 ? pendingMarker.lonEast - 360 : pendingMarker.lonEast;
+      viewer.entities.add({
+        id: "landing-site-pending-marker",
+        position: marsEllipsoid.cartographicToCartesian(
+          Cesium.Cartographic.fromDegrees(lon180, pendingMarker.lat, 0)
+        ),
+        point: {
+          pixelSize: 13,
+          color: Cesium.Color.fromCssColorString("#38bdf8"),
+          outlineColor: Cesium.Color.WHITE,
+          outlineWidth: 2,
+          heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+        },
+        label: {
+          text: pendingMarker.label || `${pendingMarker.lat.toFixed(4)}, ${pendingMarker.lonEast.toFixed(4)} E`,
+          font: "11px monospace",
+          fillColor: Cesium.Color.WHITE,
+          backgroundColor: Cesium.Color.fromCssColorString("#0b0d13E6"),
+          showBackground: true,
+          pixelOffset: new Cesium.Cartesian2(0, -20),
+          heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+        },
+      });
+    }
+    viewer.scene.requestRender();
+  }, [viewerReady, pendingMarker]);
 
   // Sync dynamic backend imagery layers to Cesium Viewer
   useEffect(() => {
@@ -1221,24 +1299,42 @@ export function MarsGlobeViewer() {
       {/* No renderable layers warning */}
       {viewerReady && availableLayers.length === 0 && (
         <div className="absolute inset-0 pointer-events-none flex items-center justify-center p-6 z-10">
-          <div className="max-w-md bg-[#0b0d13]/90 border border-amber-500/40 rounded-xl p-5 text-center space-y-2 pointer-events-auto">
+          <div className="max-w-md bg-[#0b0d13]/90 border border-amber-500/40 rounded-xl p-5 text-center space-y-2.5 pointer-events-auto">
             <Layers className="w-7 h-7 text-amber-400 mx-auto" />
             <div className="text-sm font-semibold text-slate-100">
               No Verified Renderable Imagery Layers Active
             </div>
             <p className="text-xs text-slate-400 leading-relaxed">
-              The Mars ellipsoid globe is active (IAU2000:49900), but zero verified map layers have been enabled or processed yet. Verify remote NASA Mars Trek WMTS layers or process a local DEM in the layer drawer or Evidence page.
+              The Mars ellipsoid globe is active (IAU2000:49900), but zero verified map layers have been enabled or processed yet. Verify remote NASA Mars Trek WMTS layers or retry layer discovery.
             </p>
+            <button
+              type="button"
+              onClick={() => void fetchLayers()}
+              className="px-3 py-1.5 rounded-md bg-amber-500/20 border border-amber-500/40 text-xs font-medium text-amber-200 hover:bg-amber-500/30"
+            >
+              Retry Imagery Layers
+            </button>
           </div>
         </div>
       )}
 
       {viewerError && (
         <div className="absolute inset-0 flex items-center justify-center bg-[#0b0d13]/95 p-6 z-20">
-          <div className="max-w-md text-center space-y-2 border border-red-500/40 rounded-xl p-5 bg-[#121622]">
+          <div className="max-w-md text-center space-y-2.5 border border-red-500/40 rounded-xl p-5 bg-[#121622]">
             <Globe2 className="w-7 h-7 text-red-400 mx-auto" />
             <div className="text-sm font-bold text-red-300">WebGL Mars Globe Initialization Error</div>
             <p className="text-xs text-slate-400">{viewerError}</p>
+            <button
+              type="button"
+              onClick={() => {
+                setViewerError(null);
+                setViewerReady(false);
+                setInitNonce((n) => n + 1);
+              }}
+              className="px-3 py-1.5 rounded-md bg-red-500/20 border border-red-500/40 text-xs font-medium text-red-200 hover:bg-red-500/30"
+            >
+              Retry Globe Initialization
+            </button>
           </div>
         </div>
       )}
