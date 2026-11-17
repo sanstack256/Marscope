@@ -705,7 +705,10 @@ export default function LandingSitePage() {
               {viewMode === "local" ? (
                 <button
                   type="button"
-                  onClick={() => setViewMode("global")}
+                  onClick={() => {
+                    setFocusCoordinate(null);
+                    setViewMode("global");
+                  }}
                   className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-[var(--bg-void)] border border-[var(--border-strong)] text-[var(--text-primary)] hover:border-[var(--accent-telemetry)]"
                 >
                   <ArrowLeft className="w-3.5 h-3.5" />

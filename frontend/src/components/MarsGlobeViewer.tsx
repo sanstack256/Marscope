@@ -12,6 +12,8 @@ import {
   isDragGesture,
   MARS_GLOBE_CAMERA_LIMITS,
   normalizeLongitudeEast360,
+  sanitizeGlobePolygonRings,
+  toLongitude180,
   type ScreenPosition2D,
 } from "../lib/marsGlobeControls";
 import { useLayerStore } from "../stores/useLayerStore";
@@ -21,47 +23,6 @@ import { useRoutingStore } from "../stores/useRoutingStore";
 import { Compass, Globe2, Layers, Minus, Plus, RotateCcw, Crosshair, Route as RouteIcon } from "lucide-react";
 import { useSpatialStore } from "@/stores/useSpatialStore";
 import type { GeoJsonGeometry } from "@/types";
-
-function extractGlobeOuterRings(geom: GeoJsonGeometry | null | undefined): Array<Array<[number, number]>> {
-  if (!geom || !geom.coordinates) return [];
-  const toRing = (coords: unknown): Array<[number, number]> => {
-    if (!Array.isArray(coords)) return [];
-    const pts: Array<[number, number]> = [];
-    for (const c of coords) {
-      if (
-        Array.isArray(c) &&
-        c.length >= 2 &&
-        typeof c[0] === "number" &&
-        typeof c[1] === "number" &&
-        Number.isFinite(c[0]) &&
-        Number.isFinite(c[1])
-      ) {
-        const lon = c[0];
-        const lat = Math.max(-89.9999, Math.min(89.9999, c[1]));
-        const prev = pts[pts.length - 1];
-        if (!prev || Math.abs(prev[0] - lon) > 1e-7 || Math.abs(prev[1] - lat) > 1e-7) {
-          pts.push([lon, lat]);
-        }
-      }
-    }
-    return pts;
-  };
-  if (geom.type === "Polygon" && Array.isArray(geom.coordinates)) {
-    const outer = toRing((geom.coordinates as unknown[])[0]);
-    return outer.length >= 3 ? [outer] : [];
-  }
-  if (geom.type === "MultiPolygon" && Array.isArray(geom.coordinates)) {
-    const rings: Array<Array<[number, number]>> = [];
-    for (const poly of geom.coordinates as unknown[]) {
-      if (Array.isArray(poly)) {
-        const outer = toRing(poly[0]);
-        if (outer.length >= 3) rings.push(outer);
-      }
-    }
-    return rings;
-  }
-  return [];
-}
 
 type SceneViewMode = "3D" | "2.5D" | "2D";
 const GLOBAL_VIEW_CAMERA_HEIGHT_M = 9_000_000; // Initial UI framing distance; not a scientific parameter.
@@ -232,6 +193,12 @@ export function MarsGlobeViewer({
   const isDraggingRef = useRef(false);
   const dragStartPosRef = useRef<ScreenPosition2D | null>(null);
   const maxDragTravelPxRef = useRef(0);
+  const cameraGenerationRef = useRef(0);
+  const lastAppliedFocusRef = useRef<{ lat: number; lon: number; heightM?: number; label?: string } | null>(null);
+  const lastAppliedCandidateIdRef = useRef<string | null>(null);
+  const markerSourceRef = useRef<CesiumTypes.CustomDataSource | null>(null);
+  const routeSourceRef = useRef<CesiumTypes.CustomDataSource | null>(null);
+  const spatialSourceRef = useRef<CesiumTypes.CustomDataSource | null>(null);
 
   const [viewerReady, setViewerReady] = useState(false);
   const [viewerError, setViewerError] = useState<string | null>(null);
@@ -317,6 +284,7 @@ export function MarsGlobeViewer({
           terrainAbortController.signal
         );
 
+        containerRef.current.innerHTML = "";
         const viewer = new Cesium.Viewer(containerRef.current, {
           globe: new Cesium.Globe(marsEllipsoid),
           baseLayer: false,
@@ -425,6 +393,7 @@ export function MarsGlobeViewer({
           isDraggingRef.current = true;
           dragStartPosRef.current = { x: pos.x, y: pos.y };
           maxDragTravelPxRef.current = 0;
+          cameraGenerationRef.current += 1;
           viewer.camera.cancelFlight();
           canvas.style.cursor = "grabbing";
           viewer.scene.requestRender();
@@ -460,12 +429,14 @@ export function MarsGlobeViewer({
         handler.setInputAction(endDrag, Cesium.ScreenSpaceEventType.RIGHT_UP);
         handler.setInputAction(endDrag, Cesium.ScreenSpaceEventType.MIDDLE_UP);
         handler.setInputAction(() => {
+          cameraGenerationRef.current += 1;
           viewer.camera.cancelFlight();
           viewer.scene.requestRender();
         }, Cesium.ScreenSpaceEventType.WHEEL);
         handler.setInputAction(() => {
           isDraggingRef.current = true;
           maxDragTravelPxRef.current = 999;
+          cameraGenerationRef.current += 1;
           viewer.camera.cancelFlight();
           viewer.scene.requestRender();
         }, Cesium.ScreenSpaceEventType.PINCH_START);
@@ -604,6 +575,22 @@ export function MarsGlobeViewer({
           resizeObserver.observe(containerRef.current);
         }
 
+        const markerSource = new Cesium.CustomDataSource("marscope-markers");
+        const routeSource = new Cesium.CustomDataSource("marscope-route");
+        const spatialSource = new Cesium.CustomDataSource("marscope-spatial-overlays");
+        await Promise.all([
+          viewer.dataSources.add(markerSource),
+          viewer.dataSources.add(routeSource),
+          viewer.dataSources.add(spatialSource),
+        ]);
+        if (destroyed || viewer.isDestroyed()) {
+          if (!viewer.isDestroyed()) viewer.destroy();
+          return;
+        }
+        markerSourceRef.current = markerSource;
+        routeSourceRef.current = routeSource;
+        spatialSourceRef.current = spatialSource;
+
         viewerRef.current = viewer;
         setViewerReady(true);
       } catch (err) {
@@ -629,6 +616,9 @@ export function MarsGlobeViewer({
       if (viewerRef.current && !viewerRef.current.isDestroyed()) {
         viewerRef.current.destroy();
       }
+      markerSourceRef.current = null;
+      routeSourceRef.current = null;
+      spatialSourceRef.current = null;
       viewerRef.current = null;
       managedLayersRef.current = {};
     };
@@ -773,11 +763,8 @@ export function MarsGlobeViewer({
     const marsEllipsoid = ellipsoidRef.current;
     if (!viewerReady || !viewer || viewer.isDestroyed() || !Cesium || !marsEllipsoid) return;
 
-    let markerSource = viewer.dataSources.getByName("marscope-markers")[0];
-    if (!markerSource) {
-      markerSource = new Cesium.CustomDataSource("marscope-markers");
-      void viewer.dataSources.add(markerSource);
-    }
+    const markerSource = markerSourceRef.current;
+    if (!markerSource) return;
     const entities = markerSource.entities;
     const desired = new Set<string>();
 
@@ -886,20 +873,31 @@ export function MarsGlobeViewer({
     const Cesium = cesiumRef.current;
     const marsEllipsoid = ellipsoidRef.current;
     if (!viewerReady || !viewer || viewer.isDestroyed() || !Cesium || !marsEllipsoid || !selectedCandidateId) {
+      lastAppliedCandidateIdRef.current = selectedCandidateId ?? null;
+      return;
+    }
+    if (selectedCandidateId === lastAppliedCandidateIdRef.current || isDraggingRef.current) {
       return;
     }
     const cand = compositionCandidates.find((c) => c.candidate_id === selectedCandidateId);
     if (!cand) return;
-    const lon180 = cand.longitude_east > 180 ? cand.longitude_east - 360 : cand.longitude_east;
+    lastAppliedCandidateIdRef.current = selectedCandidateId;
+    const flightGen = cameraGenerationRef.current;
+    const lon180 = toLongitude180(cand.longitude_east);
     const camCarto = marsEllipsoid.cartesianToCartographic(viewer.camera.position);
     const targetH = camCarto?.height ?? GLOBAL_VIEW_CAMERA_HEIGHT_M;
-      viewer.camera.flyTo({
+    viewer.camera.cancelFlight();
+    viewer.camera.flyTo({
       destination: marsEllipsoid.cartographicToCartesian(
         Cesium.Cartographic.fromDegrees(lon180, cand.latitude, targetH)
       ),
       orientation: { heading: 0.0, pitch: -Cesium.Math.PI_OVER_TWO, roll: 0.0 },
       duration: 0.9,
-      complete: () => viewer.scene.requestRender(),
+      complete: () => {
+        if (cameraGenerationRef.current === flightGen && !viewer.isDestroyed()) {
+          viewer.scene.requestRender();
+        }
+      },
     });
   }, [viewerReady, selectedCandidateId, compositionCandidates]);
 
@@ -910,11 +908,8 @@ export function MarsGlobeViewer({
     const marsEllipsoid = ellipsoidRef.current;
     if (!viewerReady || !viewer || viewer.isDestroyed() || !Cesium || !marsEllipsoid) return;
 
-    let routeSource = viewer.dataSources.getByName("marscope-route")[0];
-    if (!routeSource) {
-      routeSource = new Cesium.CustomDataSource("marscope-route");
-      void viewer.dataSources.add(routeSource);
-    }
+    const routeSource = routeSourceRef.current;
+    if (!routeSource) return;
     const entities = routeSource.entities;
     entities.removeAll();
 
@@ -1056,9 +1051,15 @@ export function MarsGlobeViewer({
     const viewer = viewerRef.current;
     const Cesium = cesiumRef.current;
     const marsEllipsoid = ellipsoidRef.current;
-    if (!viewerReady || !viewer || viewer.isDestroyed() || !Cesium || !marsEllipsoid || !focusCoordinate) return;
-    if (isDraggingRef.current) return;
-    const lon180 = focusCoordinate.lon > 180 ? focusCoordinate.lon - 360 : focusCoordinate.lon;
+    if (!viewerReady || !viewer || viewer.isDestroyed() || !Cesium || !marsEllipsoid || !focusCoordinate) {
+      return;
+    }
+    if (selectionModeRef.current || isDraggingRef.current || focusCoordinate === lastAppliedFocusRef.current) {
+      return;
+    }
+    lastAppliedFocusRef.current = focusCoordinate;
+    const flightGen = cameraGenerationRef.current;
+    const lon180 = toLongitude180(focusCoordinate.lon);
     viewer.camera.cancelFlight();
     viewer.camera.flyTo({
       destination: marsEllipsoid.cartographicToCartesian(
@@ -1066,7 +1067,11 @@ export function MarsGlobeViewer({
       ),
       orientation: { heading: 0, pitch: Cesium.Math.toRadians(-48), roll: 0 },
       duration: 0.9,
-      complete: () => viewer.scene.requestRender(),
+      complete: () => {
+        if (cameraGenerationRef.current === flightGen && !viewer.isDestroyed()) {
+          viewer.scene.requestRender();
+        }
+      },
     });
   }, [viewerReady, focusCoordinate]);
 
@@ -1076,11 +1081,8 @@ export function MarsGlobeViewer({
     const marsEllipsoid = ellipsoidRef.current;
     if (!viewerReady || !viewer || viewer.isDestroyed() || !Cesium || !marsEllipsoid) return;
 
-    let spatialSource = viewer.dataSources.getByName("marscope-spatial-overlays")[0];
-    if (!spatialSource) {
-      spatialSource = new Cesium.CustomDataSource("marscope-spatial-overlays");
-      void viewer.dataSources.add(spatialSource);
-    }
+    const spatialSource = spatialSourceRef.current;
+    if (!spatialSource) return;
     const entities = spatialSource.entities;
     entities.removeAll();
     const toLon180 = (lonEast: number) => (lonEast > 180 ? lonEast - 360 : lonEast);
@@ -1132,9 +1134,9 @@ export function MarsGlobeViewer({
       const geomObj =
         perimGeom && "geometry" in perimGeom && perimGeom.geometry ? perimGeom.geometry : (perimGeom as GeoJsonGeometry | null);
       if (geomObj) {
-        const rings = extractGlobeOuterRings(geomObj);
+        const rings = sanitizeGlobePolygonRings(geomObj);
         rings.forEach((ring, rIdx) => {
-          const flat = ring.flatMap(([lon, lat]) => [toLon180(lon), lat]);
+          const flat = ring.flatMap(([lon, lat]) => [lon, lat]);
           if (flat.length < 6) return;
           entities.add({
             id: `mission:perimeter:${rIdx}`,
@@ -1143,7 +1145,7 @@ export function MarsGlobeViewer({
               material: Cesium.Color.fromCssColorString("#22B8CF").withAlpha(0.18),
               outline: true,
               outlineColor: Cesium.Color.fromCssColorString("#22B8CF"),
-              height: 20,
+              arcType: Cesium.ArcType.GEODESIC,
             },
           });
         });
@@ -1224,9 +1226,9 @@ export function MarsGlobeViewer({
 
     if (showFootprintsOverlay && intersectingFootprints.length > 0) {
       intersectingFootprints.slice(0, 12).forEach((fp) => {
-        const rings = extractGlobeOuterRings(fp.valid_data_geojson || fp.footprint_geojson);
+        const rings = sanitizeGlobePolygonRings(fp.valid_data_geojson || fp.footprint_geojson);
         rings.forEach((ring, rIdx) => {
-          const flat = ring.flatMap(([lon, lat]) => [toLon180(lon), lat]);
+          const flat = ring.flatMap(([lon, lat]) => [lon, lat]);
           if (flat.length < 6) return;
           const isApprox = fp.is_approximate;
           entities.add({
@@ -1236,7 +1238,7 @@ export function MarsGlobeViewer({
               material: Cesium.Color.fromCssColorString(isApprox ? "#64748b" : "#22d3ee").withAlpha(0.08),
               outline: true,
               outlineColor: Cesium.Color.fromCssColorString(isApprox ? "#94a3b8" : "#22d3ee"),
-              height: 10,
+              arcType: Cesium.ArcType.GEODESIC,
             },
           });
         });
@@ -1245,9 +1247,9 @@ export function MarsGlobeViewer({
 
     if (showGapsOverlay && coverageReport?.evidence_gaps?.length) {
       coverageReport.evidence_gaps.slice(0, 12).forEach((gap) => {
-        const rings = extractGlobeOuterRings(gap.geometry_geojson);
+        const rings = sanitizeGlobePolygonRings(gap.geometry_geojson);
         rings.forEach((ring, rIdx) => {
-          const flat = ring.flatMap(([lon, lat]) => [toLon180(lon), lat]);
+          const flat = ring.flatMap(([lon, lat]) => [lon, lat]);
           if (flat.length < 6) return;
           entities.add({
             id: rIdx === 0 ? `gap:${gap.gap_id}` : `gap:${gap.gap_id}:${rIdx}`,
@@ -1256,7 +1258,7 @@ export function MarsGlobeViewer({
               material: Cesium.Color.fromCssColorString("#f59e0b").withAlpha(0.14),
               outline: true,
               outlineColor: Cesium.Color.fromCssColorString("#fb7185"),
-              height: 15,
+              arcType: Cesium.ArcType.GEODESIC,
             },
           });
         });

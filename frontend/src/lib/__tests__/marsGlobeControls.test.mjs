@@ -10,6 +10,8 @@ import {
   MARS_GLOBE_CAMERA_LIMITS,
   MARS_GLOBE_CONTROLLER_CONFIG,
   normalizeLongitudeEast360,
+  sanitizeGlobePolygonRings,
+  toLongitude180,
 } from "../marsGlobeControls.ts";
 
 test("Shared Mars Globe Controls & Interaction Helpers", async (t) => {
@@ -68,5 +70,56 @@ test("Shared Mars Globe Controls & Interaction Helpers", async (t) => {
     assert.equal(fakeController.enableLook, false);
     assert.equal(fakeController.minimumZoomDistance, MARS_GLOBE_CAMERA_LIMITS.minZoomDistanceM);
     assert.equal(fakeController.maximumZoomDistance, MARS_GLOBE_CAMERA_LIMITS.maxZoomDistanceM);
+  });
+
+  await t.test("sanitizes globe polygons and rejects global >=350-degree or antimeridian-wrapping chords", () => {
+    assert.equal(toLongitude180(360), 180);
+    assert.equal(toLongitude180(181), -179);
+
+    // Regional Gale Crater polygon is preserved cleanly in [-180, 180]
+    const regional = sanitizeGlobePolygonRings({
+      type: "Polygon",
+      coordinates: [
+        [
+          [137.35, -4.92],
+          [137.47, -4.92],
+          [137.47, -4.68],
+          [137.35, -4.68],
+          [137.35, -4.92],
+        ],
+      ],
+    });
+    assert.equal(regional.length, 1);
+    assert.equal(regional[0].length, 5);
+
+    // Global 0..360 MOLA polygon is rejected so it cannot draw a giant chord off the globe
+    const globalBox = sanitizeGlobePolygonRings({
+      type: "Polygon",
+      coordinates: [
+        [
+          [0, -90],
+          [360, -90],
+          [360, 90],
+          [0, 90],
+          [0, -90],
+        ],
+      ],
+    });
+    assert.equal(globalBox.length, 0);
+
+    // Antimeridian jump > 180 deg between adjacent vertices is rejected
+    const antimeridianJump = sanitizeGlobePolygonRings({
+      type: "Polygon",
+      coordinates: [
+        [
+          [179, -5],
+          [181, -5],
+          [181, -4],
+          [179, -4],
+          [179, -5],
+        ],
+      ],
+    });
+    assert.equal(antimeridianJump.length, 0);
   });
 });
