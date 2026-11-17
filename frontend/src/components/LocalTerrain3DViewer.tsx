@@ -2005,6 +2005,35 @@ export function LocalTerrain3DViewer({
         const geom = new THREE.BufferGeometry().setFromPoints(pts);
         const mat = new THREE.LineBasicMaterial({ color: colorHex, transparent: true, opacity: 0.95 });
         overlayGroup.add(new THREE.Line(geom, mat));
+
+        // Translucent vertical 3D boundary ribbon so 1px WebGL lines remain clearly visible
+        const ribbonPos = new Float32Array((pts.length - 1) * 6 * 3);
+        const ribbonHeight = 14;
+        let ptr = 0;
+        for (let i = 0; i < pts.length - 1; i += 1) {
+          const a = pts[i];
+          const b = pts[i + 1];
+          const aTop = a.y + ribbonHeight;
+          const bTop = b.y + ribbonHeight;
+          ribbonPos[ptr++] = a.x; ribbonPos[ptr++] = a.y; ribbonPos[ptr++] = a.z;
+          ribbonPos[ptr++] = b.x; ribbonPos[ptr++] = b.y; ribbonPos[ptr++] = b.z;
+          ribbonPos[ptr++] = b.x; ribbonPos[ptr++] = bTop; ribbonPos[ptr++] = b.z;
+          ribbonPos[ptr++] = a.x; ribbonPos[ptr++] = a.y; ribbonPos[ptr++] = a.z;
+          ribbonPos[ptr++] = b.x; ribbonPos[ptr++] = bTop; ribbonPos[ptr++] = b.z;
+          ribbonPos[ptr++] = a.x; ribbonPos[ptr++] = aTop; ribbonPos[ptr++] = a.z;
+        }
+        if (ptr > 0) {
+          const ribbonGeom = new THREE.BufferGeometry();
+          ribbonGeom.setAttribute("position", new THREE.BufferAttribute(ribbonPos, 3));
+          const ribbonMat = new THREE.MeshBasicMaterial({
+            color: colorHex,
+            side: THREE.DoubleSide,
+            transparent: true,
+            opacity: 0.28,
+            depthWrite: false,
+          });
+          overlayGroup.add(new THREE.Mesh(ribbonGeom, ribbonMat));
+        }
       });
     };
 

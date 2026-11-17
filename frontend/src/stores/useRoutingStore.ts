@@ -79,8 +79,14 @@ interface RoutingStoreState {
 
   // Actions
   fetchAvailableTargets: () => Promise<void>;
-  fetchMeshManifest: (datasetId?: string) => Promise<void>;
-  setSelectedDemDatasetId: (datasetId: string) => void;
+  fetchMeshManifest: (
+    datasetId?: string,
+    bounds?: { min_lat: number; max_lat: number; min_lon: number; max_lon: number }
+  ) => Promise<void>;
+  setSelectedDemDatasetId: (
+    datasetId: string,
+    bounds?: { min_lat: number; max_lat: number; min_lon: number; max_lon: number }
+  ) => void;
   setActiveLod: (lod: number) => void;
   setActiveOverlayMode: (overlay: TextureOverlayMode) => void;
   setVerticalExaggeration: (exag: number) => void;
@@ -210,11 +216,20 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
     }
   },
 
-  fetchMeshManifest: async (datasetId) => {
+  fetchMeshManifest: async (datasetId, bounds) => {
     const ds = datasetId || get().selectedDemDatasetId;
     set({ manifestLoading: true, manifestError: null });
     try {
-      const qs = ds ? `?dataset_id=${encodeURIComponent(ds)}` : "";
+      const params = new URLSearchParams();
+      if (ds) params.set("dataset_id", ds);
+      if (bounds) {
+        params.set("min_lat", String(bounds.min_lat));
+        params.set("max_lat", String(bounds.max_lat));
+        params.set("min_lon", String(bounds.min_lon));
+        params.set("max_lon", String(bounds.max_lon));
+      }
+      const qsStr = params.toString();
+      const qs = qsStr ? `?${qsStr}` : "";
       const res = await fetch(`${API_BASE_URL}/terrain/mesh/manifest${qs}`, { cache: "no-store" });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -235,12 +250,12 @@ export const useRoutingStore = create<RoutingStoreState>((set, get) => ({
     }
   },
 
-  setSelectedDemDatasetId: (datasetId) => {
+  setSelectedDemDatasetId: (datasetId, bounds) => {
     set((s) => ({
       selectedDemDatasetId: datasetId,
       ..._markStaleIfPresent(s, `DEM switched to ${datasetId}`),
     }));
-    void get().fetchMeshManifest(datasetId);
+    void get().fetchMeshManifest(datasetId, bounds);
   },
 
   setActiveLod: (lod) => set({ activeLod: Math.max(0, Math.min(2, lod)) }),

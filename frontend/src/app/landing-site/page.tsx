@@ -38,7 +38,6 @@ export default function LandingSitePage() {
     refreshMissionWorkspace,
   } = useAuthMissionStore();
   const setSelectedDemDatasetId = useRoutingStore((s) => s.setSelectedDemDatasetId);
-  const fetchMeshManifest = useRoutingStore((s) => s.fetchMeshManifest);
   const meshManifest = useRoutingStore((s) => s.meshManifest);
   const setFocusCoordinate = useSpatialStore((s) => s.setFocusCoordinate);
 
@@ -194,17 +193,31 @@ export default function LandingSitePage() {
     }
   };
 
+  const computeLocalDemBounds = (lat: number, lonEast: number, radiusM?: number) => {
+    const halfExtentM = Math.max((radiusM && Number.isFinite(radiusM) ? radiusM : 250) * 2.4, 500);
+    const marsRadiusM = 3396190;
+    const dLat = (halfExtentM / marsRadiusM) * (180 / Math.PI);
+    const cosLat = Math.max(0.15, Math.abs(Math.cos((lat * Math.PI) / 180)));
+    const dLon = dLat / cosLat;
+    return {
+      min_lat: Math.max(-89.9, lat - dLat),
+      max_lat: Math.min(89.9, lat + dLat),
+      min_lon: lonEast - dLon,
+      max_lon: lonEast + dLon,
+    };
+  };
+
   const transitionToLocalDem = (
     datasetId: string,
     lat: number,
     lonEast: number,
-    label: string
+    label: string,
+    radiusM?: number
   ) => {
     setTerrainReady(false);
     setTerrainLoadError(null);
     setFocusCoordinate({ lat, lon: lonEast, label });
-    setSelectedDemDatasetId(datasetId);
-    void fetchMeshManifest(datasetId);
+    setSelectedDemDatasetId(datasetId, computeLocalDemBounds(lat, lonEast, radiusM));
     setViewMode("local");
   };
 
@@ -290,6 +303,17 @@ export default function LandingSitePage() {
       await refreshMissionWorkspace(activeMissionId);
       const pStatus = body?.perimeter?.status;
       if (pStatus === "EVALUATED_WITH_VALIDATED_DEM") {
+        const evalSite = body?.landing_site ?? site;
+        const evalDataset = body?.perimeter?.terrain_dataset_id || evalSite?.terrain_dataset_id;
+        if (evalSite && evalDataset) {
+          transitionToLocalDem(
+            evalDataset,
+            evalSite.latitude,
+            evalSite.longitude_east,
+            evalSite.name,
+            Number(maxRadiusM) || undefined
+          );
+        }
         setStatusMsg(
           "Algorithmic DEM-grid BFS perimeter evaluated. Review the boundary, excluded zones, and scientific limitations."
         );
@@ -753,7 +777,7 @@ export default function LandingSitePage() {
             </div>
           )}
 
-          <div className="flex-1 min-h-[560px] relative">
+          <div className="h-[600px] xl:h-[660px] w-full relative">
             {viewMode === "global" ? (
               <MarsGlobeViewer
                 selectionMode
